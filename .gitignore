@@ -1,3 +1,5 @@
 awg-server
 dist/
 .DS_Store
+.idea
+.context
