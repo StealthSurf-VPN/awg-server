@@ -79,11 +79,26 @@ journalctl -u awg-server -f
 - `iptables`, `iproute2` (usually already present)
 - `net.ipv4.ip_forward=1` sysctl enabled
 
+## CLI Commands
+
+```bash
+# Check current version
+awg-server version
+
+# Self-update to latest GitHub release
+awg-server update
+
+# Start the server (default, no arguments)
+awg-server
+```
+
+After `awg-server update`, restart the service: `systemctl restart awg-server`.
+
 ## Build
 
 ```bash
-# Build for current platform
-make build
+# Build for current platform (with version)
+make build VERSION=1.0.0
 
 # Build for all platforms (linux, darwin, windows × amd64, arm64)
 make build-all

@@ -323,10 +323,16 @@ func uint32ToIP(n uint32) net.IP {
 }
 
 func (m *Manager) ServerPrivateKey() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	return m.data.ServerPrivateKey
 }
 
 func (m *Manager) SetServerPrivateKey(key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.data.ServerPrivateKey = key
 	return m.storage.Save(m.data)
 }

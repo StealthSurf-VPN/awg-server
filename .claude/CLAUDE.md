@@ -23,12 +23,19 @@ HTTP API (Bearer auth) → Client Manager (CRUD, IP alloc, keygen)
 - `internal/awg/` — Interface pool, AWG params, Curve25519 keygen, awg CLI helpers
 - `internal/clients/` — Client CRUD, IP allocation, JSON persistence
 - `internal/api/` — HTTP server, Bearer auth middleware, 5 API handlers
-- `main.go` — Entry point: config → pool → manager → HTTP → graceful shutdown
+- `internal/update/` — Self-update from GitHub Releases
+- `main.go` — Entry point: CLI commands (version, update) → config → pool → manager → HTTP → graceful shutdown
+
+## CLI Commands
+
+- `awg-server` — start the server
+- `awg-server version` — print version and exit
+- `awg-server update` — self-update from latest GitHub release
 
 ## Development
 
 ```bash
-go build -o awg-server .  # Build binary
+make build VERSION=1.0.0   # Build with version
 go vet ./...               # Static analysis
 ```
 

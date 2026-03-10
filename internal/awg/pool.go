@@ -131,8 +131,10 @@ func (p *Pool) Close() {
 	p.usedPorts = make(map[int]bool)
 
 	if p.masqAdded {
-		exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING",
-			"-s", p.cfg.Network().String(), "-o", p.outIface, "-j", "MASQUERADE").Run()
+		if err := exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING",
+			"-s", p.cfg.Network().String(), "-o", p.outIface, "-j", "MASQUERADE").Run(); err != nil {
+			log.Printf("warning: failed to remove MASQUERADE rule: %v", err)
+		}
 	}
 }
 

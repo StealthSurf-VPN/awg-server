@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -12,9 +13,26 @@ import (
 	"github.com/stealthsurf-vpn/awg-server/internal/awg"
 	"github.com/stealthsurf-vpn/awg-server/internal/clients"
 	"github.com/stealthsurf-vpn/awg-server/internal/config"
+	"github.com/stealthsurf-vpn/awg-server/internal/update"
 )
 
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version":
+			fmt.Printf("awg-server %s\n", version)
+			return
+		case "update":
+			runUpdate()
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nusage: awg-server [version|update]\n", os.Args[1])
+			os.Exit(1)
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("load config: %v", err)
@@ -107,4 +125,26 @@ func main() {
 	pool.Close()
 
 	log.Println("shutdown complete")
+}
+
+func runUpdate() {
+	u := update.New(version)
+
+	result, err := u.Check()
+	if err != nil {
+		log.Fatalf("check for updates: %v", err)
+	}
+
+	if !result.NeedsUpdate {
+		fmt.Printf("already up to date (%s)\n", result.Latest)
+		return
+	}
+
+	fmt.Printf("updating %s -> %s...\n", version, result.Latest)
+
+	if err := u.Apply(result.DownloadURL); err != nil {
+		log.Fatalf("apply update: %v", err)
+	}
+
+	fmt.Printf("updated to %s, restart the service to apply\n", result.Latest)
 }

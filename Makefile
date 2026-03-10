@@ -9,7 +9,8 @@ PLATFORMS := \
 	windows/amd64 \
 	windows/arm64
 
-LDFLAGS := -s -w
+VERSION ?= dev
+LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .PHONY: build build-all clean vet
 

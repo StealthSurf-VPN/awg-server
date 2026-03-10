@@ -27,19 +27,23 @@ type clientResponse struct {
 	AWGParams *awg.AWGParams `json:"awg_params,omitempty"`
 }
 
+func toResponse(c clients.ClientData) clientResponse {
+	return clientResponse{
+		ID:        c.ID,
+		Name:      c.Name,
+		Address:   c.Address,
+		CreatedAt: c.CreatedAt,
+		AWGParams: c.AWGParams,
+	}
+}
+
 func (s *Server) handleListClients(w http.ResponseWriter, r *http.Request) {
 	cls := s.manager.ListClients()
 
 	result := make([]clientResponse, 0, len(cls))
 
 	for _, c := range cls {
-		result = append(result, clientResponse{
-			ID:        c.ID,
-			Name:      c.Name,
-			Address:   c.Address,
-			CreatedAt: c.CreatedAt,
-			AWGParams: c.AWGParams,
-		})
+		result = append(result, toResponse(c))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -47,6 +51,8 @@ func (s *Server) handleListClients(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	var req createClientRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -68,15 +74,17 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("create client error: %v", err)
 
-		status := http.StatusInternalServerError
-		if errors.Is(err, clients.ErrClientExists) {
+		var status int
+
+		switch {
+		case errors.Is(err, clients.ErrClientExists):
 			status = http.StatusConflict
-		}
-		if errors.Is(err, awg.ErrMaxInterfacesReached) {
+		case errors.Is(err, awg.ErrPortInUse):
+			status = http.StatusConflict
+		case errors.Is(err, awg.ErrMaxInterfacesReached):
 			status = http.StatusServiceUnavailable
-		}
-		if errors.Is(err, awg.ErrPortInUse) {
-			status = http.StatusConflict
+		default:
+			status = http.StatusInternalServerError
 		}
 
 		writeError(w, err, status)
@@ -85,16 +93,12 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(clientResponse{
-		ID:        client.ID,
-		Name:      client.Name,
-		Address:   client.Address,
-		CreatedAt: client.CreatedAt,
-		AWGParams: client.AWGParams,
-	})
+	json.NewEncoder(w).Encode(toResponse(*client))
 }
 
 func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	id := r.PathValue("id")
 
 	var req updateClientRequest
@@ -108,15 +112,17 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("update client error: %v", err)
 
-		status := http.StatusInternalServerError
-		if errors.Is(err, clients.ErrClientNotFound) {
+		var status int
+
+		switch {
+		case errors.Is(err, clients.ErrClientNotFound):
 			status = http.StatusNotFound
-		}
-		if errors.Is(err, awg.ErrMaxInterfacesReached) {
-			status = http.StatusServiceUnavailable
-		}
-		if errors.Is(err, awg.ErrPortInUse) {
+		case errors.Is(err, awg.ErrPortInUse):
 			status = http.StatusConflict
+		case errors.Is(err, awg.ErrMaxInterfacesReached):
+			status = http.StatusServiceUnavailable
+		default:
+			status = http.StatusInternalServerError
 		}
 
 		writeError(w, err, status)
@@ -124,13 +130,7 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(clientResponse{
-		ID:        client.ID,
-		Name:      client.Name,
-		Address:   client.Address,
-		CreatedAt: client.CreatedAt,
-		AWGParams: client.AWGParams,
-	})
+	json.NewEncoder(w).Encode(toResponse(*client))
 }
 
 func (s *Server) handleGetConfiguration(w http.ResponseWriter, r *http.Request) {
