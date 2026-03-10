@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/stealthsurf-vpn/awg-server/internal/awg"
 )
 
 type ClientData struct {
@@ -12,8 +14,9 @@ type ClientData struct {
 	Name       string `json:"name"`
 	PrivateKey string `json:"private_key"`
 	PublicKey  string `json:"public_key"`
-	Address    string `json:"address"`
-	CreatedAt  string `json:"created_at"`
+	Address    string         `json:"address"`
+	CreatedAt  string         `json:"created_at"`
+	AWGParams  *awg.AWGParams `json:"awg_params,omitempty"`
 }
 
 type StorageData struct {

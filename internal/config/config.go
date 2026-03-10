@@ -35,6 +35,8 @@ type Config struct {
 	I3 string
 	I4 string
 	I5 string
+
+	MaxInterfaces int
 }
 
 func Load() (*Config, error) {
@@ -66,6 +68,8 @@ func Load() (*Config, error) {
 		I3: os.Getenv("AWG_I3"),
 		I4: os.Getenv("AWG_I4"),
 		I5: os.Getenv("AWG_I5"),
+
+		MaxInterfaces: envInt("AWG_MAX_INTERFACES", 0),
 	}
 
 	if cfg.APIToken == "" {

@@ -146,7 +146,10 @@ AWG_H1=12345
 AWG_H2=23456
 AWG_H3=34567
 AWG_H4=45678
+AWG_MAX_INTERFACES=0
 ```
+
+These AWG_* obfuscation params are **defaults** for clients that don't specify custom `awg_params` via the API.
 
 Enable and start:
 
@@ -165,7 +168,7 @@ Open WireGuard UDP port, restrict HTTP API to internal network:
 ### iptables
 
 ```bash
-iptables -A INPUT -p udp --dport 51820 -j ACCEPT
+iptables -A INPUT -p udp --dport 51820:51840 -j ACCEPT  # range for multiple AWG interfaces
 iptables -A INPUT -p tcp --dport 7777 -s 10.0.0.0/8 -j ACCEPT
 iptables -A INPUT -p tcp --dport 7777 -j DROP
 ```
@@ -173,7 +176,7 @@ iptables -A INPUT -p tcp --dport 7777 -j DROP
 ### ufw (Ubuntu)
 
 ```bash
-ufw allow 51820/udp
+ufw allow 51820:51840/udp  # range for multiple AWG interfaces
 ufw allow from 10.0.0.0/8 to any port 7777
 ```
 

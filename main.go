@@ -51,14 +51,33 @@ func main() {
 		log.Println("generated new server private key")
 	}
 
-	dev, err := awg.NewDevice(cfg, privateKey)
-	if err != nil {
-		log.Fatalf("create AWG device: %v", err)
+	defaultParams := awg.AWGParams{
+		Jc:   cfg.Jc,
+		Jmin: cfg.Jmin,
+		Jmax: cfg.Jmax,
+		S1:   cfg.S1,
+		S2:   cfg.S2,
+		S3:   cfg.S3,
+		S4:   cfg.S4,
+		H1:   cfg.H1,
+		H2:   cfg.H2,
+		H3:   cfg.H3,
+		H4:   cfg.H4,
+		I1:   cfg.I1,
+		I2:   cfg.I2,
+		I3:   cfg.I3,
+		I4:   cfg.I4,
+		I5:   cfg.I5,
 	}
 
-	mgr, err := clients.NewManager(dev, storage, cfg)
+	pool, err := awg.NewPool(cfg, privateKey, cfg.MaxInterfaces)
 	if err != nil {
-		dev.Close()
+		log.Fatalf("create AWG pool: %v", err)
+	}
+
+	mgr, err := clients.NewManager(pool, storage, cfg, defaultParams, data)
+	if err != nil {
+		pool.Close()
 		log.Fatalf("create client manager: %v", err)
 	}
 
@@ -85,7 +104,7 @@ func main() {
 		log.Printf("HTTP server shutdown error: %v", err)
 	}
 
-	dev.Close()
+	pool.Close()
 
 	log.Println("shutdown complete")
 }

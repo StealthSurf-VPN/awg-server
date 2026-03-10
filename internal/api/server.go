@@ -26,9 +26,11 @@ func NewServer(manager *clients.Manager, cfg *config.Config) *Server {
 
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /api/clients", s.authMiddleware(s.handleListClients))
 	mux.HandleFunc("POST /api/clients", s.authMiddleware(s.handleCreateClient))
 	mux.HandleFunc("GET /api/clients/{id}/configuration", s.authMiddleware(s.handleGetConfiguration))
+	mux.HandleFunc("PATCH /api/clients/{id}", s.authMiddleware(s.handleUpdateClient))
 	mux.HandleFunc("DELETE /api/clients/{id}", s.authMiddleware(s.handleDeleteClient))
 
 	s.httpServer = &http.Server{
@@ -49,6 +51,11 @@ func (s *Server) Start() error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok"}`))
 }
 
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {

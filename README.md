@@ -2,6 +2,8 @@
 
 HTTP API server for managing **AmneziaWG 2.0** VPN clients. Uses the **AmneziaWG kernel module** on the host with the `awg` CLI tool — kernel-level performance with DPI obfuscation via CPS (Custom Protocol Signature).
 
+Supports **per-client obfuscation profiles** — each unique set of CPS parameters gets its own AWG interface, created on demand.
+
 ## Quick Install (Linux)
 
 One-liner that installs AmneziaWG, downloads the latest `awg-server` binary, and gets you ready to run:
@@ -117,11 +119,23 @@ All endpoints require `Authorization: Bearer <AWG_API_TOKEN>`.
 # List clients
 curl http://localhost:7777/api/clients -H "Authorization: Bearer $TOKEN"
 
-# Create client
+# Create client (default obfuscation params from env)
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"my-client-uuid"}'
+
+# Create client with custom obfuscation params and port
+curl -X POST http://localhost:7777/api/clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-client-uuid","awg_params":{"port":51825,"jc":5,"jmin":50,"jmax":1000,"s1":15,"h1":12345}}'
+
+# Update client obfuscation params
+curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"awg_params":{"port":51825,"jc":10,"jmin":100,"jmax":2000}}'
 
 # Get client config (.conf)
 curl http://localhost:7777/api/clients/my-client-uuid/configuration \
@@ -141,13 +155,16 @@ Environment variables:
 | `AWG_API_TOKEN` | yes | — | Bearer token for API auth |
 | `AWG_ADDRESS` | yes | — | Server VPN address (CIDR), e.g. `10.0.0.1/24` |
 | `AWG_ENDPOINT` | yes | — | Public IP/hostname for client configs |
-| `AWG_LISTEN_PORT` | no | `51820` | WireGuard UDP port |
+| `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned interfaces use +1, +2, ...; can be overridden per-client via `port` in `awg_params`) |
 | `AWG_HTTP_PORT` | no | `7777` | HTTP API port |
 | `AWG_MTU` | no | `1420` | MTU value |
 | `AWG_DNS` | no | `1.1.1.1` | DNS for client configs |
 | `AWG_DATA_DIR` | no | `/data` | Persistence directory |
+| `AWG_MAX_INTERFACES` | no | `0` | Max AWG interfaces (0 = unlimited) |
 
-### AmneziaWG Obfuscation
+### Default AmneziaWG Obfuscation
+
+These env vars set **default** CPS parameters for clients that don't specify custom ones:
 
 | Variable | Description |
 | -------- | ----------- |
@@ -157,10 +174,18 @@ Environment variables:
 | `AWG_H1` - `AWG_H4` | Packet headers (init, response, underload, transport) |
 | `AWG_I1` - `AWG_I5` | CPS signature packets (AmneziaWG 2.0), e.g. `<b 0xc000000001><r 1200>` |
 
-## Architecture
+## Multi-Interface Architecture
+
+AmneziaWG sets CPS obfuscation parameters at the **interface level**, not per-peer. To support per-client custom parameters, the server manages a **pool of interfaces**:
+
+- Each unique set of CPS parameters gets its own `awgN` interface (awg0, awg1, awg2, ...)
+- Clients with identical CPS parameters share an interface
+- Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned as base port + index)
+- Interfaces are created on demand and destroyed when their last peer is removed
+- All interfaces share the same server private key
 
 ```text
-main.go → config → awg (device, keygen) → clients (manager, storage) → api (server, handlers)
+main.go → config → awg (pool, params, keygen) → clients (manager, storage) → api (server, handlers)
 ```
 
 - **Kernel module** — `amneziawg-linux-kernel-module` on host, `awg` CLI for management
