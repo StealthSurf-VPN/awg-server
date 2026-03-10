@@ -211,7 +211,7 @@ func (p *Pool) resolvePort(requested int) (int, error) {
 		return requested, nil
 	}
 
-	port := p.cfg.ListenPort + p.nextIndex
+	port := p.cfg.ListenPort
 
 	for p.usedPorts[port] && port <= 65535 {
 		port++
