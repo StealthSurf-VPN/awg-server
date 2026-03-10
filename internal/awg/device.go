@@ -6,11 +6,6 @@ import (
 	"strings"
 )
 
-type PeerInfo struct {
-	PublicKey string
-	AllowedIP string
-}
-
 func createInterface(ifName string) error {
 	output, err := exec.Command("ip", "link", "add", ifName, "type", "amneziawg").CombinedOutput()
 	if err != nil {
@@ -105,28 +100,3 @@ func detectDefaultInterface() (string, error) {
 	return "", fmt.Errorf("no default route found")
 }
 
-func parseDump(output string) []PeerInfo {
-	var peers []PeerInfo
-
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-
-	for i, line := range lines {
-		if i == 0 {
-			continue
-		}
-
-		fields := strings.Split(line, "\t")
-		if len(fields) < 4 {
-			continue
-		}
-
-		peer := PeerInfo{
-			PublicKey: fields[0],
-			AllowedIP: strings.TrimSuffix(fields[3], "/32"),
-		}
-
-		peers = append(peers, peer)
-	}
-
-	return peers
-}

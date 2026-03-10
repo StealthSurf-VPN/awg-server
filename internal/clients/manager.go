@@ -117,7 +117,8 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams) (*ClientData,
 		log.Printf("warning: failed to save storage: %v", err)
 	}
 
-	return client, nil
+	cp := *client
+	return &cp, nil
 }
 
 func (m *Manager) UpdateClient(id string, params *awg.AWGParams) (*ClientData, error) {
@@ -132,7 +133,9 @@ func (m *Manager) UpdateClient(id string, params *awg.AWGParams) (*ClientData, e
 	oldParams := m.effectiveParams(client.AWGParams)
 	newParams := m.effectiveParams(params)
 
-	if oldParams.Key() != newParams.Key() {
+	needsMigration := oldParams.Key() != newParams.Key() || oldParams.Port != newParams.Port
+
+	if needsMigration {
 		pubKey, err := awg.Base64ToKey(client.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("decode public key: %w", err)
@@ -160,7 +163,8 @@ func (m *Manager) UpdateClient(id string, params *awg.AWGParams) (*ClientData, e
 		log.Printf("warning: failed to save storage: %v", err)
 	}
 
-	return client, nil
+	cp := *client
+	return &cp, nil
 }
 
 func (m *Manager) ListClients() []ClientData {
@@ -185,7 +189,8 @@ func (m *Manager) GetClient(id string) (*ClientData, error) {
 		return nil, ErrClientNotFound
 	}
 
-	return client, nil
+	cp := *client
+	return &cp, nil
 }
 
 func (m *Manager) DeleteClient(id string) error {

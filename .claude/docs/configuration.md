@@ -19,6 +19,7 @@ All configuration is done via environment variables.
 | `AWG_MTU` | `1420` | MTU for client configs |
 | `AWG_DNS` | `1.1.1.1` | DNS server for client configs |
 | `AWG_DATA_DIR` | `/data` | Directory for clients.json persistence |
+| `AWG_INTERFACE` | auto-detect | Override outbound network interface for MASQUERADE (default: auto-detected from default route) |
 | `AWG_MAX_INTERFACES` | `0` | Maximum number of AWG interfaces. 0 = unlimited. Returns 503 when exceeded. |
 
 ## Default AmneziaWG Obfuscation Parameters

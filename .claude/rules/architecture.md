@@ -51,7 +51,8 @@ Dependency flow is one-directional. Never import `api` from `clients` or `awg`.
 ## HTTP API
 
 - Standard `net/http` ServeMux (Go 1.22+ method routing)
-- Bearer token middleware on all routes
+- Bearer token middleware on all routes (except `/health`)
+- `GET /health` — unauthenticated health check for monitoring
 - JSON responses for structured data, plain text for .conf files
 - Status codes: 200 (list/get/update), 201 (create), 204 (delete), 400 (bad request), 401 (auth), 404 (not found), 409 (conflict/port in use), 503 (max interfaces)
 

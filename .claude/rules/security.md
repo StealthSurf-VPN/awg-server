@@ -23,10 +23,11 @@
 
 ## Input Validation
 
-- Client name validated for emptiness
+- Client name validated for emptiness and length (max 256 chars)
 - Duplicate client names rejected (409 Conflict)
 - CIDR address validated at config load
-- Bearer token checked before any handler execution
+- Bearer token checked before any handler execution (`/health` excluded)
+- Internal server errors (500) return generic message, details logged server-side only
 - `awg_params` deserialized from JSON with Go's type safety
 - Port uniqueness validated (409 Conflict if already in use)
 - Interface limit enforced via `AWG_MAX_INTERFACES` (503 when exceeded)

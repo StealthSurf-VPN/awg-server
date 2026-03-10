@@ -2,7 +2,21 @@
 
 Base URL: `http://<server_ip>:<AWG_HTTP_PORT>`
 
-All endpoints require header: `Authorization: Bearer <AWG_API_TOKEN>`
+All endpoints require header: `Authorization: Bearer <AWG_API_TOKEN>` (except `/health`).
+
+## Health Check
+
+```http
+GET /health
+```
+
+No authentication required.
+
+**Response** `200 OK`:
+
+```json
+{"status": "ok"}
+```
 
 ## List Clients
 
@@ -18,6 +32,7 @@ GET /api/clients
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "name": "550e8400-e29b-41d4-a716-446655440000",
     "address": "10.0.0.2",
+    "created_at": "2026-01-01T00:00:00Z",
     "awg_params": {
       "jc": 5,
       "jmin": 50,
@@ -70,6 +85,7 @@ If `awg_params` is omitted, the client uses default parameters from server env v
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "550e8400-e29b-41d4-a716-446655440000",
   "address": "10.0.0.2",
+  "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
     "jc": 5,
     "jmin": 50,
@@ -80,7 +96,7 @@ If `awg_params` is omitted, the client uses default parameters from server env v
 
 **Errors:**
 
-- `400` — missing or invalid `name`
+- `400` — missing or invalid `name`, or name too long (max 256 chars)
 - `409` — client with this name already exists, or requested port is already in use
 - `503` — maximum number of interfaces reached
 
@@ -108,6 +124,7 @@ Updates the client's obfuscation parameters. If the new parameters differ from t
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "550e8400-e29b-41d4-a716-446655440000",
   "address": "10.0.0.2",
+  "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
     "jc": 10,
     "jmin": 100,
@@ -186,6 +203,7 @@ All fields are optional. Parameters with value `0` (or empty string for I1-I5) a
 | `h1` - `h4` | uint32 | Packet headers (init, response, underload, transport) |
 | `i1` - `i5` | string | CPS signature packets (AmneziaWG 2.0) |
 
-## Authentication Errors
+## Error Handling
 
 - `401 Unauthorized` — missing or invalid `Authorization: Bearer` header
+- `500 Internal Server Error` — returns generic `{"error": "internal server error"}` (details logged server-side only)

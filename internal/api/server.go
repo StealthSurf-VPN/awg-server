@@ -63,14 +63,14 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		authHeader := r.Header.Get("Authorization")
 
 		if authHeader == "" {
-			http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
+			jsonError(w, "missing authorization header", http.StatusUnauthorized)
 			return
 		}
 
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 
 		if token == authHeader || token != s.config.APIToken {
-			http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+			jsonError(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
 

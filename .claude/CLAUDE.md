@@ -34,10 +34,11 @@ go vet ./...               # Static analysis
 
 ## API Endpoints
 
-All require `Authorization: Bearer <AWG_API_TOKEN>`.
+All require `Authorization: Bearer <AWG_API_TOKEN>` except `/health`.
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
+| GET | `/health` | Health check (no auth) |
 | GET | `/api/clients` | List all clients |
 | POST | `/api/clients` | Create client `{"name":"uuid","awg_params":{...}}` |
 | PATCH | `/api/clients/{id}` | Update client `{"awg_params":{...}}` |
@@ -48,7 +49,7 @@ All require `Authorization: Bearer <AWG_API_TOKEN>`.
 
 **Required:** `AWG_API_TOKEN`, `AWG_ADDRESS` (CIDR), `AWG_ENDPOINT` (public IP)
 
-**Optional:** `AWG_LISTEN_PORT` (51820), `AWG_HTTP_PORT` (7777), `AWG_MTU` (1420), `AWG_DNS` (1.1.1.1), `AWG_DATA_DIR` (/data), `AWG_MAX_INTERFACES` (0 = unlimited)
+**Optional:** `AWG_LISTEN_PORT` (51820), `AWG_HTTP_PORT` (7777), `AWG_MTU` (1420), `AWG_DNS` (1.1.1.1), `AWG_DATA_DIR` (/data), `AWG_INTERFACE` (auto-detect), `AWG_MAX_INTERFACES` (0 = unlimited)
 
 **Default AmneziaWG params (from env):** `AWG_JC`, `AWG_JMIN`, `AWG_JMAX`, `AWG_S1`-`AWG_S4`, `AWG_H1`-`AWG_H4`, `AWG_I1`-`AWG_I5`
 

@@ -28,7 +28,7 @@ Supports **per-client obfuscation profiles** via a multi-interface pool — each
 | `internal/clients/storage.go` | JSON file persistence (atomic write) |
 | `internal/clients/manager.go` | Client CRUD, IP allocation, .conf generation |
 | `internal/api/server.go` | HTTP server, Bearer auth middleware |
-| `internal/api/handlers.go` | 5 API handlers (list, create, update, config, delete) |
+| `internal/api/handlers.go` | 5 API handlers (list, create, update, config, delete) + health |
 
 ### Dependency Flow
 
@@ -57,6 +57,7 @@ go vet ./...               # Must pass
 
 This server runs on VPN servers. The NestJS backend calls the API via:
 
+- `GET /health` — health check (no auth, for monitoring)
 - `GET /api/clients` — list (for orphan cleanup in `ended-configs-cleaner`)
 - `POST /api/clients` — create (when user requests AmneziaWG config, optionally with custom `awg_params`)
 - `PATCH /api/clients/{id}` — update (change obfuscation profile)

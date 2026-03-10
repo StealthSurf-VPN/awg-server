@@ -3,7 +3,6 @@ package awg
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 
 	"golang.org/x/crypto/curve25519"
@@ -53,23 +52,3 @@ func Base64ToKey(s string) ([32]byte, error) {
 	return key, nil
 }
 
-func KeyToHex(key [32]byte) string {
-	return hex.EncodeToString(key[:])
-}
-
-func HexToKey(s string) ([32]byte, error) {
-	var key [32]byte
-
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		return key, fmt.Errorf("decode hex key: %w", err)
-	}
-
-	if len(b) != 32 {
-		return key, fmt.Errorf("invalid key length: %d", len(b))
-	}
-
-	copy(key[:], b)
-
-	return key, nil
-}

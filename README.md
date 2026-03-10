@@ -116,6 +116,9 @@ AWG_H1=12345 AWG_H2=23456 AWG_H3=34567 AWG_H4=45678 \
 All endpoints require `Authorization: Bearer <AWG_API_TOKEN>`.
 
 ```bash
+# Health check (no auth)
+curl http://localhost:7777/health
+
 # List clients
 curl http://localhost:7777/api/clients -H "Authorization: Bearer $TOKEN"
 
@@ -160,6 +163,7 @@ Environment variables:
 | `AWG_MTU` | no | `1420` | MTU value |
 | `AWG_DNS` | no | `1.1.1.1` | DNS for client configs |
 | `AWG_DATA_DIR` | no | `/data` | Persistence directory |
+| `AWG_INTERFACE` | no | auto-detect | Override outbound network interface for NAT |
 | `AWG_MAX_INTERFACES` | no | `0` | Max AWG interfaces (0 = unlimited) |
 
 ### Default AmneziaWG Obfuscation
