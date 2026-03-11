@@ -49,7 +49,7 @@ Clients can override these defaults by providing `awg_params` in the create/upda
 When clients have different CPS parameters, the server creates separate AWG interfaces:
 
 - Each unique parameter set gets its own `awgN` interface (awg0, awg1, ...)
-- Each interface listens on the explicit `port` from `awg_params`, or auto-assigned as `AWG_LISTEN_PORT + N`
+- Each interface listens on the explicit `port` from `awg_params`, or auto-assigned sequentially from `AWG_LISTEN_PORT`
 - Interfaces are created on demand and destroyed when empty
 - `AWG_MAX_INTERFACES` limits the total number of interfaces
 
@@ -65,7 +65,6 @@ Client data is stored in `{AWG_DATA_DIR}/clients.json`:
   "clients": [
     {
       "id": "uuid",
-      "name": "uuid",
       "private_key": "<base64>",
       "public_key": "<base64>",
       "address": "10.0.0.2",

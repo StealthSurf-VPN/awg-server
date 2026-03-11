@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.2] - 2026-03-11
 
 - Added atomic peer migration (`MigratePeer`) — safely change CPS profile while keeping the same port when client is the last peer on an interface
-- Removed redundant `name` field from API responses and storage; POST body `name` is used directly as client `id`
+- Renamed `name` to `id` in POST request body; removed `name` from API responses and storage
 - Fixed client CPS profile update failing with "port already in use" when requesting the same port on a different profile
 - Fixed port-only change on shared interface silently deleting peer; now returns 409 Conflict (`ErrPortShared`)
 
@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added per-client obfuscation profiles — each unique CPS parameter set gets its own AWG interface
 - Added `GET /health` endpoint for monitoring (no auth required)
 - Added CLI self-update from GitHub Releases (`awg-server update`)
-- Added input validation hardening: request body size limits, client name length check
+- Added input validation hardening: request body size limits, client ID length check
 - Added port uniqueness validation (409 Conflict) and interface limit enforcement (503)
 - Cleaned up dead code and unused files
 

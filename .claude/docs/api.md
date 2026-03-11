@@ -30,7 +30,6 @@ GET /api/clients
 [
   {
     "id": "550e8400-e29b-41d4-a716-446655440000",
-    "name": "550e8400-e29b-41d4-a716-446655440000",
     "address": "10.0.0.2",
     "created_at": "2026-01-01T00:00:00Z",
     "awg_params": {
@@ -50,7 +49,7 @@ Returns empty array `[]` if no clients. The `awg_params` field is omitted for cl
 POST /api/clients
 Content-Type: application/json
 
-{"name": "550e8400-e29b-41d4-a716-446655440000"}
+{"id": "550e8400-e29b-41d4-a716-446655440000"}
 ```
 
 With custom obfuscation parameters and port:
@@ -60,7 +59,7 @@ POST /api/clients
 Content-Type: application/json
 
 {
-  "name": "550e8400-e29b-41d4-a716-446655440000",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
   "awg_params": {
     "port": 51825,
     "jc": 5,
@@ -83,7 +82,6 @@ If `awg_params` is omitted, the client uses default parameters from server env v
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
-  "name": "550e8400-e29b-41d4-a716-446655440000",
   "address": "10.0.0.2",
   "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
@@ -96,8 +94,8 @@ If `awg_params` is omitted, the client uses default parameters from server env v
 
 **Errors:**
 
-- `400` — missing or invalid `name`, or name too long (max 256 chars)
-- `409` — client with this name already exists, or requested port is already in use
+- `400` — missing or invalid `id`, or id too long (max 256 chars)
+- `409` — client with this id already exists, or requested port is already in use
 - `503` — maximum number of interfaces reached
 
 ## Update Client
@@ -122,7 +120,6 @@ Updates the client's obfuscation parameters. If the new parameters differ from t
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
-  "name": "550e8400-e29b-41d4-a716-446655440000",
   "address": "10.0.0.2",
   "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
@@ -137,7 +134,7 @@ Updates the client's obfuscation parameters. If the new parameters differ from t
 
 - `400` — invalid request body
 - `404` — client not found
-- `409` — requested port is already in use
+- `409` — requested port is already in use, or port change on shared interface
 - `503` — maximum number of interfaces reached
 
 ## Get Client Configuration
@@ -169,7 +166,7 @@ AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 ```
 
-The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned as base port + index).
+The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
 
 **Errors:**
 

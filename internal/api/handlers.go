@@ -11,7 +11,7 @@ import (
 )
 
 type createClientRequest struct {
-	Name      string         `json:"name"`
+	ID        string         `json:"id"`
 	AWGParams *awg.AWGParams `json:"awg_params,omitempty"`
 }
 
@@ -58,17 +58,17 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name == "" {
-		jsonError(w, "name is required", http.StatusBadRequest)
+	if req.ID == "" {
+		jsonError(w, "id is required", http.StatusBadRequest)
 		return
 	}
 
-	if len(req.Name) > 256 {
-		jsonError(w, "name is too long (max 256 chars)", http.StatusBadRequest)
+	if len(req.ID) > 256 {
+		jsonError(w, "id is too long (max 256 chars)", http.StatusBadRequest)
 		return
 	}
 
-	client, err := s.manager.CreateClient(req.Name, req.AWGParams)
+	client, err := s.manager.CreateClient(req.ID, req.AWGParams)
 	if err != nil {
 		log.Printf("create client error: %v", err)
 

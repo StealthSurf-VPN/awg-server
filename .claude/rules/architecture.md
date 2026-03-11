@@ -40,7 +40,7 @@ Dependency flow is one-directional. Never import `api` from `clients` or `awg`.
 - `CLIArgs()` — args for `awg set` (CPS params only)
 - `ConfigLines()` — lines for client `.conf` `[Interface]` section (CPS params only)
 - Per-client: stored as `*AWGParams` in `ClientData` (nil = use server defaults)
-- `ClientData` has `ID` (no separate `Name` field — POST body `name` becomes `id`)
+- `ClientData` has `ID` (no separate `Name` field; POST body uses `id` directly)
 
 ## Persistence
 

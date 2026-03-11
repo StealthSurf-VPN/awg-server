@@ -47,7 +47,7 @@ All require `Authorization: Bearer <AWG_API_TOKEN>` except `/health`.
 | ------ | ---- | ----------- |
 | GET | `/health` | Health check (no auth) |
 | GET | `/api/clients` | List all clients |
-| POST | `/api/clients` | Create client `{"name":"uuid","awg_params":{...}}` (`name` becomes `id`) |
+| POST | `/api/clients` | Create client `{"id":"uuid","awg_params":{...}}` |
 | PATCH | `/api/clients/{id}` | Update client `{"awg_params":{...}}` (atomic migration via `MigratePeer`) |
 | GET | `/api/clients/{id}/configuration` | Get .conf file |
 | DELETE | `/api/clients/{id}` | Delete client |

@@ -23,7 +23,7 @@
 
 ## Input Validation
 
-- Client ID (passed as `name` in POST body) validated for emptiness and length (max 256 chars)
+- Client ID (`id` in POST body) validated for emptiness and length (max 256 chars)
 - Duplicate client IDs rejected (409 Conflict)
 - CIDR address validated at config load
 - Bearer token checked before any handler execution (`/health` excluded)
