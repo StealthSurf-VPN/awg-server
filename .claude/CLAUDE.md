@@ -22,7 +22,7 @@ HTTP API (Bearer auth) → Client Manager (CRUD, IP alloc, keygen)
 - `internal/config/` — Environment-based configuration parsing
 - `internal/awg/` — Interface pool, AWG params, Curve25519 keygen, awg CLI helpers
 - `internal/clients/` — Client CRUD, IP allocation, JSON persistence
-- `internal/api/` — HTTP server, Bearer auth middleware, 5 API handlers
+- `internal/api/` — HTTP server, Bearer auth middleware, 6 handlers (5 CRUD + health)
 - `internal/update/` — Self-update from GitHub Releases
 - `main.go` — Entry point: CLI commands (version, update) → config → pool → manager → HTTP → graceful shutdown
 
@@ -47,8 +47,8 @@ All require `Authorization: Bearer <AWG_API_TOKEN>` except `/health`.
 | ------ | ---- | ----------- |
 | GET | `/health` | Health check (no auth) |
 | GET | `/api/clients` | List all clients |
-| POST | `/api/clients` | Create client `{"name":"uuid","awg_params":{...}}` |
-| PATCH | `/api/clients/{id}` | Update client `{"awg_params":{...}}` |
+| POST | `/api/clients` | Create client `{"name":"uuid","awg_params":{...}}` (`name` becomes `id`) |
+| PATCH | `/api/clients/{id}` | Update client `{"awg_params":{...}}` (atomic migration via `MigratePeer`) |
 | GET | `/api/clients/{id}/configuration` | Get .conf file |
 | DELETE | `/api/clients/{id}` | Delete client |
 
@@ -66,7 +66,8 @@ Clients can override defaults via `awg_params` in API requests.
 
 - **Multi-interface pool**: each unique CPS profile = separate awg interface (awg0, awg1, ...)
 - Interfaces created on demand, destroyed when last peer is removed
-- Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned as base port + index)
+- Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from `AWG_LISTEN_PORT`)
+- **Atomic peer migration**: `MigratePeer` handles CPS profile changes — if client is last peer on old interface, removes first (freeing port), then creates new interface; otherwise adds to new first, then removes from old; port-only change on shared interface rejected (409); best-effort rollback on failure
 - All interfaces share the same server private key
 - Kernel module approach: `amneziawg-linux-kernel-module` on host, `awg` CLI on host
 - Deployed as static binary, no Docker needed

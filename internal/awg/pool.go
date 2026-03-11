@@ -12,6 +12,7 @@ import (
 
 var ErrMaxInterfacesReached = errors.New("maximum number of interfaces reached")
 var ErrPortInUse = errors.New("port already in use by another interface")
+var ErrPortShared = errors.New("cannot change port on interface shared by multiple peers")
 
 type iface struct {
 	ifName    string
@@ -99,6 +100,103 @@ func (p *Pool) RemovePeer(params AWGParams, publicKey [32]byte) error {
 	}
 
 	return nil
+}
+
+func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, allowedIP string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	oldKey := oldParams.Key()
+	newKey := newParams.Key()
+
+	oldIfc, ok := p.ifaces[oldKey]
+	if !ok {
+		return fmt.Errorf("no interface for params key %s", oldKey)
+	}
+
+	// Port is per-interface; can't change port when other peers share the interface
+	if oldKey == newKey && oldIfc.peerCount > 1 {
+		return ErrPortShared
+	}
+
+	// Last peer on old interface: remove first to free the port
+	if oldIfc.peerCount <= 1 {
+		if err := removePeerFromInterface(oldIfc.ifName, publicKey); err != nil {
+			return fmt.Errorf("remove peer from old interface: %w", err)
+		}
+
+		log.Printf("destroying interface %s (no peers left)", oldIfc.ifName)
+		destroyInterface(oldIfc.ifName)
+		delete(p.usedPorts, oldIfc.port)
+		delete(p.ifaces, oldKey)
+
+		newIfc, err := p.getOrCreateInterface(newParams)
+		if err != nil {
+			p.rollbackPeer(oldParams, publicKey, allowedIP)
+			return fmt.Errorf("get or create interface: %w", err)
+		}
+
+		if err := addPeerToInterface(newIfc.ifName, publicKey, allowedIP); err != nil {
+			if newIfc.peerCount == 0 {
+				destroyInterface(newIfc.ifName)
+				delete(p.usedPorts, newIfc.port)
+				delete(p.ifaces, newKey)
+			}
+			p.rollbackPeer(oldParams, publicKey, allowedIP)
+			return fmt.Errorf("add peer to new interface: %w", err)
+		}
+
+		newIfc.peerCount++
+		return nil
+	}
+
+	// Multiple peers on old interface: add to new first, then remove from old
+	newIfc, err := p.getOrCreateInterface(newParams)
+	if err != nil {
+		return fmt.Errorf("get or create interface: %w", err)
+	}
+
+	if err := addPeerToInterface(newIfc.ifName, publicKey, allowedIP); err != nil {
+		if newIfc.peerCount == 0 {
+			destroyInterface(newIfc.ifName)
+			delete(p.usedPorts, newIfc.port)
+			delete(p.ifaces, newKey)
+		}
+		return err
+	}
+
+	newIfc.peerCount++
+
+	if err := removePeerFromInterface(oldIfc.ifName, publicKey); err != nil {
+		log.Printf("error: failed to remove peer from old interface (ghost peer until restart): %v", err)
+		return nil
+	}
+
+	oldIfc.peerCount--
+
+	if oldIfc.peerCount <= 0 {
+		log.Printf("destroying interface %s (no peers left)", oldIfc.ifName)
+		destroyInterface(oldIfc.ifName)
+		delete(p.usedPorts, oldIfc.port)
+		delete(p.ifaces, oldKey)
+	}
+
+	return nil
+}
+
+func (p *Pool) rollbackPeer(params AWGParams, publicKey [32]byte, allowedIP string) {
+	ifc, err := p.getOrCreateInterface(params)
+	if err != nil {
+		log.Printf("warning: rollback failed, could not recreate interface: %v", err)
+		return
+	}
+
+	if err := addPeerToInterface(ifc.ifName, publicKey, allowedIP); err != nil {
+		log.Printf("warning: rollback failed, could not re-add peer: %v", err)
+		return
+	}
+
+	ifc.peerCount++
 }
 
 func (p *Pool) PortForParams(params AWGParams) (int, error) {

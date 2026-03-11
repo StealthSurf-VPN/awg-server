@@ -99,7 +99,6 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams) (*ClientData,
 
 	client := &ClientData{
 		ID:         name,
-		Name:       name,
 		PrivateKey: awg.KeyToBase64(privKey),
 		PublicKey:  awg.KeyToBase64(pubKey),
 		Address:    ip,
@@ -141,12 +140,8 @@ func (m *Manager) UpdateClient(id string, params *awg.AWGParams) (*ClientData, e
 			return nil, fmt.Errorf("decode public key: %w", err)
 		}
 
-		if err := m.pool.AddPeer(newParams, pubKey, client.Address); err != nil {
-			return nil, fmt.Errorf("add peer to new interface: %w", err)
-		}
-
-		if err := m.pool.RemovePeer(oldParams, pubKey); err != nil {
-			log.Printf("warning: failed to remove peer from old interface: %v", err)
+		if err := m.pool.MigratePeer(oldParams, newParams, pubKey, client.Address); err != nil {
+			return nil, fmt.Errorf("migrate peer: %w", err)
 		}
 	}
 

@@ -17,9 +17,10 @@ Dependency flow is one-directional. Never import `api` from `clients` or `awg`.
 - AmneziaWG 2.0 CPS parameters are set at the **interface level**, not per-peer
 - The `Pool` manages multiple interfaces, one per unique CPS parameter set
 - Interface names: `awg0`, `awg1`, `awg2`, ... (sequential)
-- Ports: explicit `port` from `AWGParams`, or auto-assigned as `AWG_LISTEN_PORT + index`
+- Ports: explicit `port` from `AWGParams`, or auto-assigned sequentially from `AWG_LISTEN_PORT` (first available)
 - Interfaces created on demand via `ip link add awgN type amneziawg`
 - Interfaces destroyed when their last peer is removed
+- **Peer migration** (`Pool.MigratePeer`): when client changes CPS profile, if it's the last peer on old interface — remove first to free port, then create new interface (allows reusing same port); if other peers exist — add to new first, then remove from old; port-only change on shared interface rejected (`ErrPortShared`, 409); rollback on failure via `rollbackPeer`
 - All interfaces share the same server private key
 - `AWG_MAX_INTERFACES` limits total interfaces (0 = unlimited)
 
@@ -34,11 +35,12 @@ Dependency flow is one-directional. Never import `api` from `clients` or `awg`.
 ## AWGParams
 
 - Defined in `internal/awg/params.go`
-- `Port` — optional UDP listen port for the interface (not part of CPS, not in Key/CLIArgs/ConfigLines)
+- `Port` — optional UDP listen port for the interface (not part of CPS, not in Key/CLIArgs/ConfigLines); validated range 1024-65535
 - `Key()` — deterministic string for CPS profile grouping (excludes port)
 - `CLIArgs()` — args for `awg set` (CPS params only)
 - `ConfigLines()` — lines for client `.conf` `[Interface]` section (CPS params only)
 - Per-client: stored as `*AWGParams` in `ClientData` (nil = use server defaults)
+- `ClientData` has `ID` (no separate `Name` field — POST body `name` becomes `id`)
 
 ## Persistence
 
@@ -54,7 +56,7 @@ Dependency flow is one-directional. Never import `api` from `clients` or `awg`.
 - Bearer token middleware on all routes (except `/health`)
 - `GET /health` — unauthenticated health check for monitoring
 - JSON responses for structured data, plain text for .conf files
-- Status codes: 200 (list/get/update), 201 (create), 204 (delete), 400 (bad request), 401 (auth), 404 (not found), 409 (conflict/port in use), 503 (max interfaces)
+- Status codes: 200 (list/get/update), 201 (create), 204 (delete), 400 (bad request), 401 (auth), 404 (not found), 409 (conflict/port in use/port shared), 503 (max interfaces)
 
 ## Deployment
 

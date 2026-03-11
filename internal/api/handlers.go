@@ -21,7 +21,6 @@ type updateClientRequest struct {
 
 type clientResponse struct {
 	ID        string         `json:"id"`
-	Name      string         `json:"name"`
 	Address   string         `json:"address"`
 	CreatedAt string         `json:"created_at"`
 	AWGParams *awg.AWGParams `json:"awg_params,omitempty"`
@@ -30,7 +29,6 @@ type clientResponse struct {
 func toResponse(c clients.ClientData) clientResponse {
 	return clientResponse{
 		ID:        c.ID,
-		Name:      c.Name,
 		Address:   c.Address,
 		CreatedAt: c.CreatedAt,
 		AWGParams: c.AWGParams,
@@ -118,6 +116,8 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, clients.ErrClientNotFound):
 			status = http.StatusNotFound
 		case errors.Is(err, awg.ErrPortInUse):
+			status = http.StatusConflict
+		case errors.Is(err, awg.ErrPortShared):
 			status = http.StatusConflict
 		case errors.Is(err, awg.ErrMaxInterfacesReached):
 			status = http.StatusServiceUnavailable
