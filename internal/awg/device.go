@@ -65,10 +65,16 @@ func addPeerToInterface(ifName string, publicKey [32]byte, allowedIP string) err
 		return fmt.Errorf("awg set peer: %s: %w", string(output), err)
 	}
 
+	if output, err := exec.Command(
+		"ip", "route", "replace", allowedIP+"/32", "dev", ifName,
+	).CombinedOutput(); err != nil {
+		return fmt.Errorf("add peer route: %s: %w", string(output), err)
+	}
+
 	return nil
 }
 
-func removePeerFromInterface(ifName string, publicKey [32]byte) error {
+func removePeerFromInterface(ifName string, publicKey [32]byte, allowedIP string) error {
 	pubKeyB64 := KeyToBase64(publicKey)
 
 	output, err := exec.Command(
@@ -79,6 +85,8 @@ func removePeerFromInterface(ifName string, publicKey [32]byte) error {
 	if err != nil {
 		return fmt.Errorf("awg remove peer: %s: %w", string(output), err)
 	}
+
+	exec.Command("ip", "route", "del", allowedIP+"/32", "dev", ifName).Run()
 
 	return nil
 }

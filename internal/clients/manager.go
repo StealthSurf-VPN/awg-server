@@ -204,7 +204,7 @@ func (m *Manager) DeleteClient(id string) error {
 
 	params := m.effectiveParams(client.AWGParams)
 
-	if err := m.pool.RemovePeer(params, pubKey); err != nil {
+	if err := m.pool.RemovePeer(params, pubKey, client.Address); err != nil {
 		return fmt.Errorf("remove peer from device: %w", err)
 	}
 

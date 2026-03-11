@@ -75,7 +75,7 @@ func (p *Pool) AddPeer(params AWGParams, publicKey [32]byte, allowedIP string) e
 	return nil
 }
 
-func (p *Pool) RemovePeer(params AWGParams, publicKey [32]byte) error {
+func (p *Pool) RemovePeer(params AWGParams, publicKey [32]byte, allowedIP string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -86,7 +86,7 @@ func (p *Pool) RemovePeer(params AWGParams, publicKey [32]byte) error {
 		return fmt.Errorf("no interface for params key %s", key)
 	}
 
-	if err := removePeerFromInterface(ifc.ifName, publicKey); err != nil {
+	if err := removePeerFromInterface(ifc.ifName, publicKey, allowedIP); err != nil {
 		return err
 	}
 
@@ -121,7 +121,7 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, a
 
 	// Last peer on old interface: remove first to free the port
 	if oldIfc.peerCount <= 1 {
-		if err := removePeerFromInterface(oldIfc.ifName, publicKey); err != nil {
+		if err := removePeerFromInterface(oldIfc.ifName, publicKey, allowedIP); err != nil {
 			return fmt.Errorf("remove peer from old interface: %w", err)
 		}
 
@@ -167,7 +167,7 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, a
 
 	newIfc.peerCount++
 
-	if err := removePeerFromInterface(oldIfc.ifName, publicKey); err != nil {
+	if err := removePeerFromInterface(oldIfc.ifName, publicKey, allowedIP); err != nil {
 		log.Printf("error: failed to remove peer from old interface (ghost peer until restart): %v", err)
 		return nil
 	}
