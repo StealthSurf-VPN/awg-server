@@ -88,7 +88,7 @@ func (u *Updater) Check() (*CheckResult, error) {
 }
 
 func (u *Updater) Apply(downloadURL string) error {
-	if !strings.HasPrefix(downloadURL, expectedURLPrefix) {
+	if !strings.HasPrefix(strings.ToLower(downloadURL), strings.ToLower(expectedURLPrefix)) {
 		return fmt.Errorf("untrusted download URL: %s", downloadURL)
 	}
 
