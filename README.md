@@ -141,13 +141,13 @@ curl http://localhost:7777/api/clients -H "Authorization: Bearer $TOKEN"
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"my-client-uuid"}'
+  -d '{"id":"my-client-uuid"}'
 
 # Create client with custom obfuscation params and port
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"my-client-uuid","awg_params":{"port":51825,"jc":5,"jmin":50,"jmax":1000,"s1":15,"h1":12345}}'
+  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"jc":5,"jmin":50,"jmax":1000,"s1":15,"h1":12345}}'
 
 # Update client obfuscation params
 curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
@@ -173,7 +173,7 @@ Environment variables:
 | `AWG_API_TOKEN` | yes | — | Bearer token for API auth |
 | `AWG_ADDRESS` | yes | — | Server VPN address (CIDR), e.g. `10.0.0.1/24` |
 | `AWG_ENDPOINT` | yes | — | Public IP/hostname for client configs |
-| `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned interfaces use +1, +2, ...; can be overridden per-client via `port` in `awg_params`) |
+| `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned sequentially; can be overridden per-client via `port` in `awg_params`) |
 | `AWG_HTTP_PORT` | no | `7777` | HTTP API port |
 | `AWG_MTU` | no | `1420` | MTU value |
 | `AWG_DNS` | no | `1.1.1.1` | DNS for client configs |
@@ -181,17 +181,53 @@ Environment variables:
 | `AWG_INTERFACE` | no | auto-detect | Override outbound network interface for NAT |
 | `AWG_MAX_INTERFACES` | no | `0` | Max AWG interfaces (0 = unlimited) |
 
-### Default AmneziaWG Obfuscation
+### Obfuscation Parameters
 
-These env vars set **default** CPS parameters for clients that don't specify custom ones:
+These env vars set **default** CPS parameters for clients that don't specify custom `awg_params`:
 
-| Variable | Description |
-| -------- | ----------- |
-| `AWG_JC` | Junk packet count |
-| `AWG_JMIN` / `AWG_JMAX` | Junk packet size range |
-| `AWG_S1` - `AWG_S4` | Packet padding (init, response, underload, transport) |
-| `AWG_H1` - `AWG_H4` | Packet headers (init, response, underload, transport) |
-| `AWG_I1` - `AWG_I5` | CPS signature packets (AmneziaWG 2.0), e.g. `<b 0xc000000001><r 1200>` |
+| Variable | What it does | Impact |
+| -------- | ------------ | ------ |
+| `AWG_JC` | Junk packets sent during handshake (noise for DPI) | More = harder to detect, slightly slower connect. **0** = off, **3-8** = good. No effect after connect. |
+| `AWG_JMIN` / `AWG_JMAX` | Size range for junk packets (bytes) | Wider range = harder to fingerprint. **50-100 / 500-1000** = good. |
+| `AWG_S1` | Extra bytes added to init handshake packet | Standard WireGuard init = 148 bytes, DPI looks for this. **15-150** = good. Only at connect time. |
+| `AWG_S2` | Extra bytes added to response handshake packet | Standard response = 92 bytes. **15-150** = good. Only at connect time. |
+| `AWG_S3` / `AWG_S4` | Extra bytes for cookie / data packets | `S4` adds overhead to **every** packet — use only if DPI blocks by data packet size. **0** = recommended. |
+| `AWG_H1`-`AWG_H4` | Replace WireGuard message type headers with random values | **Best protection for free.** Changes 4 bytes in headers, zero performance impact. Random uint32 values. |
+| `AWG_I1`-`AWG_I5` | CPS signature packets (AmneziaWG 2.0) | Sent before handshake to mimic another protocol. Advanced feature for aggressive DPI. |
+
+### Obfuscation Profiles
+
+> **Rule of thumb:** `h1-h4` are free (zero overhead). `jc/s1/s2` only affect connection time. `s4` affects every packet — use with care.
+
+**Minimum latency** — for gaming, VoIP, real-time apps. Only header masking, no extra packets:
+
+```bash
+AWG_H1=1504275961 AWG_H2=2038463950 AWG_H3=3719183628 AWG_H4=1404089105
+```
+
+Ping: same as plain WireGuard. Protection: blocks signature-based DPI (effective against most filters).
+
+**Balanced** — for daily browsing. Headers + light junk at handshake:
+
+```bash
+AWG_JC=5 AWG_JMIN=50 AWG_JMAX=1000
+AWG_S1=40 AWG_S2=40
+AWG_H1=1504275961 AWG_H2=2038463950 AWG_H3=3719183628 AWG_H4=1404089105
+```
+
+Ping: same after connect (~50ms extra at handshake). Protection: blocks signature + size-based DPI.
+
+**Maximum stealth** — for regions with aggressive DPI (China, Iran, Turkmenistan):
+
+```bash
+AWG_JC=8 AWG_JMIN=50 AWG_JMAX=1000
+AWG_S1=80 AWG_S2=80
+AWG_H1=1504275961 AWG_H2=2038463950 AWG_H3=3719183628 AWG_H4=1404089105
+# Add CPS for AmneziaWG 2.0 if available:
+# AWG_I1=... AWG_I2=... etc.
+```
+
+Ping: same after connect (~100ms extra at handshake). Protection: maximum without per-packet overhead.
 
 ## Multi-Interface Architecture
 
@@ -199,7 +235,7 @@ AmneziaWG sets CPS obfuscation parameters at the **interface level**, not per-pe
 
 - Each unique set of CPS parameters gets its own `awgN` interface (awg0, awg1, awg2, ...)
 - Clients with identical CPS parameters share an interface
-- Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned as base port + index)
+- Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from base port)
 - Interfaces are created on demand and destroyed when their last peer is removed
 - All interfaces share the same server private key
 
