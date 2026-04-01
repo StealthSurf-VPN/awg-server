@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/stealthsurf-vpn/awg-server/internal/awg"
 	"github.com/stealthsurf-vpn/awg-server/internal/clients"
@@ -151,10 +152,17 @@ func (s *Server) handleGetConfiguration(w http.ResponseWriter, r *http.Request) 
 	w.Write([]byte(cfg))
 }
 
-func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
+type statsResponse struct {
+	RxBytes       int64  `json:"rx_bytes"`
+	TxBytes       int64  `json:"tx_bytes"`
+	LastHandshake string `json:"last_handshake,omitempty"`
+}
+
+func (s *Server) handleGetClientStats(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	if err := s.manager.DeleteClient(id); err != nil {
+	client, err := s.manager.GetClient(id)
+	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, clients.ErrClientNotFound) {
 			status = http.StatusNotFound
@@ -163,6 +171,49 @@ func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err, status)
 		return
 	}
+
+	stats, _ := s.collector.GetStats(client.PublicKey)
+
+	resp := statsResponse{
+		RxBytes: stats.TotalRx,
+		TxBytes: stats.TotalTx,
+	}
+
+	if !stats.LastHandshake.IsZero() {
+		resp.LastHandshake = stats.LastHandshake.UTC().Format(time.RFC3339)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	client, err := s.manager.GetClient(id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, clients.ErrClientNotFound) {
+			status = http.StatusNotFound
+		}
+
+		writeError(w, err, status)
+		return
+	}
+
+	if err := s.manager.DeleteClient(id); err != nil {
+		log.Printf("delete client error: %v", err)
+
+		status := http.StatusInternalServerError
+		if errors.Is(err, clients.ErrClientNotFound) {
+			status = http.StatusNotFound
+		}
+
+		writeError(w, err, status)
+		return
+	}
+
+	s.collector.RemoveStats(client.PublicKey)
 
 	w.WriteHeader(http.StatusNoContent)
 }

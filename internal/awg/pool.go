@@ -236,6 +236,19 @@ func (p *Pool) Close() {
 	}
 }
 
+func (p *Pool) InterfaceNames() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	names := make([]string, 0, len(p.ifaces))
+
+	for _, ifc := range p.ifaces {
+		names = append(names, ifc.ifName)
+	}
+
+	return names
+}
+
 func (p *Pool) getOrCreateInterface(params AWGParams) (*iface, error) {
 	key := params.Key()
 

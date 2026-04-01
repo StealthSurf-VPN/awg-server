@@ -10,18 +10,21 @@ import (
 
 	"github.com/stealthsurf-vpn/awg-server/internal/clients"
 	"github.com/stealthsurf-vpn/awg-server/internal/config"
+	"github.com/stealthsurf-vpn/awg-server/internal/usage"
 )
 
 type Server struct {
 	manager    *clients.Manager
+	collector  *usage.Collector
 	config     *config.Config
 	httpServer *http.Server
 }
 
-func NewServer(manager *clients.Manager, cfg *config.Config) *Server {
+func NewServer(manager *clients.Manager, cfg *config.Config, collector *usage.Collector) *Server {
 	s := &Server{
-		manager: manager,
-		config:  cfg,
+		manager:   manager,
+		collector: collector,
+		config:    cfg,
 	}
 
 	mux := http.NewServeMux()
@@ -31,6 +34,7 @@ func NewServer(manager *clients.Manager, cfg *config.Config) *Server {
 	mux.HandleFunc("POST /api/clients", s.authMiddleware(s.handleCreateClient))
 	mux.HandleFunc("GET /api/clients/{id}/configuration", s.authMiddleware(s.handleGetConfiguration))
 	mux.HandleFunc("PATCH /api/clients/{id}", s.authMiddleware(s.handleUpdateClient))
+	mux.HandleFunc("GET /api/clients/{id}/stats", s.authMiddleware(s.handleGetClientStats))
 	mux.HandleFunc("DELETE /api/clients/{id}", s.authMiddleware(s.handleDeleteClient))
 
 	s.httpServer = &http.Server{

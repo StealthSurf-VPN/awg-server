@@ -14,6 +14,7 @@ import (
 	"github.com/stealthsurf-vpn/awg-server/internal/clients"
 	"github.com/stealthsurf-vpn/awg-server/internal/config"
 	"github.com/stealthsurf-vpn/awg-server/internal/update"
+	"github.com/stealthsurf-vpn/awg-server/internal/usage"
 )
 
 var version = "dev"
@@ -99,7 +100,13 @@ func main() {
 		log.Fatalf("create client manager: %v", err)
 	}
 
-	srv := api.NewServer(mgr, cfg)
+	collector := usage.NewCollector(cfg.DataDir, pool.InterfaceNames, awg.ShowDump)
+
+	collectorCtx, collectorCancel := context.WithCancel(context.Background())
+
+	go collector.Run(collectorCtx)
+
+	srv := api.NewServer(mgr, cfg, collector)
 
 	go func() {
 		if err := srv.Start(); err != nil {
@@ -115,11 +122,19 @@ func main() {
 
 	log.Printf("received signal %s, shutting down...", sig)
 
+	collectorCancel()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	collector.Collect()
+
+	if err := collector.Save(); err != nil {
+		log.Printf("warning: failed to save final usage data: %v", err)
 	}
 
 	pool.Close()
