@@ -51,9 +51,16 @@ RestartSec=5
 Environment=AWG_API_TOKEN=your-secret-token
 Environment=AWG_ADDRESS=10.0.0.1/24
 Environment=AWG_ENDPOINT=your.server.ip
-Environment=AWG_JC=5
-Environment=AWG_JMIN=50
-Environment=AWG_JMAX=1000
+
+# Optional (shown values are defaults):
+# Environment=AWG_JC=5
+# Environment=AWG_JMIN=50
+# Environment=AWG_JMAX=1000
+# Environment=AWG_LISTEN_PORT=51820
+# Environment=AWG_HTTP_PORT=7777
+# Environment=AWG_DNS=1.1.1.1
+# Environment=AWG_MTU=1420
+# Environment=AWG_MAX_INTERFACES=0
 
 [Install]
 WantedBy=multi-user.target
@@ -155,6 +162,10 @@ curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
 curl http://localhost:7777/api/clients/my-client-uuid/configuration \
   -H "Authorization: Bearer $TOKEN"
 
+# Get client usage stats
+curl http://localhost:7777/api/clients/my-client-uuid/stats \
+  -H "Authorization: Bearer $TOKEN"
+
 # Delete client
 curl -X DELETE http://localhost:7777/api/clients/my-client-uuid \
   -H "Authorization: Bearer $TOKEN"
@@ -177,29 +188,28 @@ Environment variables:
 | `AWG_INTERFACE` | no | auto-detect | Override outbound network interface for NAT |
 | `AWG_MAX_INTERFACES` | no | `0` | Max AWG interfaces (0 = unlimited) |
 
-### Obfuscation Parameters (AmneziaWG 2.0)
-
-These env vars set **default** CPS parameters for clients that don't specify custom `awg_params`:
-
-| Variable | What it does | Impact |
-| -------- | ------------ | ------ |
-| `AWG_JC` | Junk packets sent during handshake (noise for DPI) | More = harder to detect, slightly slower connect. **0** = off, **3-8** = good. No effect after connect. |
-| `AWG_JMIN` / `AWG_JMAX` | Size range for junk packets (bytes) | Wider range = harder to fingerprint. **50-100 / 500-1000** = good. |
-| `AWG_S1` | Extra bytes added to init handshake packet | Standard WireGuard init = 148 bytes, DPI looks for this. **15-150** = good. Only at connect time. |
-| `AWG_S2` | Extra bytes added to response handshake packet | Standard response = 92 bytes. **15-150** = good. Only at connect time. Note: `S1 + 56` must not equal `S2` (otherwise padded init and response end up the same size). |
-| `AWG_S3` | Extra bytes added to cookie reply packets | Standard cookie = 64 bytes. **0-32** = good. Only under load. |
-| `AWG_S4` | Extra bytes added to **every** data packet | Adds overhead to **every** packet — use only if DPI blocks by data packet size. **0** = recommended for most cases. |
-| `AWG_H1`-`AWG_H4` | Replace WireGuard message type headers with random values from a **range** | **Best protection for free.** Format: `min-max` (e.g. `100000-800000`). Ranges **must not overlap**. Zero performance impact. |
-| `AWG_I1`-`AWG_I5` | CPS signature packets sent before each handshake | Decoy UDP packets that mimic another protocol (QUIC, DNS, SIP, etc). Uses [CPS tag format](https://github.com/amnezia-vpn/amneziawg-go#i-parameters). If `I1` is not set, the entire chain is skipped. |
-
 ### Auto-Generated Parameters
 
-On first start, the server generates and persists unique obfuscation values:
+On first start, the server generates and persists unique obfuscation values in `/data/clients.json`:
 
-- **H1-H4** — random from non-overlapping uint32 ranges (header masking, zero overhead)
-- **S1, S2** — random 15-150 (handshake padding, `S1 + 56 ≠ S2`)
+| Parameter | Generation | Purpose |
+| --------- | ---------- | ------- |
+| **H1-H4** | Random from non-overlapping uint32 ranges | Replace WireGuard message type headers. Zero performance impact. |
+| **S1** | Random 15-150 | Init handshake packet padding |
+| **S2** | Random 15-150, `S1 + 56 ≠ S2` | Response handshake packet padding |
 
-These are saved in `/data/clients.json` and reused across restarts. No env vars needed.
+These are reused across restarts. No env vars needed.
+
+### Configurable Parameters
+
+| Variable | Default | What it does | Impact |
+| -------- | ------- | ------------ | ------ |
+| `AWG_JC` | `5` | Junk packets sent during handshake | **0** = off, **3-8** = good. No effect after connect. |
+| `AWG_JMIN` | `50` | Junk packet minimum size (bytes) | Wider range = harder to fingerprint. |
+| `AWG_JMAX` | `1000` | Junk packet maximum size (bytes) | **500-1000** = good. |
+| `AWG_S3` | `0` | Extra bytes added to cookie reply packets | **0-32** = good. Only under load. |
+| `AWG_S4` | `0` | Extra bytes added to **every** data packet | **0** = recommended. Adds overhead to every packet. |
+| `AWG_I1`-`AWG_I5` | empty | CPS signature packets (client config only) | Decoy UDP packets mimicking another protocol. Uses [CPS tag format](https://github.com/amnezia-vpn/amneziawg-go#i-parameters). |
 
 ### Obfuscation Profiles
 

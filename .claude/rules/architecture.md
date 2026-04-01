@@ -28,7 +28,8 @@ Dependency flow is one-directional. Never import `api` from `clients` or `awg`.
 ## Device Management
 
 - Each interface configured via `awg set` with private key through stdin
-- Obfuscation params: Jc/Jmin/Jmax, S1-S4, H1-H4, I1-I5 (CPS) — encapsulated in `AWGParams`
+- Server-side obfuscation params via `awg set`: Jc/Jmin/Jmax, S1-S4, H1-H4 — encapsulated in `AWGParams`
+- Client-side only: I1-I5 (CPS signature packets, included in `.conf` but not in `awg set`)
 - Peer operations via `awg set ... peer`; stats via `awg show ... dump` (used by usage collector)
 - Network configuration (IP, routing, NAT) via `exec.Command`
 - MASQUERADE rule added once for the subnet, removed on pool close
