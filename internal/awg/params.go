@@ -57,13 +57,8 @@ func (p AWGParams) CLIArgs() []string {
 		args = append(args, "s2", fmt.Sprintf("%d", p.S2))
 	}
 
-	if p.S3 > 0 {
-		args = append(args, "s3", fmt.Sprintf("%d", p.S3))
-	}
-
-	if p.S4 > 0 {
-		args = append(args, "s4", fmt.Sprintf("%d", p.S4))
-	}
+	args = append(args, "s3", fmt.Sprintf("%d", p.S3))
+	args = append(args, "s4", fmt.Sprintf("%d", p.S4))
 
 	if p.H1 != "" {
 		args = append(args, "h1", p.H1)
@@ -107,13 +102,8 @@ func (p AWGParams) ConfigLines() string {
 		lines += fmt.Sprintf("\nS2 = %d", p.S2)
 	}
 
-	if p.S3 > 0 {
-		lines += fmt.Sprintf("\nS3 = %d", p.S3)
-	}
-
-	if p.S4 > 0 {
-		lines += fmt.Sprintf("\nS4 = %d", p.S4)
-	}
+	lines += fmt.Sprintf("\nS3 = %d", p.S3)
+	lines += fmt.Sprintf("\nS4 = %d", p.S4)
 
 	if p.H1 != "" {
 		lines += fmt.Sprintf("\nH1 = %s", p.H1)
