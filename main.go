@@ -84,7 +84,7 @@ func main() {
 			log.Fatalf("save generated AWG params: %v", err)
 		}
 
-		log.Printf("generated new AWG params: H1=%d H2=%d H3=%d H4=%d S1=%d S2=%d",
+		log.Printf("generated new AWG params: H1=%s H2=%s H3=%s H4=%s S1=%d S2=%d",
 			gp.H1, gp.H2, gp.H3, gp.H4, gp.S1, gp.S2)
 	}
 

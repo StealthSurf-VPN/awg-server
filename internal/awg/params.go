@@ -15,10 +15,10 @@ type AWGParams struct {
 	S2   int    `json:"s2,omitempty"`
 	S3   int    `json:"s3,omitempty"`
 	S4   int    `json:"s4,omitempty"`
-	H1   uint32 `json:"h1,omitempty"`
-	H2   uint32 `json:"h2,omitempty"`
-	H3   uint32 `json:"h3,omitempty"`
-	H4   uint32 `json:"h4,omitempty"`
+	H1   string `json:"h1,omitempty"`
+	H2   string `json:"h2,omitempty"`
+	H3   string `json:"h3,omitempty"`
+	H4   string `json:"h4,omitempty"`
 	I1   string `json:"i1,omitempty"`
 	I2   string `json:"i2,omitempty"`
 	I3   string `json:"i3,omitempty"`
@@ -28,7 +28,7 @@ type AWGParams struct {
 
 func (p AWGParams) Key() string {
 	return fmt.Sprintf(
-		"h1=%d,h2=%d,h3=%d,h4=%d,s1=%d,s2=%d,s3=%d,s4=%d",
+		"h1=%s,h2=%s,h3=%s,h4=%s,s1=%d,s2=%d,s3=%d,s4=%d",
 		p.H1, p.H2, p.H3, p.H4,
 		p.S1, p.S2, p.S3, p.S4,
 	)
@@ -65,20 +65,20 @@ func (p AWGParams) CLIArgs() []string {
 		args = append(args, "s4", fmt.Sprintf("%d", p.S4))
 	}
 
-	if p.H1 > 0 {
-		args = append(args, "h1", fmt.Sprintf("%d", p.H1))
+	if p.H1 != "" {
+		args = append(args, "h1", p.H1)
 	}
 
-	if p.H2 > 0 {
-		args = append(args, "h2", fmt.Sprintf("%d", p.H2))
+	if p.H2 != "" {
+		args = append(args, "h2", p.H2)
 	}
 
-	if p.H3 > 0 {
-		args = append(args, "h3", fmt.Sprintf("%d", p.H3))
+	if p.H3 != "" {
+		args = append(args, "h3", p.H3)
 	}
 
-	if p.H4 > 0 {
-		args = append(args, "h4", fmt.Sprintf("%d", p.H4))
+	if p.H4 != "" {
+		args = append(args, "h4", p.H4)
 	}
 
 	return args
@@ -115,20 +115,20 @@ func (p AWGParams) ConfigLines() string {
 		lines += fmt.Sprintf("\nS4 = %d", p.S4)
 	}
 
-	if p.H1 > 0 {
-		lines += fmt.Sprintf("\nH1 = %d", p.H1)
+	if p.H1 != "" {
+		lines += fmt.Sprintf("\nH1 = %s", p.H1)
 	}
 
-	if p.H2 > 0 {
-		lines += fmt.Sprintf("\nH2 = %d", p.H2)
+	if p.H2 != "" {
+		lines += fmt.Sprintf("\nH2 = %s", p.H2)
 	}
 
-	if p.H3 > 0 {
-		lines += fmt.Sprintf("\nH3 = %d", p.H3)
+	if p.H3 != "" {
+		lines += fmt.Sprintf("\nH3 = %s", p.H3)
 	}
 
-	if p.H4 > 0 {
-		lines += fmt.Sprintf("\nH4 = %d", p.H4)
+	if p.H4 != "" {
+		lines += fmt.Sprintf("\nH4 = %s", p.H4)
 	}
 
 	if p.I1 != "" {
@@ -155,31 +155,31 @@ func (p AWGParams) ConfigLines() string {
 }
 
 type GeneratedParams struct {
-	H1 uint32 `json:"h1"`
-	H2 uint32 `json:"h2"`
-	H3 uint32 `json:"h3"`
-	H4 uint32 `json:"h4"`
+	H1 string `json:"h1"`
+	H2 string `json:"h2"`
+	H3 string `json:"h3"`
+	H4 string `json:"h4"`
 	S1 int    `json:"s1"`
 	S2 int    `json:"s2"`
 }
 
 func GenerateParams() (*GeneratedParams, error) {
-	h1, err := randUint32Range(100_000, 800_000)
+	h1, err := generateHRange(100_000, 800_000)
 	if err != nil {
 		return nil, fmt.Errorf("generate h1: %w", err)
 	}
 
-	h2, err := randUint32Range(1_000_000, 8_000_000)
+	h2, err := generateHRange(1_000_000, 8_000_000)
 	if err != nil {
 		return nil, fmt.Errorf("generate h2: %w", err)
 	}
 
-	h3, err := randUint32Range(10_000_000, 80_000_000)
+	h3, err := generateHRange(10_000_000, 80_000_000)
 	if err != nil {
 		return nil, fmt.Errorf("generate h3: %w", err)
 	}
 
-	h4, err := randUint32Range(100_000_000, 800_000_000)
+	h4, err := generateHRange(100_000_000, 800_000_000)
 	if err != nil {
 		return nil, fmt.Errorf("generate h4: %w", err)
 	}
@@ -206,6 +206,22 @@ func GenerateParams() (*GeneratedParams, error) {
 		H1: h1, H2: h2, H3: h3, H4: h4,
 		S1: s1, S2: s2,
 	}, nil
+}
+
+func generateHRange(tierMin, tierMax uint32) (string, error) {
+	mid := tierMin + (tierMax-tierMin)/2
+
+	lo, err := randUint32Range(tierMin, mid)
+	if err != nil {
+		return "", err
+	}
+
+	hi, err := randUint32Range(mid, tierMax)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%d-%d", lo, hi), nil
 }
 
 func randUint32Range(min, max uint32) (uint32, error) {

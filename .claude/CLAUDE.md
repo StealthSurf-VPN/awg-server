@@ -62,7 +62,7 @@ All require `Authorization: Bearer <AWG_API_TOKEN>` except `/health`.
 
 **Optional:** `AWG_LISTEN_PORT` (51820), `AWG_HTTP_PORT` (7777), `AWG_MTU` (1420), `AWG_DNS` (1.1.1.1), `AWG_DATA_DIR` (/data), `AWG_INTERFACE` (auto-detect), `AWG_MAX_INTERFACES` (0 = unlimited)
 
-**Auto-generated (first start, persisted in `/data/clients.json`):** `H1`-`H4` (random from non-overlapping uint32 ranges), `S1`, `S2` (random 15-150, `S1+56 ≠ S2`)
+**Auto-generated (first start, persisted in `/data/clients.json`):** `H1`-`H4` (random non-overlapping ranges, format `min-max`), `S1`, `S2` (random 15-150, `S1+56 ≠ S2`)
 
 **Default AmneziaWG params (from env):** `AWG_JC` (5), `AWG_JMIN` (50), `AWG_JMAX` (1000), `AWG_S3` (0), `AWG_S4` (0), `AWG_I1`-`AWG_I5` (client config only)
 

@@ -41,7 +41,7 @@ Dependency flow is one-directional. Never import `api` from `clients` or `awg`.
 - `Key()` — deterministic string for interface grouping: **only H1-H4, S1-S4** (excludes Port, Jc/Jmin/Jmax, I1-I5)
 - `CLIArgs()` — args for `awg set`: H1-H4, S1-S4, Jc/Jmin/Jmax (excludes I1-I5 — client-only)
 - `ConfigLines()` — lines for client `.conf` `[Interface]` section: all params including I1-I5
-- `GenerateParams()` — generates H1-H4 (random from non-overlapping uint32 ranges) and S1, S2 (random 15-150, `S1+56 ≠ S2`)
+- `GenerateParams()` — generates H1-H4 (random non-overlapping ranges, format `min-max`) and S1, S2 (random 15-150, `S1+56 ≠ S2`)
 - Per-client: stored as `*AWGParams` in `ClientData` (nil = use server defaults)
 - `ClientData` has `ID` (no separate `Name` field; POST body uses `id` directly)
 

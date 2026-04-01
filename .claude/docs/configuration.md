@@ -26,7 +26,7 @@ All configuration is done via environment variables.
 
 On first start, the server generates and persists unique obfuscation values in `{AWG_DATA_DIR}/clients.json`:
 
-- **H1-H4** — random from non-overlapping uint32 ranges (header masking)
+- **H1-H4** — random non-overlapping ranges, format `min-max` (header masking)
 - **S1, S2** — random 15-150, with constraint `S1 + 56 ≠ S2` (handshake padding)
 
 These are reused across restarts. No env vars needed.
@@ -68,10 +68,10 @@ Client data is stored in `{AWG_DATA_DIR}/clients.json`:
 {
   "server_private_key": "<base64>",
   "generated_params": {
-    "h1": 456789,
-    "h2": 4567890,
-    "h3": 45678901,
-    "h4": 456789012,
+    "h1": "234567-678901",
+    "h2": "2345678-6789012",
+    "h3": "23456789-67890123",
+    "h4": "234567890-678901234",
     "s1": 42,
     "s2": 87
   },

@@ -305,19 +305,19 @@ func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
 		result.S4 = params.S4
 	}
 
-	if params.H1 > 0 {
+	if params.H1 != "" {
 		result.H1 = params.H1
 	}
 
-	if params.H2 > 0 {
+	if params.H2 != "" {
 		result.H2 = params.H2
 	}
 
-	if params.H3 > 0 {
+	if params.H3 != "" {
 		result.H3 = params.H3
 	}
 
-	if params.H4 > 0 {
+	if params.H4 != "" {
 		result.H4 = params.H4
 	}
 

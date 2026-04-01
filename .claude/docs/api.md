@@ -150,10 +150,10 @@ Jmin = 50
 Jmax = 1000
 S1 = 42
 S2 = 87
-H1 = 456789
-H2 = 4567890
-H3 = 45678901
-H4 = 456789012
+H1 = 234567-678901
+H2 = 2345678-6789012
+H3 = 23456789-67890123
+H4 = 234567890-678901234
 
 [Peer]
 PublicKey = <base64>
@@ -215,7 +215,7 @@ All fields are optional. Parameters with value `0` (or empty string for I1-I5) a
 | `jmin` | int | Junk packet minimum size |
 | `jmax` | int | Junk packet maximum size |
 | `s1` - `s4` | int | Packet padding (init, response, underload, transport) |
-| `h1` - `h4` | uint32 | Packet headers (init, response, underload, transport) |
+| `h1` - `h4` | string | Packet header ranges, format `"min-max"` (init, response, underload, transport) |
 | `i1` - `i5` | string | CPS signature packets (AmneziaWG 2.0) |
 
 ## Error Handling

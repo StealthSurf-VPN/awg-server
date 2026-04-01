@@ -150,7 +150,7 @@ curl -X POST http://localhost:7777/api/clients \
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":500000}}'
+  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":"100000-800000"}}'
 
 # Update client obfuscation params
 curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
@@ -162,9 +162,10 @@ curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
 curl http://localhost:7777/api/clients/my-client-uuid/configuration \
   -H "Authorization: Bearer $TOKEN"
 
-# Get client usage stats
+# Get client usage stats (accumulated rx/tx, last handshake)
 curl http://localhost:7777/api/clients/my-client-uuid/stats \
   -H "Authorization: Bearer $TOKEN"
+# → {"rx_bytes":1073741824,"tx_bytes":5368709120,"last_handshake":"2026-04-01T12:00:00Z"}
 
 # Delete client
 curl -X DELETE http://localhost:7777/api/clients/my-client-uuid \
@@ -194,7 +195,7 @@ On first start, the server generates and persists unique obfuscation values in `
 
 | Parameter | Generation | Purpose |
 | --------- | ---------- | ------- |
-| **H1-H4** | Random from non-overlapping uint32 ranges | Replace WireGuard message type headers. Zero performance impact. |
+| **H1-H4** | Random non-overlapping ranges (format `min-max`) | Replace WireGuard message type headers. Zero performance impact. |
 | **S1** | Random 15-150 | Init handshake packet padding |
 | **S2** | Random 15-150, `S1 + 56 ≠ S2` | Response handshake packet padding |
 
