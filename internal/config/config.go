@@ -21,14 +21,8 @@ type Config struct {
 	Jc   int
 	Jmin int
 	Jmax int
-	S1   int
-	S2   int
 	S3   int
 	S4   int
-	H1   uint32
-	H2   uint32
-	H3   uint32
-	H4   uint32
 
 	I1 string
 	I2 string
@@ -51,17 +45,11 @@ func Load() (*Config, error) {
 		DataDir:    envDefault("AWG_DATA_DIR", "/data"),
 		Interface:  os.Getenv("AWG_INTERFACE"),
 
-		Jc:   envInt("AWG_JC", 0),
-		Jmin: envInt("AWG_JMIN", 0),
-		Jmax: envInt("AWG_JMAX", 0),
-		S1:   envInt("AWG_S1", 0),
-		S2:   envInt("AWG_S2", 0),
+		Jc:   envInt("AWG_JC", 5),
+		Jmin: envInt("AWG_JMIN", 50),
+		Jmax: envInt("AWG_JMAX", 1000),
 		S3:   envInt("AWG_S3", 0),
 		S4:   envInt("AWG_S4", 0),
-		H1:   envUint32("AWG_H1", 0),
-		H2:   envUint32("AWG_H2", 0),
-		H3:   envUint32("AWG_H3", 0),
-		H4:   envUint32("AWG_H4", 0),
 
 		I1: os.Getenv("AWG_I1"),
 		I2: os.Getenv("AWG_I2"),
@@ -128,16 +116,3 @@ func envInt(key string, fallback int) int {
 	return n
 }
 
-func envUint32(key string, fallback uint32) uint32 {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-
-	n, err := strconv.ParseUint(v, 10, 32)
-	if err != nil {
-		return fallback
-	}
-
-	return uint32(n)
-}

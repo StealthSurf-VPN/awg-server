@@ -19,8 +19,9 @@ type ClientData struct {
 }
 
 type StorageData struct {
-	ServerPrivateKey string       `json:"server_private_key"`
-	Clients          []ClientData `json:"clients"`
+	ServerPrivateKey string              `json:"server_private_key"`
+	GeneratedParams  *awg.GeneratedParams `json:"generated_params,omitempty"`
+	Clients          []ClientData        `json:"clients"`
 }
 
 type Storage struct {

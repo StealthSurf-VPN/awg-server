@@ -75,7 +75,7 @@ Content-Type: application/json
 }
 ```
 
-If `awg_params` is omitted, the client uses default parameters from server env vars.
+If `awg_params` is omitted, the client uses server defaults (auto-generated H/S + env Jc/Jmin/Jmax). Per-client params are merged over defaults — non-zero values override, zero/empty values inherit defaults.
 
 **Response** `201 Created`:
 
@@ -167,6 +167,28 @@ PersistentKeepalive = 25
 ```
 
 The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
+
+**Errors:**
+
+- `404` — client not found
+
+## Get Client Stats
+
+```http
+GET /api/clients/{id}/stats
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "rx_bytes": 1073741824,
+  "tx_bytes": 5368709120,
+  "last_handshake": "2026-04-01T12:00:00Z"
+}
+```
+
+Returns accumulated traffic counters (survive reboots) and last handshake time. Returns zeros if the client has never connected. `last_handshake` is omitted if no handshake occurred.
 
 **Errors:**
 

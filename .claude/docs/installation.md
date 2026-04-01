@@ -140,16 +140,10 @@ AWG_DATA_DIR=/var/lib/awg-server
 AWG_JC=5
 AWG_JMIN=50
 AWG_JMAX=1000
-AWG_S1=15
-AWG_S2=15
-AWG_H1=12345
-AWG_H2=23456
-AWG_H3=34567
-AWG_H4=45678
 AWG_MAX_INTERFACES=0
 ```
 
-These AWG_* obfuscation params are **defaults** for clients that don't specify custom `awg_params` via the API.
+H1-H4 and S1/S2 are auto-generated on first start and persisted. The AWG_* vars above are **defaults** for Jc/Jmin/Jmax only.
 
 Enable and start:
 

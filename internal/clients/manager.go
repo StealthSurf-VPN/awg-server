@@ -267,11 +267,81 @@ PersistentKeepalive = 25`, awg.KeyToBase64(serverPubKey), m.config.Endpoint, por
 }
 
 func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
-	if params != nil {
-		return *params
+	if params == nil {
+		return m.defaultParams
 	}
 
-	return m.defaultParams
+	result := m.defaultParams
+
+	if params.Port > 0 {
+		result.Port = params.Port
+	}
+
+	if params.Jc > 0 {
+		result.Jc = params.Jc
+	}
+
+	if params.Jmin > 0 {
+		result.Jmin = params.Jmin
+	}
+
+	if params.Jmax > 0 {
+		result.Jmax = params.Jmax
+	}
+
+	if params.S1 > 0 {
+		result.S1 = params.S1
+	}
+
+	if params.S2 > 0 {
+		result.S2 = params.S2
+	}
+
+	if params.S3 > 0 {
+		result.S3 = params.S3
+	}
+
+	if params.S4 > 0 {
+		result.S4 = params.S4
+	}
+
+	if params.H1 > 0 {
+		result.H1 = params.H1
+	}
+
+	if params.H2 > 0 {
+		result.H2 = params.H2
+	}
+
+	if params.H3 > 0 {
+		result.H3 = params.H3
+	}
+
+	if params.H4 > 0 {
+		result.H4 = params.H4
+	}
+
+	if params.I1 != "" {
+		result.I1 = params.I1
+	}
+
+	if params.I2 != "" {
+		result.I2 = params.I2
+	}
+
+	if params.I3 != "" {
+		result.I3 = params.I3
+	}
+
+	if params.I4 != "" {
+		result.I4 = params.I4
+	}
+
+	if params.I5 != "" {
+		result.I5 = params.I5
+	}
+
+	return result
 }
 
 func (m *Manager) allocateIP() (string, error) {

@@ -1,6 +1,10 @@
 package awg
 
-import "fmt"
+import (
+	"crypto/rand"
+	"encoding/binary"
+	"fmt"
+)
 
 type AWGParams struct {
 	Port int    `json:"port,omitempty"`
@@ -24,11 +28,9 @@ type AWGParams struct {
 
 func (p AWGParams) Key() string {
 	return fmt.Sprintf(
-		"jc=%d,jmin=%d,jmax=%d,s1=%d,s2=%d,s3=%d,s4=%d,h1=%d,h2=%d,h3=%d,h4=%d,i1=%s,i2=%s,i3=%s,i4=%s,i5=%s",
-		p.Jc, p.Jmin, p.Jmax,
-		p.S1, p.S2, p.S3, p.S4,
+		"h1=%d,h2=%d,h3=%d,h4=%d,s1=%d,s2=%d,s3=%d,s4=%d",
 		p.H1, p.H2, p.H3, p.H4,
-		p.I1, p.I2, p.I3, p.I4, p.I5,
+		p.S1, p.S2, p.S3, p.S4,
 	)
 }
 
@@ -77,26 +79,6 @@ func (p AWGParams) CLIArgs() []string {
 
 	if p.H4 > 0 {
 		args = append(args, "h4", fmt.Sprintf("%d", p.H4))
-	}
-
-	if p.I1 != "" {
-		args = append(args, "i1", p.I1)
-	}
-
-	if p.I2 != "" {
-		args = append(args, "i2", p.I2)
-	}
-
-	if p.I3 != "" {
-		args = append(args, "i3", p.I3)
-	}
-
-	if p.I4 != "" {
-		args = append(args, "i4", p.I4)
-	}
-
-	if p.I5 != "" {
-		args = append(args, "i5", p.I5)
 	}
 
 	return args
@@ -170,4 +152,82 @@ func (p AWGParams) ConfigLines() string {
 	}
 
 	return lines
+}
+
+type GeneratedParams struct {
+	H1 uint32 `json:"h1"`
+	H2 uint32 `json:"h2"`
+	H3 uint32 `json:"h3"`
+	H4 uint32 `json:"h4"`
+	S1 int    `json:"s1"`
+	S2 int    `json:"s2"`
+}
+
+func GenerateParams() (*GeneratedParams, error) {
+	h1, err := randUint32Range(100_000, 800_000)
+	if err != nil {
+		return nil, fmt.Errorf("generate h1: %w", err)
+	}
+
+	h2, err := randUint32Range(1_000_000, 8_000_000)
+	if err != nil {
+		return nil, fmt.Errorf("generate h2: %w", err)
+	}
+
+	h3, err := randUint32Range(10_000_000, 80_000_000)
+	if err != nil {
+		return nil, fmt.Errorf("generate h3: %w", err)
+	}
+
+	h4, err := randUint32Range(100_000_000, 800_000_000)
+	if err != nil {
+		return nil, fmt.Errorf("generate h4: %w", err)
+	}
+
+	s1, err := randIntRange(15, 150)
+	if err != nil {
+		return nil, fmt.Errorf("generate s1: %w", err)
+	}
+
+	var s2 int
+
+	for {
+		s2, err = randIntRange(15, 150)
+		if err != nil {
+			return nil, fmt.Errorf("generate s2: %w", err)
+		}
+
+		if s1+56 != s2 {
+			break
+		}
+	}
+
+	return &GeneratedParams{
+		H1: h1, H2: h2, H3: h3, H4: h4,
+		S1: s1, S2: s2,
+	}, nil
+}
+
+func randUint32Range(min, max uint32) (uint32, error) {
+	var buf [4]byte
+
+	if _, err := rand.Read(buf[:]); err != nil {
+		return 0, err
+	}
+
+	n := binary.LittleEndian.Uint32(buf[:])
+
+	return min + n%(max-min), nil
+}
+
+func randIntRange(min, max int) (int, error) {
+	var buf [4]byte
+
+	if _, err := rand.Read(buf[:]); err != nil {
+		return 0, err
+	}
+
+	n := binary.LittleEndian.Uint32(buf[:])
+
+	return min + int(n)%(max-min), nil
 }

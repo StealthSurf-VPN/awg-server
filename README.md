@@ -6,17 +6,22 @@ Supports **per-client obfuscation profiles** — each unique set of CPS paramete
 
 ## Quick Install (Linux)
 
-One-liner that installs AmneziaWG, downloads the latest `awg-server` binary, and gets you ready to run:
+One-liner that installs AmneziaWG 2.0, downloads the latest `awg-server` binary, and gets you ready to run:
 
 ```bash
-# 1. Install AmneziaWG kernel module (DKMS)
-apt update && apt install -y software-properties-common linux-headers-$(uname -r)
-add-apt-repository -y ppa:amnezia/ppa
-apt update && apt install -y amneziawg
+# 1. Install AmneziaWG 2.0 kernel module (DKMS, from source)
+apt update && apt install -y build-essential git dkms linux-headers-$(uname -r)
+git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git /tmp/amneziawg-module
+cd /tmp/amneziawg-module/src
+make dkms-install
+dkms add -m amneziawg -v 1.0.0
+dkms build -m amneziawg -v 1.0.0
+dkms install -m amneziawg -v 1.0.0
+modprobe amneziawg
+cd ~ && rm -rf /tmp/amneziawg-module
 
-# 2. Install AmneziaWG tools (awg CLI)
-apt install -y build-essential git
-git clone https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/amneziawg-tools
+# 2. Install AmneziaWG 2.0 tools (awg CLI)
+git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/amneziawg-tools
 make -C /tmp/amneziawg-tools/src && make -C /tmp/amneziawg-tools/src install
 rm -rf /tmp/amneziawg-tools
 
@@ -49,12 +54,6 @@ Environment=AWG_ENDPOINT=your.server.ip
 Environment=AWG_JC=5
 Environment=AWG_JMIN=50
 Environment=AWG_JMAX=1000
-Environment=AWG_S1=15
-Environment=AWG_S2=15
-Environment=AWG_H1=12345
-Environment=AWG_H2=23456
-Environment=AWG_H3=34567
-Environment=AWG_H4=45678
 
 [Install]
 WantedBy=multi-user.target
@@ -120,9 +119,6 @@ Copy `awg-server` binary to the VPN server and run:
 AWG_API_TOKEN=your-secret-token \
 AWG_ADDRESS=10.0.0.1/24 \
 AWG_ENDPOINT=your.server.ip \
-AWG_JC=5 AWG_JMIN=50 AWG_JMAX=1000 \
-AWG_S1=15 AWG_S2=15 \
-AWG_H1=12345 AWG_H2=23456 AWG_H3=34567 AWG_H4=45678 \
 ./awg-server
 ```
 
@@ -147,7 +143,7 @@ curl -X POST http://localhost:7777/api/clients \
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"jc":5,"jmin":50,"jmax":1000,"s1":15,"h1":12345}}'
+  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":500000}}'
 
 # Update client obfuscation params
 curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
@@ -181,7 +177,7 @@ Environment variables:
 | `AWG_INTERFACE` | no | auto-detect | Override outbound network interface for NAT |
 | `AWG_MAX_INTERFACES` | no | `0` | Max AWG interfaces (0 = unlimited) |
 
-### Obfuscation Parameters
+### Obfuscation Parameters (AmneziaWG 2.0)
 
 These env vars set **default** CPS parameters for clients that don't specify custom `awg_params`:
 
@@ -190,41 +186,44 @@ These env vars set **default** CPS parameters for clients that don't specify cus
 | `AWG_JC` | Junk packets sent during handshake (noise for DPI) | More = harder to detect, slightly slower connect. **0** = off, **3-8** = good. No effect after connect. |
 | `AWG_JMIN` / `AWG_JMAX` | Size range for junk packets (bytes) | Wider range = harder to fingerprint. **50-100 / 500-1000** = good. |
 | `AWG_S1` | Extra bytes added to init handshake packet | Standard WireGuard init = 148 bytes, DPI looks for this. **15-150** = good. Only at connect time. |
-| `AWG_S2` | Extra bytes added to response handshake packet | Standard response = 92 bytes. **15-150** = good. Only at connect time. |
-| `AWG_S3` / `AWG_S4` | Extra bytes for cookie / data packets | `S4` adds overhead to **every** packet — use only if DPI blocks by data packet size. **0** = recommended. |
-| `AWG_H1`-`AWG_H4` | Replace WireGuard message type headers with random values | **Best protection for free.** Changes 4 bytes in headers, zero performance impact. Random uint32 values. |
-| `AWG_I1`-`AWG_I5` | CPS signature packets (AmneziaWG 2.0) | Sent before handshake to mimic another protocol. Advanced feature for aggressive DPI. |
+| `AWG_S2` | Extra bytes added to response handshake packet | Standard response = 92 bytes. **15-150** = good. Only at connect time. Note: `S1 + 56` must not equal `S2` (otherwise padded init and response end up the same size). |
+| `AWG_S3` | Extra bytes added to cookie reply packets | Standard cookie = 64 bytes. **0-32** = good. Only under load. |
+| `AWG_S4` | Extra bytes added to **every** data packet | Adds overhead to **every** packet — use only if DPI blocks by data packet size. **0** = recommended for most cases. |
+| `AWG_H1`-`AWG_H4` | Replace WireGuard message type headers with random values from a **range** | **Best protection for free.** Format: `min-max` (e.g. `100000-800000`). Ranges **must not overlap**. Zero performance impact. |
+| `AWG_I1`-`AWG_I5` | CPS signature packets sent before each handshake | Decoy UDP packets that mimic another protocol (QUIC, DNS, SIP, etc). Uses [CPS tag format](https://github.com/amnezia-vpn/amneziawg-go#i-parameters). If `I1` is not set, the entire chain is skipped. |
+
+### Auto-Generated Parameters
+
+On first start, the server generates and persists unique obfuscation values:
+
+- **H1-H4** — random from non-overlapping uint32 ranges (header masking, zero overhead)
+- **S1, S2** — random 15-150 (handshake padding, `S1 + 56 ≠ S2`)
+
+These are saved in `/data/clients.json` and reused across restarts. No env vars needed.
 
 ### Obfuscation Profiles
 
-> **Rule of thumb:** `h1-h4` are free (zero overhead). `jc/s1/s2` only affect connection time. `s4` affects every packet — use with care.
+> **Rule of thumb:** H1-H4 and S1/S2 are auto-generated. `Jc/Jmin/Jmax` only affect connection time. `S4` affects every packet — use with care.
 
-**Minimum latency** — for gaming, VoIP, real-time apps. Only header masking, no extra packets:
+**Default** (no extra env vars needed) — headers + light junk at handshake:
 
-```bash
-AWG_H1=1504275961 AWG_H2=2038463950 AWG_H3=3719183628 AWG_H4=1404089105
-```
+H1-H4, S1, S2 auto-generated. Jc=5, Jmin=50, Jmax=1000 (defaults).
 
-Ping: same as plain WireGuard. Protection: blocks signature-based DPI (effective against most filters).
+Ping: same as plain WireGuard after connect. Protection: blocks signature + size-based DPI.
 
-**Balanced** — for daily browsing. Headers + light junk at handshake:
+**Minimum latency** — disable junk packets:
 
 ```bash
-AWG_JC=5 AWG_JMIN=50 AWG_JMAX=1000
-AWG_S1=40 AWG_S2=40
-AWG_H1=1504275961 AWG_H2=2038463950 AWG_H3=3719183628 AWG_H4=1404089105
+AWG_JC=0 AWG_JMIN=0 AWG_JMAX=0
 ```
 
-Ping: same after connect (~50ms extra at handshake). Protection: blocks signature + size-based DPI.
+Auto-generated H1-H4 still provide header masking (zero overhead).
 
 **Maximum stealth** — for regions with aggressive DPI (China, Iran, Turkmenistan):
 
 ```bash
 AWG_JC=8 AWG_JMIN=50 AWG_JMAX=1000
-AWG_S1=80 AWG_S2=80
-AWG_H1=1504275961 AWG_H2=2038463950 AWG_H3=3719183628 AWG_H4=1404089105
-# Add CPS for AmneziaWG 2.0 if available:
-# AWG_I1=... AWG_I2=... etc.
+AWG_I1='<b 0xc0><r 32><c><t>'
 ```
 
 Ping: same after connect (~100ms extra at handshake). Protection: maximum without per-packet overhead.

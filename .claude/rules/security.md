@@ -9,6 +9,7 @@
 ## Key Management
 
 - Server private key generated once and persisted in `/data/clients.json`
+- AWG obfuscation params (H1-H4, S1, S2) generated once via `crypto/rand` and persisted in `/data/clients.json`
 - All AWG interfaces share the same server private key
 - Client private keys stored in JSON for config regeneration
 - WireGuard keys: Curve25519 with proper clamping

@@ -70,18 +70,38 @@ func main() {
 		log.Println("generated new server private key")
 	}
 
+	if data.GeneratedParams != nil {
+		log.Println("loaded generated AWG params from storage")
+	} else {
+		gp, err := awg.GenerateParams()
+		if err != nil {
+			log.Fatalf("generate AWG params: %v", err)
+		}
+
+		data.GeneratedParams = gp
+
+		if err := storage.Save(data); err != nil {
+			log.Fatalf("save generated AWG params: %v", err)
+		}
+
+		log.Printf("generated new AWG params: H1=%d H2=%d H3=%d H4=%d S1=%d S2=%d",
+			gp.H1, gp.H2, gp.H3, gp.H4, gp.S1, gp.S2)
+	}
+
+	gp := data.GeneratedParams
+
 	defaultParams := awg.AWGParams{
 		Jc:   cfg.Jc,
 		Jmin: cfg.Jmin,
 		Jmax: cfg.Jmax,
-		S1:   cfg.S1,
-		S2:   cfg.S2,
+		S1:   gp.S1,
+		S2:   gp.S2,
 		S3:   cfg.S3,
 		S4:   cfg.S4,
-		H1:   cfg.H1,
-		H2:   cfg.H2,
-		H3:   cfg.H3,
-		H4:   cfg.H4,
+		H1:   gp.H1,
+		H2:   gp.H2,
+		H3:   gp.H3,
+		H4:   gp.H4,
 		I1:   cfg.I1,
 		I2:   cfg.I2,
 		I3:   cfg.I3,

@@ -15,6 +15,8 @@ HTTP API (Bearer auth) → Client Manager (CRUD, IP alloc, keygen)
                         → AWG Pool (multi-interface, per-profile)
                         → AWG Interfaces (kernel module + awg CLI)
                         → JSON Storage (/data/clients.json)
+                        → Usage Collector (background, 60s tick)
+                        → Usage Storage (/data/usage.json)
 ```
 
 ## Key Directories
@@ -22,9 +24,10 @@ HTTP API (Bearer auth) → Client Manager (CRUD, IP alloc, keygen)
 - `internal/config/` — Environment-based configuration parsing
 - `internal/awg/` — Interface pool, AWG params, Curve25519 keygen, awg CLI helpers
 - `internal/clients/` — Client CRUD, IP allocation, JSON persistence
-- `internal/api/` — HTTP server, Bearer auth middleware, 6 handlers (5 CRUD + health)
+- `internal/api/` — HTTP server, Bearer auth middleware, 7 handlers (5 CRUD + stats + health)
+- `internal/usage/` — Background usage collector (rx/tx per peer via `awg show dump`, delta tracking, JSON persistence)
 - `internal/update/` — Self-update from GitHub Releases
-- `main.go` — Entry point: CLI commands (version, update) → config → pool → manager → HTTP → graceful shutdown
+- `main.go` — Entry point: CLI commands (version, update) → config → pool → manager → usage collector → HTTP → graceful shutdown
 
 ## CLI Commands
 
@@ -50,6 +53,7 @@ All require `Authorization: Bearer <AWG_API_TOKEN>` except `/health`.
 | POST | `/api/clients` | Create client `{"id":"uuid","awg_params":{...}}` |
 | PATCH | `/api/clients/{id}` | Update client `{"awg_params":{...}}` (atomic migration via `MigratePeer`) |
 | GET | `/api/clients/{id}/configuration` | Get .conf file |
+| GET | `/api/clients/{id}/stats` | Get usage stats (rx/tx bytes, last handshake) |
 | DELETE | `/api/clients/{id}` | Delete client |
 
 ## Configuration (env vars)
@@ -58,7 +62,9 @@ All require `Authorization: Bearer <AWG_API_TOKEN>` except `/health`.
 
 **Optional:** `AWG_LISTEN_PORT` (51820), `AWG_HTTP_PORT` (7777), `AWG_MTU` (1420), `AWG_DNS` (1.1.1.1), `AWG_DATA_DIR` (/data), `AWG_INTERFACE` (auto-detect), `AWG_MAX_INTERFACES` (0 = unlimited)
 
-**Default AmneziaWG params (from env):** `AWG_JC`, `AWG_JMIN`, `AWG_JMAX`, `AWG_S1`-`AWG_S4`, `AWG_H1`-`AWG_H4`, `AWG_I1`-`AWG_I5`
+**Auto-generated (first start, persisted in `/data/clients.json`):** `H1`-`H4` (random from non-overlapping uint32 ranges), `S1`, `S2` (random 15-150, `S1+56 ≠ S2`)
+
+**Default AmneziaWG params (from env):** `AWG_JC` (5), `AWG_JMIN` (50), `AWG_JMAX` (1000), `AWG_S3` (0), `AWG_S4` (0), `AWG_I1`-`AWG_I5` (client config only)
 
 Clients can override defaults via `awg_params` in API requests.
 
@@ -72,6 +78,10 @@ Clients can override defaults via `awg_params` in API requests.
 - Kernel module approach: `amneziawg-linux-kernel-module` on host, `awg` CLI on host
 - Deployed as static binary, no Docker needed
 - Bearer token auth on all endpoints
+- **Usage tracking**: background collector polls `awg show dump` every 60s, accumulates rx/tx deltas per peer (handles counter resets), persists to `/data/usage.json`
+- **Param generation**: H1-H4, S1, S2 generated at first start via `crypto/rand`, persisted alongside server private key
+- **Interface grouping** (`Key()`): only H1-H4, S1-S4 determine the interface; Jc/Jmin/Jmax and I1-I5 do NOT create new interfaces
+- **I1-I5**: client-side only (CPS packets), included in `.conf` but NOT in `awg set` CLI args
 - JSON file persistence with atomic write (tmp + rename)
 - IP allocation: sequential from .2, freed IPs reused
 - Thread safety: `sync.Mutex` in Pool, `sync.RWMutex` in Manager
