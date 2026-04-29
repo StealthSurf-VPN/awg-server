@@ -42,6 +42,8 @@ make build VERSION=1.0.0   # Build with version
 go vet ./...               # Static analysis
 ```
 
+No unit tests in repo — verification via `go vet` and manual API testing.
+
 ## API Endpoints
 
 All require `Authorization: Bearer <AWG_API_TOKEN>` except `/health`.

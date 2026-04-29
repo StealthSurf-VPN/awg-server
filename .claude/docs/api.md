@@ -206,7 +206,7 @@ If this was the last client on an interface, the interface is automatically dest
 
 ## AWG Params Object
 
-All fields are optional. Parameters with value `0` (or empty string for I1-I5) are omitted.
+All fields are optional. Parameters with value `0` (or empty string for I1-I5) are omitted, **except `s3`/`s4` which are always emitted (even when 0)**.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |

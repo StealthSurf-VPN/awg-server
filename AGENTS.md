@@ -13,7 +13,7 @@ Supports **per-client obfuscation profiles** via a multi-interface pool — each
 - Read `.claude/CLAUDE.md` for project overview
 - Read `.claude/rules/` for coding conventions and architecture
 - Read `.claude/docs/` for API and configuration reference
-- The entire codebase is in `internal/` with 4 packages: `config`, `awg`, `clients`, `api`
+- The entire codebase is in `internal/` with 6 packages: `config`, `awg`, `clients`, `api`, `usage`, `update`
 
 ### Key Files
 
@@ -28,12 +28,15 @@ Supports **per-client obfuscation profiles** via a multi-interface pool — each
 | `internal/clients/storage.go` | JSON file persistence (atomic write) |
 | `internal/clients/manager.go` | Client CRUD, IP allocation, .conf generation |
 | `internal/api/server.go` | HTTP server, Bearer auth middleware |
-| `internal/api/handlers.go` | 5 API handlers (list, create, update, config, delete) + health |
+| `internal/api/handlers.go` | 6 API handlers (list, create, update, config, stats, delete) + health |
+| `internal/usage/collector.go` | Background usage collector (rx/tx polling, JSON persistence) |
+| `internal/update/update.go` | Self-update from GitHub Releases |
 
 ### Dependency Flow
 
 ```text
-config ← awg ← clients ← api ← main
+config ← awg ← {clients, usage} ← api ← main
+update ← main
 ```
 
 Never create circular dependencies between packages.

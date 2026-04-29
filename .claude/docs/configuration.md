@@ -44,7 +44,7 @@ These env vars set **default** CPS parameters for clients that don't specify cus
 | `AWG_S4` | `0` | Transport packet padding |
 | `AWG_I1`-`AWG_I5` | empty | CPS signature packets (client config only) |
 
-Parameters with value `0` are omitted from client configs and `awg set` commands.
+Parameters with value `0` are omitted from client configs and `awg set` commands. **Exception:** `S3`/`S4` are always emitted (even when 0).
 
 Clients can override defaults by providing `awg_params` in the create/update API request. Per-client params are merged over defaults (non-zero values override).
 
