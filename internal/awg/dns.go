@@ -30,9 +30,17 @@ func (params *AWGParams) UnmarshalJSON(data []byte) error {
 	}
 
 	*params = AWGParams(decoded)
-	_, params.dnsSet = fields["dns"]
-	_, params.dnsModeSet = fields["dns_mode"]
-	_, params.dnsServersSet = fields["dns_servers"]
+
+	for field := range fields {
+		switch {
+		case strings.EqualFold(field, "dns"):
+			params.dnsSet = true
+		case strings.EqualFold(field, "dns_mode"):
+			params.dnsModeSet = true
+		case strings.EqualFold(field, "dns_servers"):
+			params.dnsServersSet = true
+		}
+	}
 
 	return nil
 }

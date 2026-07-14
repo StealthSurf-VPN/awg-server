@@ -20,7 +20,7 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - Ports: explicit `port` from `AWGParams`, or auto-assigned sequentially from `AWG_LISTEN_PORT` (first available)
 - Interfaces created on demand via `ip link add awgN type amneziawg`
 - Interfaces destroyed when their last peer is removed
-- **Peer migration** (`Pool.MigratePeer`): when client changes CPS profile, if it's the last peer on old interface — remove first to free port, then create new interface (allows reusing same port); if other peers exist — add to new first, then remove from old; port-only change on shared interface rejected (`ErrPortShared`, 409); rollback on failure via `rollbackPeer`
+- **Peer migration** (`Pool.MigratePeer`): when client changes CPS profile, if it's the last peer on old interface — remove first to free port, then create new interface (allows reusing same port); if other peers exist — add to new first, then remove from old; port-only change on shared interface rejected (`ErrPortShared`, 409). A failed shared-interface removal is never success: the pool best-effort restores the old peer and route, removes the new peer, updates bookkeeping for successful rollback steps, and returns an error even when rollback is partial.
 - All interfaces share the same server private key
 - `AWG_MAX_INTERFACES` limits total interfaces (0 = unlimited)
 
@@ -39,11 +39,12 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - `Port` — optional UDP listen port for the interface (not part of CPS, not in Key/CLIArgs/ConfigLines); zero selects automatic assignment, explicit values are validated in the range 1024-65535
 - `ClientListenPort` — optional local UDP listen port for the generated client `[Interface]`, range 1024-65535 (zero omits `ListenPort` for automatic client-side selection; not part of CPS, Key, CLIArgs, ConfigLines, server interface allocation, or peer migration)
 - `MTU` — optional client config override, range 1280-1420 (not part of CPS, not in Key/CLIArgs/ConfigLines); zero inherits `AWG_MTU`
-- `DNS` — optional client config override containing one IPv4 address (empty inherits `AWG_DNS`; DoH URLs and other formats are rejected; not part of CPS, not in Key/CLIArgs/ConfigLines)
+- `DNS` — legacy optional client config override containing one IPv4 address (empty inherits `AWG_DNS`; cannot be combined with mode-based DNS; not part of CPS, Key, CLIArgs, or ConfigLines)
+- `DNSMode` / `DNSServers` — explicit client DNS selection: `default` inherits `AWG_DNS`, `custom` renders a normalized IPv4 list, and `system` omits the DNS line. Presence validation follows case-insensitive JSON field matching; all DNS fields stay outside CPS and interface grouping.
 - `PersistentKeepalive` — optional pointer-valued client `[Peer]` override, range 0-65535 (nil inherits 25, explicit zero disables; not part of CPS, not in Key/CLIArgs/ConfigLines)
-- `Key()` — deterministic string for interface grouping: **only H1-H4, S1-S4** (excludes Port, ClientListenPort, MTU, DNS, PersistentKeepalive, Jc/Jmin/Jmax, I1-I5)
+- `Key()` — deterministic string for interface grouping: **only H1-H4, S1-S4** (excludes Port, ClientListenPort, MTU, all DNS fields, PersistentKeepalive, Jc/Jmin/Jmax, I1-I5)
 - `CLIArgs()` — args for `awg set`: H1-H4, S1-S4, Jc/Jmin/Jmax (excludes I1-I5 — client-only)
-- `ConfigLines()` — CPS lines for the client `.conf` `[Interface]` section, including I1-I5; ClientListenPort, MTU, DNS, and PersistentKeepalive are rendered separately by the client manager
+- `ConfigLines()` — CPS lines for the client `.conf` `[Interface]` section, including I1-I5; ClientListenPort, MTU, all DNS fields, and PersistentKeepalive are rendered separately by the client manager
 - `GenerateParams()` — generates H1-H4 (random non-overlapping ranges, format `min-max`) and S1, S2 (random 15-150, `S1+56 ≠ S2`)
 - `ValidateOverrides()` validates raw API values before inheritance so invalid negative or malformed values cannot disappear during the merge
 - `ValidateProfile()` validates the complete effective profile, including cross-field J/S relationships and H-range overlap
@@ -64,7 +65,7 @@ Create and update operations validate raw overrides and the effective profile be
 ## Client Routing
 
 - Per-client routing is stored as `*clients.Routing`; nil means full tunnel for backward compatibility.
-- `full` renders `0.0.0.0/0, ::/0`; `split` renders normalized IPv4 CIDRs.
+- `full` renders `0.0.0.0/0, ::/0`; `bypass` subtracts `excluded_ips` from all IPv4 routes and retains `::/0`; `split` renders normalized `allowed_ips` minus optional `excluded_ips` without implicit IPv6.
 - Client routing never participates in `AWGParams`, interface grouping, port allocation, peer migration, or server-side peer `allowed-ips`.
 - Domain, application, and geosite routing require client-side logic and are not part of the generated AWG configuration contract.
 
@@ -79,6 +80,12 @@ Create and update operations validate raw overrides and the effective profile be
 - Per-client `routing` persisted for split policies; nil/full is omitted for backward compatibility
 - New clients receive a unique 32-byte PSK persisted as `preshared_key`; legacy records may omit it
 - On startup: load JSON → load/generate params → group by effective params → recreate interfaces → re-add peers with their persisted PSKs when present
+
+## Usage Collection
+
+- Periodic, manual, and required pre-regeneration collections serialize the complete interface-list, dump, and in-memory counter update sequence with one collector guard.
+- Per-client H/S regeneration acquires the manager write lock first, then the collector takes a complete final snapshot and holds its guard through `Pool.MigratePeer`; the callback wiring from `api` preserves package dependency direction.
+- If any interface dump fails during the required snapshot, regeneration aborts before pool mutation. Detailed dump errors stay in usage logs; the manager and HTTP boundary receive only a safe snapshot error and return generic `500`.
 
 ## Deployment
 

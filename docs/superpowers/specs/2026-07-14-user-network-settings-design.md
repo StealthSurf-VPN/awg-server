@@ -98,6 +98,7 @@ Invalid combinations return `400 Bad Request`:
 Validation rules:
 
 - Presence of the legacy `dns` field, including `dns: ""`, cannot be combined with `dns_mode` or `dns_servers`.
+- DNS field presence follows Go's case-insensitive JSON field matching, so `DNS`, `DNS_MODE`, and `DNS_SERVERS` cannot bypass mixed-format or null/empty validation.
 - Presence of `dns_servers`, including an explicit empty array, without `dns_mode` is invalid.
 - `dns_mode` must be `default`, `custom`, or `system`.
 - `custom` requires at least one server.
@@ -143,8 +144,9 @@ The action:
 3. Generates and replaces only H1-H4 and S1-S2.
 4. Preserves port, client listen port, MTU, all DNS fields, keepalive, Jc/Jmin/Jmax, S3/S4, I1-I5, routing, keys, address, and creation time.
 5. Validates the resulting effective profile before changing the device.
-6. Migrates the peer through the existing interface pool path.
-7. Updates in-memory and persisted client data only after successful migration, using the same persistence guarantees as the existing update path.
+6. Takes a required final usage snapshot while holding the manager write lock and keeps periodic/manual collection blocked through migration.
+7. Migrates the peer through the existing interface pool path.
+8. Updates in-memory and persisted client data only after successful migration, using the same persistence guarantees as the existing update path.
 
 The client action must generate a grouping key different from the client's current effective grouping key. In the practically impossible event of an identical generated result, it makes up to eight generation attempts before returning an internal error.
 
@@ -158,7 +160,7 @@ Errors follow existing manager mappings:
 - `400` when the resulting effective AWG profile is invalid
 - `409` for an interface port conflict or an unsupported port change on a shared interface
 - `503` when the interface limit prevents migration
-- `500` for secure randomness or other internal device failures
+- `500` for secure randomness, required usage snapshot failure, or other internal device failures
 
 ## Routing Normalization and Subtraction
 
@@ -195,6 +197,7 @@ The existing 1 MiB request-body limit remains in force. To bound generated confi
 - Extend `AWGParams` with `DNSMode string` and `DNSServers []string` JSON fields.
 - Keep `DNS string` for backward compatibility.
 - Preserve JSON field-presence information during request decoding so an explicitly supplied empty legacy `dns` or empty `dns_servers` can still participate in mixed-format validation. Presence markers are internal and never serialized.
+- Match DNS presence markers case-insensitively, consistent with `encoding/json` field matching.
 - Add pure validation/normalization for the legacy and new DNS forms.
 - Add a pure helper that applies `GeneratedParams` to a deep-cloned override object while preserving every unrelated field and slice.
 - Keep `Key()`, `CLIArgs()`, and `ConfigLines()` independent of DNS.
@@ -223,7 +226,10 @@ Routing and DNS changes never migrate a peer by themselves. H/S regeneration alw
 - Client regeneration is serialized with create, update, and delete by `Manager.mu`.
 - Generation without a client is stateless and needs no manager lock.
 - All input and effective-profile validation happens before interface mutation.
-- A failed migration must not replace the client's stored AWG overrides. Existing pool rollback behavior remains responsible for restoring the peer when migration setup fails.
+- Immediately before regeneration migrates the peer, the manager invokes a generic migration guard while still holding its write lock. The usage collector uses that guard to take a required all-interface snapshot and holds the same serialization lock through the pool migration.
+- Every periodic or manual `Collector.Collect()` invocation uses the same serialization lock, so it cannot observe an intermediate migration state or race the required snapshot.
+- A required snapshot failure is logged inside the usage package and returned across the API boundary only as a safe generic error. It aborts regeneration before pool mutation and produces a generic `500` response.
+- A failed migration must not replace the client's stored AWG overrides. When removal from a shared old interface fails after the peer was added to the new interface, the pool best-effort restores the old peer and route, removes the new peer, and updates peer counts, interface maps, and used-port bookkeeping for every successful rollback step. Partial rollback failure is logged safely and still returns an error.
 - Storage writes retain the current atomic temporary-file-and-rename implementation and the existing manager behavior for save failures; changing global persistence error semantics is outside this feature.
 - Routing computation and DNS normalization are pure and must not mutate caller-owned slices.
 

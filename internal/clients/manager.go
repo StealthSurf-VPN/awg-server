@@ -27,6 +27,8 @@ type ClientUpdate struct {
 	RoutingSet   bool
 }
 
+type MigrationGuard func(func() error) error
+
 type Manager struct {
 	mu            sync.RWMutex
 	pool          *awg.Pool
@@ -196,16 +198,20 @@ func (m *Manager) UpdateClient(id string, update ClientUpdate) (*ClientData, err
 		return nil, err
 	}
 
-	return m.applyClientUpdateLocked(client, params, routing, update.AWGParamsSet)
+	return m.applyClientUpdateLocked(client, params, routing, update.AWGParamsSet, nil)
 }
 
-func (m *Manager) RegenerateAWGParams(id string) (*ClientData, error) {
+func (m *Manager) RegenerateAWGParams(id string, migrationGuard MigrationGuard) (*ClientData, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	client, ok := m.clients[id]
 	if !ok {
 		return nil, ErrClientNotFound
+	}
+
+	if migrationGuard == nil {
+		return nil, errors.New("migration guard is required")
 	}
 
 	oldKey := m.effectiveParams(client.AWGParams).Key()
@@ -232,13 +238,13 @@ func (m *Manager) RegenerateAWGParams(id string) (*ClientData, error) {
 			continue
 		}
 
-		return m.applyClientUpdateLocked(client, normalized, client.Routing, true)
+		return m.applyClientUpdateLocked(client, normalized, client.Routing, true, migrationGuard)
 	}
 
 	return nil, ErrGeneratedParamsUnchanged
 }
 
-func (m *Manager) applyClientUpdateLocked(client *ClientData, params *awg.AWGParams, routing *Routing, awgParamsSet bool) (*ClientData, error) {
+func (m *Manager) applyClientUpdateLocked(client *ClientData, params *awg.AWGParams, routing *Routing, awgParamsSet bool, migrationGuard MigrationGuard) (*ClientData, error) {
 	if awgParamsSet {
 		normalized, err := awg.NormalizeOverrides(params)
 		if err != nil {
@@ -265,7 +271,17 @@ func (m *Manager) applyClientUpdateLocked(client *ClientData, params *awg.AWGPar
 				return nil, err
 			}
 
-			if err := m.pool.MigratePeer(oldParams, newParams, publicKey, presharedKey, client.Address); err != nil {
+			migrate := func() error {
+				return m.pool.MigratePeer(oldParams, newParams, publicKey, presharedKey, client.Address)
+			}
+
+			if migrationGuard != nil {
+				err = migrationGuard(migrate)
+			} else {
+				err = migrate()
+			}
+
+			if err != nil {
 				return nil, fmt.Errorf("migrate peer: %w", err)
 			}
 		}

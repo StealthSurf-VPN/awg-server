@@ -56,6 +56,14 @@ func configureInterfaceNetwork(ifName string, address string) error {
 }
 
 func addPeerToInterface(ifName string, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
+	if err := setPeerOnInterface(ifName, publicKey, presharedKey, allowedIP); err != nil {
+		return err
+	}
+
+	return replacePeerRoute(ifName, allowedIP)
+}
+
+func setPeerOnInterface(ifName string, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
 	args := []string{"set", ifName, "peer", KeyToBase64(publicKey)}
 
 	if presharedKey != nil {
@@ -75,6 +83,10 @@ func addPeerToInterface(ifName string, publicKey [32]byte, presharedKey *[32]byt
 		return fmt.Errorf("awg set peer: %s: %w", string(output), err)
 	}
 
+	return nil
+}
+
+func replacePeerRoute(ifName, allowedIP string) error {
 	if output, err := exec.Command(
 		"ip", "route", "replace", allowedIP+"/32", "dev", ifName,
 	).CombinedOutput(); err != nil {
@@ -111,7 +123,7 @@ type PeerDump struct {
 func ShowDump(ifName string) ([]PeerDump, error) {
 	output, err := exec.Command("awg", "show", ifName, "dump").CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("awg show dump: %s: %w", string(output), err)
+		return nil, fmt.Errorf("awg show dump: %w", err)
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")

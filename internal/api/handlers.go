@@ -210,7 +210,7 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRegenerateClientAWGParams(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	client, err := s.manager.RegenerateAWGParams(id)
+	client, err := s.manager.RegenerateAWGParams(id, s.collector.WithRequiredSnapshot)
 	if err != nil {
 		status := clientUpdateErrorStatus(err)
 

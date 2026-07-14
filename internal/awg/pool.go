@@ -168,8 +168,8 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, p
 	newIfc.peerCount++
 
 	if err := removePeerFromInterface(oldIfc.ifName, publicKey, allowedIP); err != nil {
-		log.Printf("error: failed to remove peer from old interface (ghost peer until restart): %v", err)
-		return nil
+		p.rollbackSharedMigration(oldIfc, newIfc, newKey, publicKey, presharedKey, allowedIP)
+		return fmt.Errorf("remove peer from old interface: %w", err)
 	}
 
 	oldIfc.peerCount--
@@ -182,6 +182,28 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, p
 	}
 
 	return nil
+}
+
+func (p *Pool) rollbackSharedMigration(oldIfc, newIfc *iface, newKey string, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) {
+	if err := setPeerOnInterface(oldIfc.ifName, publicKey, presharedKey, allowedIP); err != nil {
+		log.Printf("warning: shared peer migration rollback failed: step=restore_old_peer interface=%s", oldIfc.ifName)
+	}
+
+	if err := removePeerFromInterface(newIfc.ifName, publicKey, allowedIP); err != nil {
+		log.Printf("warning: shared peer migration rollback failed: step=remove_new_peer interface=%s", newIfc.ifName)
+	} else {
+		newIfc.peerCount--
+		if newIfc.peerCount <= 0 {
+			log.Printf("destroying interface %s (shared migration rolled back)", newIfc.ifName)
+			destroyInterface(newIfc.ifName)
+			delete(p.usedPorts, newIfc.port)
+			delete(p.ifaces, newKey)
+		}
+	}
+
+	if err := replacePeerRoute(oldIfc.ifName, allowedIP); err != nil {
+		log.Printf("warning: shared peer migration rollback failed: step=restore_old_route interface=%s", oldIfc.ifName)
+	}
 }
 
 func (p *Pool) rollbackPeer(params AWGParams, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) {

@@ -154,6 +154,8 @@ If `routing` is omitted, `null`, or `{"mode":"full"}`, the client uses full-tunn
 
 Every new client automatically receives a unique server-generated 32-byte preshared key. The API does not accept a PSK in the request and does not expose it in list, create, or update JSON responses. It is returned only as part of the authenticated client configuration.
 
+The request body is limited to 1 MiB. A larger body is rejected as an invalid request with `400 Bad Request` before client state changes.
+
 **Response** `201 Created`:
 
 ```json
@@ -206,6 +208,8 @@ Updates `awg_params` and `routing` independently. Omitting either field preserve
 For `awg_params`, include every custom field that must be retained; `null` reverts all fields to their automatic or server-default behavior. The object is a complete replacement, not a field merge. For example, preserving custom DNS requires sending both `"dns_mode":"custom"` and the complete `dns_servers` list in the same object, while switching to system DNS can replace them with `"dns_mode":"system"`. When all other fields remain unchanged, changing only `client_listen_port`, `mtu`, a valid DNS setting, or `persistent_keepalive` updates the generated client config without moving the peer to another interface. If interface-level parameters differ, the peer is moved to the appropriate interface (created on demand if needed).
 
 For `routing`, an object replaces the complete policy and `null` resets it to full tunnel. Routing-only updates never move the peer or change its server-side `/32`; download and reapply the regenerated configuration on the client device for the new routing policy to take effect. The same re-download/reapply requirement applies to other client-only values.
+
+The request body is limited to 1 MiB. A larger body is rejected as an invalid request with `400 Bad Request` before client state changes.
 
 **Response** `200 OK`:
 
@@ -274,6 +278,8 @@ This bearer-authenticated endpoint requires no request body. It generates a new 
 
 Only H1-H4 and S1-S2 are replaced. The operation preserves the server port, client listen port, MTU, all legacy and mode-based DNS fields, persistent keepalive, Jc/Jmin/Jmax, S3/S4, I1-I5, routing, client ID, address, creation time, private/public keys, and preshared key. If the client previously inherited all AWG overrides, the stored object gains only the generated H/S fields and every unrelated value continues to inherit its server default.
 
+Immediately before peer migration, while the client manager write lock is held, the usage collector takes a complete snapshot of every active interface. Periodic and manual collections are serialized with this snapshot, and the same guard remains held through migration, so the last counters from the old peer are accumulated before its kernel state is removed. If any required interface dump fails, the action returns a generic `500` before pool mutation and leaves the stored client unchanged.
+
 After a successful per-client regeneration, the old client configuration no longer matches the server-side H1-H4/S1-S2 profile. Fetch `GET /api/clients/{id}/configuration` immediately and reapply the returned configuration. The action does not rotate the private key, preshared key, address, or any unrelated AWG setting.
 
 Errors use the common [JSON error envelope](#error-handling).
@@ -286,9 +292,11 @@ Errors use the common [JSON error envelope](#error-handling).
 | `404` | The client was not found. |
 | `409` | The preserved server port conflicts with another interface, including the shared explicit-port case described below. |
 | `503` | The interface limit prevents migration. |
-| `500` | Secure randomness, distinct-parameter generation, or another internal device operation failed. The response is generic. |
+| `500` | Secure randomness, distinct-parameter generation, the required usage snapshot, or another internal device operation failed. The response is generic. |
 
-The explicit shared-port conflict is a `409`: when a client has a fixed server-side `port` and shares its current interface, the new H/S grouping key needs a different interface while that same port is still occupied by the shared old interface. Any failed action leaves the client unchanged.
+The explicit shared-port conflict is a `409`: when a client has a fixed server-side `port` and shares its current interface, the new H/S grouping key needs a different interface while that same port is still occupied by the shared old interface.
+
+A failed migration never returns success and never persists the regenerated override. If removal from a shared old interface fails after the peer was added to the new interface, the pool best-effort restores the old peer and route and removes the new peer; every successful rollback step updates interface and port bookkeeping. A partial rollback failure is logged server-side and still returns the generic `500`; in that exceptional case the stored client remains unchanged, but the host's live peer state can require operator inspection or a service restart.
 
 ## Get Client Configuration
 
