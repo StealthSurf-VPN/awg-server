@@ -54,6 +54,8 @@ Parameters with value `0` are omitted from client configs and `awg set` commands
 
 Clients can override defaults by providing `awg_params` in the create/update API request. Per-client params are merged over defaults (non-zero values override unless documented otherwise). The optional `port` field accepts 1024-65535 and uses automatic assignment when omitted or zero. The optional `mtu` field accepts 1280-1420 and inherits `AWG_MTU` when omitted or zero. The optional `dns` field accepts one IPv4 address and inherits `AWG_DNS` when omitted or empty; DoH URLs and other formats are rejected. The optional `persistent_keepalive` field accepts 0-65535, inherits 25 when omitted, and is disabled by an explicit zero.
 
+The complete default profile, including persisted generated H/S values and CPS environment values, is validated before the interface pool starts. Invalid defaults prevent startup and produce a field-specific log error. The accepted J/S/H/I constraints are the same as the [`awg_params` API contract](api.md#awg-params-object).
+
 ## Multi-Interface Behavior
 
 When clients have different CPS parameters, the server creates separate AWG interfaces:

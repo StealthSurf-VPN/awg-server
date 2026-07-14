@@ -85,6 +85,11 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams) (*ClientData,
 		return nil, ErrClientExists
 	}
 
+	effective, err := m.validatedParams(params)
+	if err != nil {
+		return nil, err
+	}
+
 	privKey, err := awg.GeneratePrivateKey()
 	if err != nil {
 		return nil, fmt.Errorf("generate key pair: %w", err)
@@ -101,8 +106,6 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams) (*ClientData,
 	if err != nil {
 		return nil, fmt.Errorf("allocate IP: %w", err)
 	}
-
-	effective := m.effectiveParams(params)
 
 	if err := m.pool.AddPeer(effective, pubKey, &presharedKey, ip); err != nil {
 		return nil, fmt.Errorf("add peer to device: %w", err)
@@ -142,7 +145,10 @@ func (m *Manager) UpdateClient(id string, params *awg.AWGParams) (*ClientData, e
 	}
 
 	oldParams := m.effectiveParams(client.AWGParams)
-	newParams := m.effectiveParams(params)
+	newParams, err := m.validatedParams(params)
+	if err != nil {
+		return nil, err
+	}
 
 	needsMigration := oldParams.Key() != newParams.Key() || oldParams.Port != newParams.Port
 
@@ -395,6 +401,19 @@ func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
 	}
 
 	return result
+}
+
+func (m *Manager) validatedParams(params *awg.AWGParams) (awg.AWGParams, error) {
+	if err := awg.ValidateOverrides(params); err != nil {
+		return awg.AWGParams{}, err
+	}
+
+	effective := m.effectiveParams(params)
+	if err := awg.ValidateProfile(effective); err != nil {
+		return awg.AWGParams{}, err
+	}
+
+	return effective, nil
 }
 
 func (m *Manager) allocateIP() (string, error) {
