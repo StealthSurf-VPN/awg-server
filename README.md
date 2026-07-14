@@ -160,6 +160,12 @@ curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
   -H "Content-Type: application/json" \
   -d '{"awg_params":{"port":51825,"client_listen_port":54321,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":0,"jc":10,"jmin":100,"jmax":1000}}'
 
+# Update client split routing policy
+curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"routing":{"mode":"split","allowed_ips":["10.0.0.0/8","172.16.0.0/12"]}}'
+
 # Get client config (.conf)
 curl http://localhost:7777/api/clients/my-client-uuid/configuration \
   -H "Authorization: Bearer $TOKEN"
@@ -173,6 +179,8 @@ curl http://localhost:7777/api/clients/my-client-uuid/stats \
 curl -X DELETE http://localhost:7777/api/clients/my-client-uuid \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+Routing mode `full` preserves the current full-tunnel behavior. Mode `split` accepts one or more IPv4 CIDRs and renders only those normalized prefixes in the generated client `AllowedIPs`. Routing is client-only: it does not change interface grouping or the server-side peer `/32`, and the updated configuration must be downloaded and reapplied on the client device.
 
 ## Configuration
 
@@ -273,7 +281,7 @@ AmneziaWG sets CPS obfuscation parameters at the **interface level**, not per-pe
 
 - Each unique set of CPS parameters gets its own `awgN` interface (awg0, awg1, awg2, ...)
 - Clients with identical CPS parameters share an interface
-- Per-client `mtu`, `dns`, `persistent_keepalive`, and PSK do not affect interface grouping; PSK is also installed on the corresponding server peer
+- Per-client `mtu`, `dns`, `persistent_keepalive`, routing, and PSK do not affect interface grouping; PSK is also installed on the corresponding server peer
 - Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from base port)
 - Interfaces are created on demand and destroyed when their last peer is removed
 - All interfaces share the same server private key

@@ -15,6 +15,14 @@ import (
 
 var ErrClientExists = errors.New("client already exists")
 var ErrClientNotFound = errors.New("client not found")
+var ErrEmptyClientUpdate = errors.New("at least one of awg_params or routing is required")
+
+type ClientUpdate struct {
+	AWGParams    *awg.AWGParams
+	AWGParamsSet bool
+	Routing      *Routing
+	RoutingSet   bool
+}
 
 type Manager struct {
 	mu            sync.RWMutex
@@ -77,9 +85,14 @@ func NewManager(pool *awg.Pool, storage *Storage, cfg *config.Config, defaultPar
 	return m, nil
 }
 
-func (m *Manager) CreateClient(name string, params *awg.AWGParams) (*ClientData, error) {
+func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Routing) (*ClientData, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	normalizedRouting, err := NormalizeRouting(routing)
+	if err != nil {
+		return nil, err
+	}
 
 	if _, exists := m.clients[name]; exists {
 		return nil, ErrClientExists
@@ -119,6 +132,7 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams) (*ClientData,
 		Address:      ip,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 		AWGParams:    params,
+		Routing:      normalizedRouting,
 	}
 
 	m.clients[client.ID] = client
@@ -135,7 +149,30 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams) (*ClientData,
 	return &cp, nil
 }
 
-func (m *Manager) UpdateClient(id string, params *awg.AWGParams) (*ClientData, error) {
+func resolveClientUpdate(client *ClientData, update ClientUpdate) (*awg.AWGParams, *Routing, error) {
+	if !update.AWGParamsSet && !update.RoutingSet {
+		return nil, nil, ErrEmptyClientUpdate
+	}
+
+	params := client.AWGParams
+	if update.AWGParamsSet {
+		params = update.AWGParams
+	}
+
+	routing := client.Routing
+	if update.RoutingSet {
+		normalizedRouting, err := NormalizeRouting(update.Routing)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		routing = normalizedRouting
+	}
+
+	return params, routing, nil
+}
+
+func (m *Manager) UpdateClient(id string, update ClientUpdate) (*ClientData, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -144,31 +181,40 @@ func (m *Manager) UpdateClient(id string, params *awg.AWGParams) (*ClientData, e
 		return nil, ErrClientNotFound
 	}
 
-	oldParams := m.effectiveParams(client.AWGParams)
-	newParams, err := m.validatedParams(params)
+	params, routing, err := resolveClientUpdate(client, update)
 	if err != nil {
 		return nil, err
 	}
 
-	needsMigration := oldParams.Key() != newParams.Key() || oldParams.Port != newParams.Port
+	if update.AWGParamsSet {
+		oldParams := m.effectiveParams(client.AWGParams)
 
-	if needsMigration {
-		pubKey, err := awg.Base64ToKey(client.PublicKey)
-		if err != nil {
-			return nil, fmt.Errorf("decode public key: %w", err)
-		}
-
-		presharedKey, err := decodePresharedKey(client.PresharedKey)
+		newParams, err := m.validatedParams(params)
 		if err != nil {
 			return nil, err
 		}
 
-		if err := m.pool.MigratePeer(oldParams, newParams, pubKey, presharedKey, client.Address); err != nil {
-			return nil, fmt.Errorf("migrate peer: %w", err)
+		needsMigration := oldParams.Key() != newParams.Key() || oldParams.Port != newParams.Port
+
+		if needsMigration {
+			pubKey, err := awg.Base64ToKey(client.PublicKey)
+			if err != nil {
+				return nil, fmt.Errorf("decode public key: %w", err)
+			}
+
+			presharedKey, err := decodePresharedKey(client.PresharedKey)
+			if err != nil {
+				return nil, err
+			}
+
+			if err := m.pool.MigratePeer(oldParams, newParams, pubKey, presharedKey, client.Address); err != nil {
+				return nil, fmt.Errorf("migrate peer: %w", err)
+			}
 		}
 	}
 
 	client.AWGParams = params
+	client.Routing = routing
 
 	for i, c := range m.data.Clients {
 		if c.ID == id {
@@ -299,10 +345,12 @@ PublicKey = %s`, awg.KeyToBase64(serverPubKey))
 PresharedKey = %s`, client.PresharedKey)
 	}
 
+	allowedIPs := routingAllowedIPs(client.Routing)
+
 	cfg += fmt.Sprintf(`
 Endpoint = %s:%d
-AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = %d`, endpoint, port, params.PersistentKeepaliveValue())
+AllowedIPs = %s
+PersistentKeepalive = %d`, endpoint, port, allowedIPs, params.PersistentKeepaliveValue())
 
 	return cfg
 }
