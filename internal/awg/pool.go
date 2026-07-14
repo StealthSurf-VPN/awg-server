@@ -111,7 +111,7 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, p
 
 	oldIfc, ok := p.ifaces[oldKey]
 	if !ok {
-		return fmt.Errorf("no interface for params key %s", oldKey)
+		return errors.New("no interface for existing profile")
 	}
 
 	// Port is per-interface; can't change port when other peers share the interface
