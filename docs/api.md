@@ -75,7 +75,7 @@ Content-Type: application/json
 }
 ```
 
-With custom server port, client listen port, MTU, DNS, persistent keepalive, and obfuscation parameters:
+With custom server port, client listen port, MTU, a legacy DNS override, persistent keepalive, and obfuscation parameters:
 
 ```http
 POST /api/clients
@@ -96,7 +96,22 @@ Content-Type: application/json
 }
 ```
 
-If `awg_params` is omitted, the client uses server defaults (global `AWG_MTU`, global `AWG_DNS`, `PersistentKeepalive = 25`, auto-generated H/S, and env Jc/Jmin/Jmax). Per-client params are merged over defaults. A custom server-side `port` must be in the inclusive range 1024-65535; omitted or zero uses automatic server interface assignment. `client_listen_port` accepts the same range and adds `ListenPort` to the generated client `[Interface]`; omitted or zero leaves client-side port selection automatic. `dns` accepts one IPv4 address; omission or an empty string inherits `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected. `persistent_keepalive` accepts 0-65535: omission inherits 25, while an explicit zero disables keepalive.
+With mode-based custom DNS:
+
+```http
+POST /api/clients
+Content-Type: application/json
+
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "awg_params": {
+    "dns_mode": "custom",
+    "dns_servers": ["1.1.1.1", "1.0.0.1"]
+  }
+}
+```
+
+If `awg_params` is omitted, the client uses server defaults (global `AWG_MTU`, global `AWG_DNS`, `PersistentKeepalive = 25`, auto-generated H/S, and env Jc/Jmin/Jmax). Per-client params are merged over defaults. A custom server-side `port` must be in the inclusive range 1024-65535; omitted or zero uses automatic server interface assignment. `client_listen_port` accepts the same range and adds `ListenPort` to the generated client `[Interface]`; omitted or zero leaves client-side port selection automatic. DNS supports the backward-compatible `dns` field and the mode-based `dns_mode`/`dns_servers` fields described in [DNS Settings](#dns-settings). `persistent_keepalive` accepts 0-65535: omission inherits 25, while an explicit zero disables keepalive.
 
 If `routing` is omitted, `null`, or `{"mode":"full"}`, the client uses full-tunnel routing. See [Routing Object](#routing-object) for split-tunnel behavior and validation.
 
@@ -140,7 +155,8 @@ Content-Type: application/json
   "awg_params": {
     "client_listen_port": 54321,
     "mtu": 1280,
-    "dns": "9.9.9.9",
+    "dns_mode": "custom",
+    "dns_servers": ["9.9.9.9", "149.112.112.112"],
     "persistent_keepalive": 0,
     "jc": 10,
     "jmin": 100,
@@ -155,7 +171,7 @@ Content-Type: application/json
 
 Updates `awg_params` and `routing` independently. Omitting either field preserves its current value, JSON `null` resets that field to its default behavior, and an object replaces the complete stored value for that field. A request containing neither field returns `400 Bad Request`.
 
-For `awg_params`, include every custom field that must be retained; `null` reverts all fields to their automatic or server-default behavior. When all other fields remain unchanged, changing only `client_listen_port`, `mtu`, `dns`, or `persistent_keepalive` updates the generated client config without moving the peer to another interface. If interface-level parameters differ, the peer is moved to the appropriate interface (created on demand if needed).
+For `awg_params`, include every custom field that must be retained; `null` reverts all fields to their automatic or server-default behavior. The object is a complete replacement, not a field merge. For example, preserving custom DNS requires sending both `"dns_mode":"custom"` and the complete `dns_servers` list in the same object, while switching to system DNS can replace them with `"dns_mode":"system"`. When all other fields remain unchanged, changing only `client_listen_port`, `mtu`, a valid DNS setting, or `persistent_keepalive` updates the generated client config without moving the peer to another interface. If interface-level parameters differ, the peer is moved to the appropriate interface (created on demand if needed).
 
 For `routing`, an object replaces the complete policy and `null` resets it to full tunnel. Routing-only updates never move the peer or change its server-side `/32`; download and reapply the regenerated configuration on the client device for the new routing policy to take effect. The same re-download/reapply requirement applies to other client-only values.
 
@@ -169,7 +185,8 @@ For `routing`, an object replaces the complete policy and `null` resets it to fu
   "awg_params": {
     "client_listen_port": 54321,
     "mtu": 1280,
-    "dns": "9.9.9.9",
+    "dns_mode": "custom",
+    "dns_servers": ["9.9.9.9", "149.112.112.112"],
     "persistent_keepalive": 0,
     "jc": 10,
     "jmin": 100,
@@ -202,7 +219,7 @@ GET /api/clients/{id}/configuration
 PrivateKey = <base64>
 ListenPort = 54321
 Address = 10.0.0.2/32
-DNS = 9.9.9.9
+DNS = 9.9.9.9, 149.112.112.112
 MTU = 1280
 Jc = 5
 Jmin = 50
@@ -222,7 +239,7 @@ AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 60
 ```
 
-`ListenPort` is included only when `awg_params.client_listen_port` is between 1024 and 65535; omission or zero lets the client choose automatically. It is local to the client and does not change the server `Endpoint` port. The MTU is the client's `awg_params.mtu` override, or the global `AWG_MTU` value when the override is omitted or zero. DNS is the client's validated IPv4 `awg_params.dns` override, or global `AWG_DNS` when omitted or empty. Persistent keepalive is the client's `awg_params.persistent_keepalive` override; omission uses 25 and zero disables it. `PresharedKey` is generated and stored by the server for new clients and must match the key installed on the server peer. Legacy clients created before PSK support omit this line and continue to work without a PSK. The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
+`ListenPort` is included only when `awg_params.client_listen_port` is between 1024 and 65535; omission or zero lets the client choose automatically. It is local to the client and does not change the server `Endpoint` port. The MTU is the client's `awg_params.mtu` override, or the global `AWG_MTU` value when the override is omitted or zero. DNS uses global `AWG_DNS` for inherited/default mode, one address for the legacy override, or the normalized comma-separated `dns_servers` list for custom mode. In system mode the `DNS` line is omitted completely so the client keeps its system resolver. Persistent keepalive is the client's `awg_params.persistent_keepalive` override; omission uses 25 and zero disables it. `PresharedKey` is generated and stored by the server for new clients and must match the key installed on the server peer. Legacy clients created before PSK support omit this line and continue to work without a PSK. The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
 
 **Errors:**
 
@@ -288,7 +305,9 @@ All fields are optional. Unless documented otherwise below, zero integer values 
 | `port` | int | UDP listen port for the interface, inclusive range 1024-65535. If omitted or zero, auto-assigned from the base port. Used in client config `Endpoint`. |
 | `client_listen_port` | int | Local UDP listen port for the generated client `[Interface]`, inclusive range 1024-65535. If omitted or zero, `ListenPort` is omitted and the client selects a port automatically. Does not affect server interface grouping or `Endpoint`. |
 | `mtu` | int | MTU for this client's generated config, range 1280-1420. Omit or set to 0 to inherit `AWG_MTU`. Does not affect interface grouping. |
-| `dns` | string | One IPv4 DNS server for the generated client `[Interface]`. Omit or set to an empty string to inherit `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected. Does not affect interface grouping. |
+| `dns` | string | Legacy-compatible single IPv4 DNS override. Omit or set to an empty string to inherit `AWG_DNS`. Cannot be combined with `dns_mode` or `dns_servers`, even when explicitly empty. Does not affect interface grouping. |
+| `dns_mode` | string | DNS behavior: `default`, `custom`, or `system`. Cannot be combined with legacy `dns`. Does not affect interface grouping. |
+| `dns_servers` | string[] | DNS servers for `custom` mode. Every value must be an IPv4 address. Requires `dns_mode` and cannot be combined with legacy `dns`. Does not affect interface grouping. |
 | `persistent_keepalive` | int | Keepalive interval in seconds for the generated client `[Peer]`, range 0-65535. Omit to inherit 25; set to 0 to disable. Does not affect interface grouping. |
 | `jc` | int | Junk packet count, range 0-128. Zero inherits the server default. |
 | `jmin` | int | Junk packet minimum size, range 0-1280. Zero inherits the server default. When effective `jc > 0`, effective `jmin` must be positive and less than `jmax`. |
@@ -299,6 +318,22 @@ All fields are optional. Unless documented otherwise below, zero integer values 
 | `s4` | int | Transport packet padding, range 0-32. Zero inherits the server default. |
 | `h1` - `h4` | string | Unsigned decimal `uint32` values or inclusive `start-end` ranges. Empty values inherit server defaults; all four effective ranges are required and must not overlap. |
 | `i1` - `i5` | string | Tag-only CPS strings. Supported tags are `<b 0xHEX>`, `<t>`, `<r N>`, `<rc N>`, and `<rd N>`; `N` is 0-1000 and each expanded packet is at most 1280 bytes. Empty values inherit server defaults. |
+
+### DNS Settings
+
+The legacy `dns` field remains supported, while new clients can select an explicit mode. The accepted shapes and generated behavior are:
+
+| Form | Accepted fields | Generated `[Interface]` behavior |
+| ---- | --------------- | -------------------------------- |
+| Inherited legacy default | All DNS fields omitted, or `"dns":""` supplied alone | `DNS = <AWG_DNS>` |
+| Legacy custom | `"dns":"9.9.9.9"` supplied alone | `DNS = 9.9.9.9` |
+| `default` mode | `"dns_mode":"default"`; `dns_servers` omitted or empty | `DNS = <AWG_DNS>` |
+| `custom` mode | `"dns_mode":"custom"` and one or more `dns_servers` | One comma-and-space-separated line, for example `DNS = 1.1.1.1, 1.0.0.1` |
+| `system` mode | `"dns_mode":"system"`; `dns_servers` omitted or empty | No `DNS` line is generated |
+
+Field presence is validated strictly. Supplying legacy `dns` forbids both `dns_mode` and `dns_servers`, including combinations such as `"dns":""` with a mode or list. Supplying `dns_servers` requires `dns_mode` even when the list is explicitly empty. An explicitly empty `dns_mode` is invalid. JSON `null` also counts as an explicitly supplied nested DNS field and follows the same presence rules. `custom` requires a non-empty list; `default` and `system` reject non-empty lists.
+
+Every non-empty legacy `dns` value and every `dns_servers` item must be a plain IPv4 address. DoH URLs, hostnames, CIDRs, IPv6 addresses, and mixed-format values are rejected with `400 Bad Request`. Custom server addresses are canonicalized and duplicates are removed stably before persistence, preserving the first occurrence order.
 
 Malformed ranges, overlapping effective header ranges, unsupported CPS tags, text outside CPS tags, control characters, and expanded CPS packets larger than 1280 bytes are rejected with `400 Bad Request` before client state is changed.
 
