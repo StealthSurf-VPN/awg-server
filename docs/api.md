@@ -75,6 +75,8 @@ This bearer-authenticated endpoint requires no request body. It generates a stan
 
 The response is the raw generated fragment, without a wrapper object, and its fields can be inserted into an `awg_params` object.
 
+Errors use the common [JSON error envelope](#error-handling).
+
 | Status | Meaning |
 | ------ | ------- |
 | `200` | A valid H1-H4 and S1-S2 fragment was generated. |
@@ -279,6 +281,8 @@ Only H1-H4 and S1-S2 are replaced. The operation preserves the server port, clie
 
 > **Warning:** A successful response means the server-side peer has already moved to the new H/S profile, so the old client configuration is immediately invalid. Immediately fetch `GET /api/clients/{id}/configuration`, then deliver and reapply that configuration on the client device.
 
+Errors use the common [JSON error envelope](#error-handling).
+
 | Status | Meaning |
 | ------ | ------- |
 | `200` | The client was migrated and the updated normal client response is returned. |
@@ -424,5 +428,21 @@ Malformed ranges, overlapping effective header ranges, unsupported CPS tags, tex
 
 ## Error Handling
 
-- `401 Unauthorized` — missing or invalid `Authorization: Bearer` header
-- `500 Internal Server Error` — returns generic `{"error": "internal server error"}` (details logged server-side only)
+All documented API error responses use `Content-Type: application/json` and the same envelope:
+
+```json
+{"error":"<message>"}
+```
+
+Endpoint sections define which statuses each action can return. The message contract is:
+
+| Status | Message contract |
+| ------ | ---------------- |
+| `400 Bad Request` | A field- or request-specific validation message. |
+| `401 Unauthorized` | Missing `Authorization` header: fixed `{"error":"missing authorization header"}`. Invalid bearer scheme or token: fixed `{"error":"invalid token"}`. |
+| `404 Not Found` | An action-specific not-found message, such as `{"error":"client not found"}`. |
+| `409 Conflict` | An action-specific duplicate, port, or shared-interface conflict message. |
+| `503 Service Unavailable` | An action-specific capacity message, including the maximum-interface limit. |
+| `500 Internal Server Error` | Always the fixed generic `{"error":"internal server error"}`; internal details are never returned to the caller. |
+
+Messages for `400`, `404`, `409`, and `503` can include field or operation context. Clients should use the HTTP status for control flow instead of matching those dynamic strings.

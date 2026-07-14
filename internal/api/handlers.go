@@ -208,10 +208,14 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRegenerateClientAWGParams(w http.ResponseWriter, r *http.Request) {
-	client, err := s.manager.RegenerateAWGParams(r.PathValue("id"))
+	id := r.PathValue("id")
+
+	client, err := s.manager.RegenerateAWGParams(id)
 	if err != nil {
-		log.Printf("regenerate client awg params error: %v", err)
-		writeError(w, err, clientUpdateErrorStatus(err))
+		status := clientUpdateErrorStatus(err)
+
+		log.Printf("client operation failed: operation=regenerate_awg_params client_id=%q status=%d", id, status)
+		writeError(w, err, status)
 		return
 	}
 

@@ -256,13 +256,27 @@ func (p *Pool) getOrCreateInterface(params AWGParams) (*iface, error) {
 		return ifc, nil
 	}
 
+	port := params.Port
+	if port != 0 {
+		resolvedPort, err := p.resolvePort(port)
+		if err != nil {
+			return nil, err
+		}
+
+		port = resolvedPort
+	}
+
 	if p.maxIfaces > 0 && len(p.ifaces) >= p.maxIfaces {
 		return nil, ErrMaxInterfacesReached
 	}
 
-	port, err := p.resolvePort(params.Port)
-	if err != nil {
-		return nil, err
+	if port == 0 {
+		resolvedPort, err := p.resolvePort(0)
+		if err != nil {
+			return nil, err
+		}
+
+		port = resolvedPort
 	}
 
 	ifName := fmt.Sprintf("awg%d", p.nextIndex)
