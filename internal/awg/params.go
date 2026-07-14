@@ -3,9 +3,7 @@ package awg
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"net/netip"
 )
 
 const MinPort = 1024
@@ -17,13 +15,19 @@ const MaxPersistentKeepalive = 65535
 
 var ErrInvalidPort = fmt.Errorf("port must be 0 or between %d and %d", MinPort, MaxPort)
 var ErrInvalidPersistentKeepalive = fmt.Errorf("persistent_keepalive must be between 0 and %d", MaxPersistentKeepalive)
-var ErrInvalidDNS = errors.New("dns must be empty or a valid IPv4 address")
 
 type AWGParams struct {
-	Port                int    `json:"port,omitempty"`
-	ClientListenPort    int    `json:"client_listen_port,omitempty"`
-	MTU                 int    `json:"mtu,omitempty"`
-	DNS                 string `json:"dns,omitempty"`
+	Port             int      `json:"port,omitempty"`
+	ClientListenPort int      `json:"client_listen_port,omitempty"`
+	MTU              int      `json:"mtu,omitempty"`
+	DNS              string   `json:"dns,omitempty"`
+	DNSMode          string   `json:"dns_mode,omitempty"`
+	DNSServers       []string `json:"dns_servers,omitempty"`
+
+	dnsSet        bool
+	dnsModeSet    bool
+	dnsServersSet bool
+
 	PersistentKeepalive *int   `json:"persistent_keepalive,omitempty"`
 	Jc                  int    `json:"jc,omitempty"`
 	Jmin                int    `json:"jmin,omitempty"`
@@ -62,19 +66,6 @@ func ValidateMTU(mtu int) error {
 
 	if mtu < MinMTU || mtu > MaxMTU {
 		return fmt.Errorf("mtu must be between %d and %d", MinMTU, MaxMTU)
-	}
-
-	return nil
-}
-
-func ValidateDNS(dns string) error {
-	if dns == "" {
-		return nil
-	}
-
-	ip, err := netip.ParseAddr(dns)
-	if err != nil || !ip.Is4() {
-		return ErrInvalidDNS
 	}
 
 	return nil

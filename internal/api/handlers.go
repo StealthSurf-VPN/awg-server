@@ -96,10 +96,13 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := awg.ValidateOverrides(req.AWGParams); err != nil {
+	normalizedParams, err := awg.NormalizeOverrides(req.AWGParams)
+	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	req.AWGParams = normalizedParams
 
 	normalizedRouting, err := clients.NormalizeRouting(req.Routing)
 	if err != nil {
@@ -157,10 +160,13 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.AWGParams.Set {
-		if err := awg.ValidateOverrides(req.AWGParams.Value); err != nil {
+		normalizedParams, err := awg.NormalizeOverrides(req.AWGParams.Value)
+		if err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		req.AWGParams.Value = normalizedParams
 	}
 
 	if req.Routing.Set {

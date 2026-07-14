@@ -89,6 +89,13 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Rout
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	normalizedParams, err := awg.NormalizeOverrides(params)
+	if err != nil {
+		return nil, err
+	}
+
+	params = normalizedParams
+
 	normalizedRouting, err := NormalizeRouting(routing)
 	if err != nil {
 		return nil, err
@@ -187,6 +194,13 @@ func (m *Manager) UpdateClient(id string, update ClientUpdate) (*ClientData, err
 	}
 
 	if update.AWGParamsSet {
+		normalizedParams, err := awg.NormalizeOverrides(params)
+		if err != nil {
+			return nil, err
+		}
+
+		params = normalizedParams
+
 		oldParams := m.effectiveParams(client.AWGParams)
 
 		newParams, err := m.validatedParams(params)
@@ -328,10 +342,11 @@ PrivateKey = %s`, client.PrivateKey)
 ListenPort = %d`, params.ClientListenPort)
 	}
 
-	cfg += fmt.Sprintf(`
-Address = %s/32
-DNS = %s
-MTU = %d`, client.Address, params.DNS, params.MTU)
+	cfg += fmt.Sprintf("\nAddress = %s/32", client.Address)
+	if dns, includeDNS := awg.ResolveDNS(client.AWGParams, params.DNS); includeDNS {
+		cfg += fmt.Sprintf("\nDNS = %s", dns)
+	}
+	cfg += fmt.Sprintf("\nMTU = %d", params.MTU)
 
 	cfg += params.ConfigLines()
 
