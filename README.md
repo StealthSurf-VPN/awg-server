@@ -326,4 +326,4 @@ main.go → config → awg (pool, params, keygen) → clients (manager, storage)
 - **Static binary** — `CGO_ENABLED=0`, no external Go dependencies beyond `golang.org/x/crypto`
 - **Persistence** via JSON file with atomic writes
 - **IP allocation** sequential from .2, freed IPs reusable
-- **Auth** Bearer token on all endpoints
+- **Auth** Bearer token on all `/api` endpoints; `/health` is unauthenticated
