@@ -1,26 +1,21 @@
----
-name: gen-test
-description: Use when adding Go tests to a file in this repo that has no existing test coverage — any source file under internal/ without a corresponding _test.go.
----
+# Testing Rules
 
-# gen-test
-
-Generates a table-driven `*_test.go` next to a Go source file, following project conventions: same package, `testing.T` only, subtests via `t.Run`.
+Use these rules when adding or changing Go tests. Prefer table-driven `*_test.go` files next to their source, in the same package, using `testing.T` and subtests via `t.Run`.
 
 ## When to Use
 
-- User says "add tests for X", "/gen-test internal/awg/params.go", or names a file/function
-- Target source file has no `*_test.go` sibling
+- The task adds tests for a named file, function, or behavior
+- The target source file contains logic that can run without host networking or AmneziaWG kernel state
 - Function under test is pure (no `exec.Command`, network, files, kernel calls)
 
 **Do NOT use when:**
-- Test file already exists — extend it manually instead of overwriting
+- Test file already exists — extend it instead of overwriting it
 - Function shells out (`awg`, `ip`, `iptables`) — needs integration test on a Linux host with the kernel module, out of scope
 - Function uses `os/exec`, real network sockets, or `/data/` paths
 
 ## Project Conventions
 
-From `.claude/rules/code-style.md`:
+Follow `.ai/rules/code-style.md`:
 
 | Convention | Example |
 |---|---|

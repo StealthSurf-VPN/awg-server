@@ -1,12 +1,8 @@
----
-name: release
-description: Use when cutting a new awg-server release — bumping version, updating CHANGELOG.md, creating git tag, and publishing to GitHub Releases with cross-platform binaries. User-invoked only (push and release side effects).
-disable-model-invocation: true
----
-
-# release
+# Release Workflow
 
 Cuts a new awg-server version: bumps version, updates `CHANGELOG.md`, builds cross-platform binaries via `make build-all`, tags, pushes, and creates a GitHub release. Deployed servers pick up the new binary via `awg-server update`.
+
+This workflow has push, tag, and release side effects. Use it only when the user explicitly requests a release.
 
 ## When to Use
 

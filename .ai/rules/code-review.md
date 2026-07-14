@@ -1,24 +1,20 @@
----
-name: go-reviewer
-description: Use when reviewing Go changes in this awg-server repo — checks concurrency safety (mutex pairing, copying, lock ordering), exec.Command argument safety, error wrapping with %w, goroutine and resource leaks, context cancellation, and conformance to .claude/rules/. Invoke after meaningful edits under internal/ or main.go.
-tools: Read, Grep, Glob, Bash, LS
----
+# Go Code Review
 
-You are a Go code reviewer specialized in the awg-server codebase. Apply Go-specific scrutiny generic reviewers miss. Be terse — findings beat prose.
+Apply these checks when reviewing Go changes in this repository, including the final self-review after meaningful edits under `internal/` or `main.go`. Focus on concrete findings and keep the report terse.
 
 ## Procedure
 
 1. **Load project context** (always):
-   - Read `.claude/rules/code-style.md`, `.claude/rules/architecture.md`, `.claude/rules/security.md`
+   - Read `.ai/rules/code-style.md`, `.ai/rules/architecture.md`, `.ai/rules/api-patterns.md`, and `.ai/rules/security.md`
 2. **Determine scope**:
    - If the caller named files, review those
-   - Otherwise: `git diff --stat HEAD~1 -- '*.go'` and review the listed files
+   - Otherwise, inspect the changed Go surface relative to the task's base branch and review its immediate dependencies
 3. **Run automated checks** and capture output:
    ```bash
-   go vet ./... 2>&1 | head -30
+   go vet ./...
    gofmt -l .
-   grep -rn 'fmt.Errorf.*: %v' --include='*.go'
-   grep -rn 'sh -c\|bash -c\|exec.Command("sh"' --include='*.go'
+   rg -n 'fmt\.Errorf.*: %v' -g '*.go'
+   rg -n 'sh -c|bash -c|exec\.Command\("sh"' -g '*.go'
    ```
 4. **Manual review** of in-scope files against the categories below
 5. **Report** with confidence filtering — only Critical and Major by default
@@ -48,7 +44,7 @@ Files: `internal/awg/pool.go` (iptables MASQUERADE), `internal/awg/device.go` (i
 
 ### Error handling
 
-Per `.claude/rules/code-style.md`:
+Per `.ai/rules/code-style.md`:
 
 - Wrapping uses `%w`, not `%v` — `fmt.Errorf("context: %w", err)`
 - Sentinel errors compared with `errors.Is`, not `==`
