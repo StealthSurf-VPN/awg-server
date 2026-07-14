@@ -316,10 +316,10 @@ func (m *Manager) GetClientConfig(id string) (string, error) {
 		return "", fmt.Errorf("get port for params: %w", err)
 	}
 
-	return renderClientConfig(client, params, serverPubKey, m.config.Endpoint, port), nil
+	return renderClientConfig(client, params, serverPubKey, m.config.Endpoint, port)
 }
 
-func renderClientConfig(client *ClientData, params awg.AWGParams, serverPubKey [32]byte, endpoint string, port int) string {
+func renderClientConfig(client *ClientData, params awg.AWGParams, serverPubKey [32]byte, endpoint string, port int) (string, error) {
 	cfg := fmt.Sprintf(`[Interface]
 PrivateKey = %s`, client.PrivateKey)
 
@@ -345,14 +345,17 @@ PublicKey = %s`, awg.KeyToBase64(serverPubKey))
 PresharedKey = %s`, client.PresharedKey)
 	}
 
-	allowedIPs := routingAllowedIPs(client.Routing)
+	allowedIPs, err := routingAllowedIPs(client.Routing)
+	if err != nil {
+		return "", fmt.Errorf("render routing allowed IPs: %w", err)
+	}
 
 	cfg += fmt.Sprintf(`
 Endpoint = %s:%d
 AllowedIPs = %s
 PersistentKeepalive = %d`, endpoint, port, allowedIPs, params.PersistentKeepaliveValue())
 
-	return cfg
+	return cfg, nil
 }
 
 func decodePresharedKey(encoded string) (*[32]byte, error) {
