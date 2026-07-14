@@ -21,6 +21,7 @@ var ErrInvalidDNS = errors.New("dns must be empty or a valid IPv4 address")
 
 type AWGParams struct {
 	Port                int    `json:"port,omitempty"`
+	ClientListenPort    int    `json:"client_listen_port,omitempty"`
 	MTU                 int    `json:"mtu,omitempty"`
 	DNS                 string `json:"dns,omitempty"`
 	PersistentKeepalive *int   `json:"persistent_keepalive,omitempty"`
