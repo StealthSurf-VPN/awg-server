@@ -148,17 +148,17 @@ curl -X POST http://localhost:7777/api/clients \
   -H "Content-Type: application/json" \
   -d '{"id":"my-client-uuid"}'
 
-# Create client with custom MTU, DNS, persistent keepalive, obfuscation params, and port
+# Create client with custom server port, client listen port, MTU, DNS, persistent keepalive, and obfuscation params
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":60,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":"100000-800000"}}'
+  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"client_listen_port":54321,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":60,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":"100000-800000"}}'
 
-# Update client MTU, DNS, persistent keepalive, and obfuscation params
+# Update client listen port, MTU, DNS, persistent keepalive, and obfuscation params
 curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"awg_params":{"port":51825,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":0,"jc":10,"jmin":100,"jmax":1000}}'
+  -d '{"awg_params":{"port":51825,"client_listen_port":54321,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":0,"jc":10,"jmin":100,"jmax":1000}}'
 
 # Get client config (.conf)
 curl http://localhost:7777/api/clients/my-client-uuid/configuration \
@@ -217,6 +217,8 @@ These are reused across restarts. No env vars needed.
 Advanced clients can override `persistent_keepalive` through `awg_params`. Omit the field to use 25 seconds, set it to 0 to disable keepalive, or provide an interval from 1 through 65535. The new value takes effect after the generated configuration is downloaded and reapplied on the client device.
 
 Clients can override DNS with one IPv4 address in `awg_params.dns`. Omit it or send an empty string to inherit `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected; DoH requires a separate client-side resolver or server-side DNS-to-DoH proxy. The new DNS value takes effect after the generated configuration is downloaded and reapplied on the client device.
+
+Clients can set a local UDP port with `awg_params.client_listen_port` in the range 1024-65535. Omit it or set it to 0 to let the client choose automatically. This renders `ListenPort` in the client `[Interface]` and does not change the server `Endpoint` port.
 
 ### CPS Parameter Validation
 

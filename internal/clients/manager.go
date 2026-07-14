@@ -275,10 +275,17 @@ func (m *Manager) GetClientConfig(id string) (string, error) {
 
 func renderClientConfig(client *ClientData, params awg.AWGParams, serverPubKey [32]byte, endpoint string, port int) string {
 	cfg := fmt.Sprintf(`[Interface]
-PrivateKey = %s
+PrivateKey = %s`, client.PrivateKey)
+
+	if params.ClientListenPort > 0 {
+		cfg += fmt.Sprintf(`
+ListenPort = %d`, params.ClientListenPort)
+	}
+
+	cfg += fmt.Sprintf(`
 Address = %s/32
 DNS = %s
-MTU = %d`, client.PrivateKey, client.Address, params.DNS, params.MTU)
+MTU = %d`, client.Address, params.DNS, params.MTU)
 
 	cfg += params.ConfigLines()
 
@@ -334,6 +341,10 @@ func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
 
 	if params.Port > 0 {
 		result.Port = params.Port
+	}
+
+	if params.ClientListenPort > 0 {
+		result.ClientListenPort = params.ClientListenPort
 	}
 
 	if params.Jc > 0 {

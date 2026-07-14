@@ -45,6 +45,10 @@ func ValidateOverrides(params *AWGParams) error {
 		return validationFrom("port", err)
 	}
 
+	if params.ClientListenPort != 0 && (params.ClientListenPort < MinPort || params.ClientListenPort > MaxPort) {
+		return invalidParam("client_listen_port", "must be 0 or between %d and %d", MinPort, MaxPort)
+	}
+
 	if err := ValidateMTU(params.MTU); err != nil {
 		return validationFrom("mtu", err)
 	}
