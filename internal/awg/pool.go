@@ -310,11 +310,11 @@ func (p *Pool) getOrCreateInterface(params AWGParams) (*iface, error) {
 }
 
 func (p *Pool) resolvePort(requested int) (int, error) {
-	if requested > 0 {
-		if requested < 1024 || requested > 65535 {
-			return 0, fmt.Errorf("port %d out of range (1024-65535)", requested)
-		}
+	if err := ValidatePort(requested); err != nil {
+		return 0, err
+	}
 
+	if requested > 0 {
 		if p.usedPorts[requested] {
 			return 0, fmt.Errorf("port %d: %w", requested, ErrPortInUse)
 		}
@@ -324,11 +324,11 @@ func (p *Pool) resolvePort(requested int) (int, error) {
 
 	port := p.cfg.ListenPort
 
-	for p.usedPorts[port] && port <= 65535 {
+	for p.usedPorts[port] && port <= MaxPort {
 		port++
 	}
 
-	if port > 65535 {
+	if port > MaxPort {
 		return 0, fmt.Errorf("no available ports (exhausted range)")
 	}
 

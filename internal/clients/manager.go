@@ -251,7 +251,7 @@ func (m *Manager) GetClientConfig(id string) (string, error) {
 PrivateKey = %s
 Address = %s/32
 DNS = %s
-MTU = %d`, client.PrivateKey, client.Address, m.config.DNS, m.config.MTU)
+MTU = %d`, client.PrivateKey, client.Address, m.config.DNS, params.MTU)
 
 	cfg += params.ConfigLines()
 
@@ -272,6 +272,10 @@ func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
 	}
 
 	result := m.defaultParams
+
+	if params.MTU > 0 {
+		result.MTU = params.MTU
+	}
 
 	if params.Port > 0 {
 		result.Port = params.Port

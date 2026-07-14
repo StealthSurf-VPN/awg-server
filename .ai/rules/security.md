@@ -30,5 +30,6 @@
 - Bearer token checked before any handler execution (`/health` excluded)
 - Internal server errors (500) return generic message, details logged server-side only
 - `awg_params` deserialized from JSON with Go's type safety
-- Port range validated (1024-65535), uniqueness enforced (409 Conflict if in use)
+- Per-client MTU accepts 0 for inheritance or values in the inclusive range 1280-1420
+- Per-client port accepts 0 for automatic assignment or values in the inclusive range 1024-65535; uniqueness is enforced (409 Conflict if in use)
 - Interface limit enforced via `AWG_MAX_INTERFACES` (503 when exceeded)

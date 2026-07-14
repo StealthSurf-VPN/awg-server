@@ -6,8 +6,16 @@ import (
 	"fmt"
 )
 
+const MinPort = 1024
+const MaxPort = 65535
+const MinMTU = 1280
+const MaxMTU = 1420
+
+var ErrInvalidPort = fmt.Errorf("port must be 0 or between %d and %d", MinPort, MaxPort)
+
 type AWGParams struct {
 	Port int    `json:"port,omitempty"`
+	MTU  int    `json:"mtu,omitempty"`
 	Jc   int    `json:"jc,omitempty"`
 	Jmin int    `json:"jmin,omitempty"`
 	Jmax int    `json:"jmax,omitempty"`
@@ -24,6 +32,30 @@ type AWGParams struct {
 	I3   string `json:"i3,omitempty"`
 	I4   string `json:"i4,omitempty"`
 	I5   string `json:"i5,omitempty"`
+}
+
+func ValidatePort(port int) error {
+	if port == 0 {
+		return nil
+	}
+
+	if port < MinPort || port > MaxPort {
+		return ErrInvalidPort
+	}
+
+	return nil
+}
+
+func ValidateMTU(mtu int) error {
+	if mtu == 0 {
+		return nil
+	}
+
+	if mtu < MinMTU || mtu > MaxMTU {
+		return fmt.Errorf("mtu must be between %d and %d", MinMTU, MaxMTU)
+	}
+
+	return nil
 }
 
 func (p AWGParams) Key() string {

@@ -33,6 +33,7 @@ GET /api/clients
     "address": "10.0.0.2",
     "created_at": "2026-01-01T00:00:00Z",
     "awg_params": {
+      "mtu": 1280,
       "jc": 5,
       "jmin": 50,
       "jmax": 1000
@@ -52,7 +53,7 @@ Content-Type: application/json
 {"id": "550e8400-e29b-41d4-a716-446655440000"}
 ```
 
-With custom obfuscation parameters and port:
+With custom MTU, obfuscation parameters, and port:
 
 ```http
 POST /api/clients
@@ -62,6 +63,7 @@ Content-Type: application/json
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "awg_params": {
     "port": 51825,
+    "mtu": 1280,
     "jc": 8,
     "jmin": 50,
     "jmax": 1000
@@ -69,7 +71,7 @@ Content-Type: application/json
 }
 ```
 
-If `awg_params` is omitted, the client uses server defaults (auto-generated H/S + env Jc/Jmin/Jmax). Per-client params are merged over defaults — non-zero values override, zero/empty values inherit defaults.
+If `awg_params` is omitted, the client uses server defaults (global `AWG_MTU`, auto-generated H/S, and env Jc/Jmin/Jmax). Per-client params are merged over defaults — non-zero values override, zero/empty values inherit defaults. A custom `port` must be in the inclusive range 1024-65535; omitted or zero inherits the automatically assigned port.
 
 **Response** `201 Created`:
 
@@ -79,6 +81,7 @@ If `awg_params` is omitted, the client uses server defaults (auto-generated H/S 
   "address": "10.0.0.2",
   "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
+    "mtu": 1280,
     "jc": 5,
     "jmin": 50,
     "jmax": 1000
@@ -88,7 +91,7 @@ If `awg_params` is omitted, the client uses server defaults (auto-generated H/S 
 
 **Errors:**
 
-- `400` — missing or invalid `id`, or id too long (max 256 chars)
+- `400` — missing or invalid `id`, id too long (max 256 chars), `port` outside 1024-65535 (except zero for inheritance), or `mtu` outside 1280-1420
 - `409` — client with this id already exists, or requested port is already in use
 - `503` — maximum number of interfaces reached
 
@@ -100,6 +103,7 @@ Content-Type: application/json
 
 {
   "awg_params": {
+    "mtu": 1280,
     "jc": 10,
     "jmin": 100,
     "jmax": 2000
@@ -107,7 +111,7 @@ Content-Type: application/json
 }
 ```
 
-Updates the client's obfuscation parameters. If the new parameters differ from the current ones, the client's peer is moved to the appropriate interface (created on demand if needed). Set `awg_params` to `null` to revert to server defaults.
+Updates the client's MTU and obfuscation parameters. Changing only `mtu` updates the generated client config without moving the peer to another interface. If interface-level parameters differ, the peer is moved to the appropriate interface (created on demand if needed). Set `awg_params` to `null` to revert to server defaults.
 
 **Response** `200 OK`:
 
@@ -117,6 +121,7 @@ Updates the client's obfuscation parameters. If the new parameters differ from t
   "address": "10.0.0.2",
   "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
+    "mtu": 1280,
     "jc": 10,
     "jmin": 100,
     "jmax": 2000
@@ -126,7 +131,7 @@ Updates the client's obfuscation parameters. If the new parameters differ from t
 
 **Errors:**
 
-- `400` — invalid request body
+- `400` — invalid request body, `port` outside 1024-65535 (except zero for inheritance), or `mtu` outside 1280-1420
 - `404` — client not found
 - `409` — requested port is already in use, or port change on shared interface
 - `503` — maximum number of interfaces reached
@@ -144,7 +149,7 @@ GET /api/clients/{id}/configuration
 PrivateKey = <base64>
 Address = 10.0.0.2/32
 DNS = 1.1.1.1
-MTU = 1420
+MTU = 1280
 Jc = 5
 Jmin = 50
 Jmax = 1000
@@ -162,7 +167,7 @@ AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 ```
 
-The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
+The MTU is the client's `awg_params.mtu` override, or the global `AWG_MTU` value when the override is omitted or zero. The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
 
 **Errors:**
 
@@ -206,11 +211,12 @@ If this was the last client on an interface, the interface is automatically dest
 
 ## AWG Params Object
 
-All fields are optional. Parameters with value `0` (or empty string for I1-I5) are omitted, **except `s3`/`s4` which are always emitted (even when 0)**.
+All fields are optional. `mtu` accepts values from 1280 through 1420; omitted or zero inherits `AWG_MTU`. Other parameters with value `0` (or empty string for I1-I5) are omitted, **except `s3`/`s4` which are always emitted (even when 0)**.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `port` | int | UDP listen port for the interface. If omitted, auto-assigned (base port + index). Used in client config `Endpoint`. |
+| `port` | int | UDP listen port for the interface, inclusive range 1024-65535. If omitted or zero, auto-assigned from the base port. Used in client config `Endpoint`. |
+| `mtu` | int | MTU for this client's generated config, range 1280-1420. Omit or set to 0 to inherit `AWG_MTU`. Does not affect interface grouping. |
 | `jc` | int | Junk packet count |
 | `jmin` | int | Junk packet minimum size |
 | `jmax` | int | Junk packet maximum size |

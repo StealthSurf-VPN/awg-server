@@ -91,6 +91,7 @@ func main() {
 	gp := data.GeneratedParams
 
 	defaultParams := awg.AWGParams{
+		MTU:  cfg.MTU,
 		Jc:   cfg.Jc,
 		Jmin: cfg.Jmin,
 		Jmax: cfg.Jmax,
