@@ -128,7 +128,7 @@ Content-Type: application/json
 }
 ```
 
-With mode-based custom DNS:
+With mode-based custom DNS and split routing exclusions:
 
 ```http
 POST /api/clients
@@ -139,6 +139,11 @@ Content-Type: application/json
   "awg_params": {
     "dns_mode": "custom",
     "dns_servers": ["1.1.1.1", "1.0.0.1"]
+  },
+  "routing": {
+    "mode": "split",
+    "allowed_ips": ["10.0.0.0/8"],
+    "excluded_ips": ["10.20.0.0/16"]
   }
 }
 ```
@@ -185,18 +190,13 @@ Content-Type: application/json
 
 {
   "awg_params": {
-    "client_listen_port": 54321,
-    "mtu": 1280,
     "dns_mode": "custom",
-    "dns_servers": ["9.9.9.9", "149.112.112.112"],
-    "persistent_keepalive": 0,
-    "jc": 10,
-    "jmin": 100,
-    "jmax": 1000
+    "dns_servers": ["1.1.1.1", "1.0.0.1"]
   },
   "routing": {
     "mode": "split",
-    "allowed_ips": ["91.108.4.0/22", "149.154.160.0/20"]
+    "allowed_ips": ["10.0.0.0/8"],
+    "excluded_ips": ["10.20.0.0/16"]
   }
 }
 ```
@@ -215,18 +215,13 @@ For `routing`, an object replaces the complete policy and `null` resets it to fu
   "address": "10.0.0.2",
   "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
-    "client_listen_port": 54321,
-    "mtu": 1280,
     "dns_mode": "custom",
-    "dns_servers": ["9.9.9.9", "149.112.112.112"],
-    "persistent_keepalive": 0,
-    "jc": 10,
-    "jmin": 100,
-    "jmax": 1000
+    "dns_servers": ["1.1.1.1", "1.0.0.1"]
   },
   "routing": {
     "mode": "split",
-    "allowed_ips": ["91.108.4.0/22", "149.154.160.0/20"]
+    "allowed_ips": ["10.0.0.0/8"],
+    "excluded_ips": ["10.20.0.0/16"]
   }
 }
 ```
@@ -279,7 +274,7 @@ This bearer-authenticated endpoint requires no request body. It generates a new 
 
 Only H1-H4 and S1-S2 are replaced. The operation preserves the server port, client listen port, MTU, all legacy and mode-based DNS fields, persistent keepalive, Jc/Jmin/Jmax, S3/S4, I1-I5, routing, client ID, address, creation time, private/public keys, and preshared key. If the client previously inherited all AWG overrides, the stored object gains only the generated H/S fields and every unrelated value continues to inherit its server default.
 
-> **Warning:** A successful response means the server-side peer has already moved to the new H/S profile, so the old client configuration is immediately invalid. Immediately fetch `GET /api/clients/{id}/configuration`, then deliver and reapply that configuration on the client device.
+After a successful per-client regeneration, the old client configuration no longer matches the server-side H1-H4/S1-S2 profile. Fetch `GET /api/clients/{id}/configuration` immediately and reapply the returned configuration. The action does not rotate the private key, preshared key, address, or any unrelated AWG setting.
 
 Errors use the common [JSON error envelope](#error-handling).
 
@@ -293,7 +288,7 @@ Errors use the common [JSON error envelope](#error-handling).
 | `503` | The interface limit prevents migration. |
 | `500` | Secure randomness, distinct-parameter generation, or another internal device operation failed. The response is generic. |
 
-The explicit shared-port conflict is a `409`: when a client has a fixed server-side `port` and shares its current interface, the new H/S grouping key needs a different interface while that same port is still occupied by the shared old interface. The failed request leaves the stored client parameters unchanged.
+The explicit shared-port conflict is a `409`: when a client has a fixed server-side `port` and shares its current interface, the new H/S grouping key needs a different interface while that same port is still occupied by the shared old interface. Any failed action leaves the client unchanged.
 
 ## Get Client Configuration
 
@@ -372,18 +367,28 @@ If this was the last client on an interface, the interface is automatically dest
 
 ## Routing Object
 
-`routing` is a top-level client field, separate from `awg_params`. It controls the `AllowedIPs` line rendered in the generated client configuration.
+`routing` is a top-level client field, separate from `awg_params`. It controls the `AllowedIPs` line rendered in the generated client configuration. IPv4 routes follow this model:
 
-| Mode | `allowed_ips` | Generated behavior |
-| ---- | ------------- | ------------------ |
-| `full` | Omitted or empty | `AllowedIPs = 0.0.0.0/0, ::/0` |
-| `split` | One or more IPv4 CIDRs | Only the normalized listed prefixes are rendered |
+```text
+AllowedIPv4 = base(mode, allowed_ips) - excluded_ips
+```
 
-For `split`, each CIDR is masked to its network prefix. Duplicate normalized prefixes are removed while preserving the first occurrence order; for example, `10.1.2.3/8`, `10.0.0.0/8`, `192.168.1.7/24` becomes `10.0.0.0/8`, `192.168.1.0/24`.
+| Mode | `allowed_ips` | `excluded_ips` | Generated behavior |
+| ---- | ------------- | -------------- | ------------------ |
+| `full` | Empty | Empty | `0.0.0.0/0, ::/0` |
+| `bypass` | Empty | One or more IPv4 CIDRs | IPv4 complement plus `::/0` |
+| `split` | One or more IPv4 CIDRs | Empty | Existing ordered split behavior |
+| `split` | One or more IPv4 CIDRs | Optional | Included IPv4 set minus exclusions |
 
-Missing or unknown modes, a non-empty `allowed_ips` array with `full`, an empty `allowed_ips` array with `split`, malformed CIDRs, and IPv6 CIDRs in `split` return `400 Bad Request` before client state changes. Syntactically valid private, overlapping, and default IPv4 CIDRs such as `0.0.0.0/0` are intentionally accepted; authenticated callers are responsible for the resulting route selection.
+Omitted routing, `null`, and explicit `{"mode":"full"}` are equivalent and are canonically persisted without a `routing` field. `bypass` uses all IPv4 addresses as its base and requires at least one exclusion. `split` requires at least one included IPv4 CIDR. `full` rejects either non-empty list, and `bypass` rejects `allowed_ips`. Missing or unknown modes and invalid mode/list combinations return `400 Bad Request` before client state changes.
 
-Omitted routing and explicit `full` are equivalent. API responses always expose the effective object as `{"mode":"full"}` or a normalized `split` object. Routing changes affect only the generated client configuration: the client must download and reapply it, while interface grouping, peer migration, and the server-side peer `/32` remain unchanged. Domain, application, and geosite routing require separate client-side logic and are not accepted by this CIDR-only contract.
+Both supplied lists accept IPv4 CIDRs only. Malformed CIDRs and IPv6 CIDRs return `400 Bad Request`; private, overlapping, and default IPv4 CIDRs are otherwise valid. Each list is limited to 4,096 supplied entries. Every prefix is masked to its network and exact duplicates are removed while preserving first-occurrence order before that normalized caller intent is persisted and returned. For example, `10.1.2.3/8`, `10.0.0.0/8`, `192.168.1.7/24` becomes `10.0.0.0/8`, `192.168.1.0/24`.
+
+When exclusions are present, rendering sorts and merges the IPv4 base and exclusion ranges, subtracts the exclusions, and emits the deterministic smallest exact set of CIDRs in ascending address order. Exclusions outside the base are accepted and have no effect. A subtraction that removes the complete IPv4 base returns `400 Bad Request`, as does a computed result larger than 16,384 IPv4 CIDRs.
+
+`bypass` appends `::/0` after its computed IPv4 complement, so exclusions affect IPv4 only. `split` never adds an implicit IPv6 route. Split routing without exclusions retains its existing normalized, first-occurrence order rather than sorting the list.
+
+API responses expose the normalized persisted intent, not the expanded computed complement. Routing changes affect only the generated client configuration: fetch and reapply `GET /api/clients/{id}/configuration` after every routing change. Routing never changes interface grouping, peer migration, or the server-side peer `/32`. Domain, application, and geosite routing require separate client-side logic and are not accepted by this CIDR-only contract.
 
 ## AWG Params Object
 
@@ -395,8 +400,8 @@ All fields are optional. Unless documented otherwise below, zero integer values 
 | `client_listen_port` | int | Local UDP listen port for the generated client `[Interface]`, inclusive range 1024-65535. If omitted or zero, `ListenPort` is omitted and the client selects a port automatically. Does not affect server interface grouping or `Endpoint`. |
 | `mtu` | int | MTU for this client's generated config, range 1280-1420. Omit or set to 0 to inherit `AWG_MTU`. Does not affect interface grouping. |
 | `dns` | string | Legacy-compatible single IPv4 DNS override. Omit or set to an empty string to inherit `AWG_DNS`. Cannot be combined with `dns_mode` or `dns_servers`, even when explicitly empty. Does not affect interface grouping. |
-| `dns_mode` | string | DNS behavior: `default`, `custom`, or `system`. Cannot be combined with legacy `dns`. Does not affect interface grouping. |
-| `dns_servers` | string[] | DNS servers for `custom` mode. Every value must be an IPv4 address. Requires `dns_mode` and cannot be combined with legacy `dns`. Does not affect interface grouping. |
+| `dns_mode` | string | `default` inherits `AWG_DNS`; `custom` uses `dns_servers`; `system` omits the `DNS` line. Cannot be combined with legacy `dns`. Does not affect interface grouping. |
+| `dns_servers` | string[] | Unique IPv4 addresses for `custom`; empty or omitted for `default` and `system`. Hostnames, URLs, CIDRs, empty entries, and IPv6 are rejected. |
 | `persistent_keepalive` | int | Keepalive interval in seconds for the generated client `[Peer]`, range 0-65535. Omit to inherit 25; set to 0 to disable. Does not affect interface grouping. |
 | `jc` | int | Junk packet count, range 0-128. Zero inherits the server default. |
 | `jmin` | int | Junk packet minimum size, range 0-1280. Zero inherits the server default. When effective `jc > 0`, effective `jmin` must be positive and less than `jmax`. |
@@ -414,7 +419,8 @@ The legacy `dns` field remains supported, while new clients can select an explic
 
 | Form | Accepted fields | Generated `[Interface]` behavior |
 | ---- | --------------- | -------------------------------- |
-| Inherited legacy default | All DNS fields omitted, or `"dns":""` supplied alone | `DNS = <AWG_DNS>` |
+| Omitted settings | All DNS fields omitted | `DNS = <AWG_DNS>` |
+| Legacy inherited | `"dns":""` supplied alone | `DNS = <AWG_DNS>` |
 | Legacy custom | `"dns":"9.9.9.9"` supplied alone | `DNS = 9.9.9.9` |
 | `default` mode | `"dns_mode":"default"`; `dns_servers` omitted or empty | `DNS = <AWG_DNS>` |
 | `custom` mode | `"dns_mode":"custom"` and one or more `dns_servers` | One comma-and-space-separated line, for example `DNS = 1.1.1.1, 1.0.0.1` |
@@ -423,6 +429,27 @@ The legacy `dns` field remains supported, while new clients can select an explic
 Field presence is validated strictly. Supplying legacy `dns` forbids both `dns_mode` and `dns_servers`, including combinations such as `"dns":""` with a mode or list. Supplying `dns_servers` requires `dns_mode` even when the list is explicitly empty. An explicitly empty `dns_mode` is invalid. JSON `null` also counts as an explicitly supplied nested DNS field and follows the same presence rules. `custom` requires a non-empty list; `default` and `system` reject non-empty lists.
 
 Every non-empty legacy `dns` value and every `dns_servers` item must be a plain IPv4 address. DoH URLs, hostnames, CIDRs, IPv6 addresses, and mixed-format values are rejected with `400 Bad Request`. Custom server addresses are canonicalized and duplicates are removed stably before persistence, preserving the first occurrence order.
+
+Custom mode renders a single comma-separated line:
+
+```ini
+[Interface]
+PrivateKey = <base64>
+Address = 10.0.0.2/32
+DNS = 1.1.1.1, 1.0.0.1
+MTU = 1420
+```
+
+System mode omits the `DNS` line completely:
+
+```ini
+[Interface]
+PrivateKey = <base64>
+Address = 10.0.0.2/32
+MTU = 1420
+```
+
+All legacy and mode-based DNS fields are client-only and remain outside interface grouping. Fetch and reapply the generated client configuration after changing them.
 
 Malformed ranges, overlapping effective header ranges, unsupported CPS tags, text outside CPS tags, control characters, and expanded CPS packets larger than 1280 bytes are rejected with `400 Bad Request` before client state is changed.
 

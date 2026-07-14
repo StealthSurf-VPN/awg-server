@@ -252,41 +252,11 @@ Documentation is part of the definition of done:
 - Add concise curl examples for bypass routing, combined split routing, custom/system DNS, pure generation, and client regeneration.
 - Link detailed semantics to `docs/api.md` rather than duplicating the full contract.
 
-## Testing Strategy
+## Verification Strategy
 
-Tests use only the standard library and are added before their corresponding implementation.
+The accepted project policy for this feature does not require new automated tests. Do not add new `*_test.go` files. `go test ./...` remains a required compile pass across all packages and runs any tests that already exist, but this feature does not require new test cases.
 
-### Routing tests
-
-Table-driven tests cover:
-
-- all valid and invalid mode/list combinations
-- IPv4 parsing, masking, duplicate removal, and non-mutation of inputs
-- full and split backward compatibility
-- bypass complements at `/0`, `/1`, `/31`, and `/32` boundaries
-- overlapping, adjacent, nested, duplicate, and out-of-base exclusions
-- split plus exclusions and complete-subtraction rejection
-- deterministic minimal CIDR output and IPv6 suffix behavior
-- input and computed-output limits
-
-### DNS tests
-
-Table-driven tests cover:
-
-- legacy inheritance and legacy override behavior
-- every explicit mode and its invalid combinations
-- IPv4 validation and rejection of IPv6, CIDRs, hostnames, URLs, and empty entries
-- stable duplicate removal and input-slice non-mutation
-- exact rendered config lines, including complete omission in system mode
-- confirmation that DNS fields do not change the interface grouping key
-
-### Generation tests
-
-- Validate generated H/S fragments against existing profile constraints.
-- Verify applying generated fields preserves every unrelated AWG field.
-- Verify the client response contains the updated stored override shape.
-- Exercise the stateless generation handler with `httptest`.
-- Keep host/device behavior behind existing pool methods; do not shell out to `ip`, `awg`, or `iptables` from unit tests.
+Production behavior is verified through the existing compile/build/static-analysis checks, formatting and diff checks, and independent review of the implementation against this design. When Go files change, format them before running verification.
 
 ### Required verification
 
@@ -298,12 +268,13 @@ go vet ./...
 git diff --check
 ```
 
-The generated `awg-server` build artifact is not committed.
+`gofmt` applies only to changed Go files. The generated `awg-server` build artifact is not committed. Each implementation task receives an independent specification-compliance and quality review, followed by a broad final review of the complete branch.
 
 ## Definition of Done
 
 - All three feature areas match this contract and preserve old records.
-- New and existing tests pass.
+- No new `*_test.go` files are added; the accepted compile, build, vet, gofmt, and diff checks pass.
 - Build and vet pass.
 - `docs/api.md`, `docs/configuration.md`, and `README.md` contain the promised examples and operational warnings.
+- Independent task and whole-branch reviews report no unresolved critical or important findings.
 - No secrets appear in source, fixtures, logs, or documentation.

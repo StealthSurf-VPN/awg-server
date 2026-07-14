@@ -133,7 +133,7 @@ AWG_ENDPOINT=your.server.ip \
 
 ## API
 
-All endpoints require `Authorization: Bearer <AWG_API_TOKEN>`.
+All `/api` endpoints require `Authorization: Bearer <AWG_API_TOKEN>`.
 
 ```bash
 # Health check (no auth)
@@ -166,6 +166,38 @@ curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
   -H "Content-Type: application/json" \
   -d '{"routing":{"mode":"split","allowed_ips":["10.0.0.0/8","172.16.0.0/12"]}}'
 
+# Create a client with custom DNS servers
+curl -X POST http://localhost:7777/api/clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"demo-custom-dns","awg_params":{"dns_mode":"custom","dns_servers":["1.1.1.1","1.0.0.1"]}}'
+
+# Create a client that keeps the device's system DNS resolver
+curl -X POST http://localhost:7777/api/clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"demo-system-dns","awg_params":{"dns_mode":"system"}}'
+
+# Create a bypass client that routes everything except the excluded IPv4 CIDRs
+curl -X POST http://localhost:7777/api/clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"demo-bypass","routing":{"mode":"bypass","excluded_ips":["10.0.0.0/8","192.168.0.0/16"]}}'
+
+# Create a split client and subtract exclusions from its included IPv4 set
+curl -X POST http://localhost:7777/api/clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"demo-split","routing":{"mode":"split","allowed_ips":["10.0.0.0/8"],"excluded_ips":["10.20.0.0/16"]}}'
+
+# Generate a standalone H1-H4/S1-S2 fragment without changing server state
+curl -X POST http://localhost:7777/api/awg-params/generate \
+  -H "Authorization: Bearer $TOKEN"
+
+# Regenerate and apply H1-H4/S1-S2 for one client (no request body)
+curl -X POST http://localhost:7777/api/clients/demo-custom-dns/regenerate-awg-params \
+  -H "Authorization: Bearer $TOKEN"
+
 # Get client config (.conf)
 curl http://localhost:7777/api/clients/my-client-uuid/configuration \
   -H "Authorization: Bearer $TOKEN"
@@ -180,7 +212,7 @@ curl -X DELETE http://localhost:7777/api/clients/my-client-uuid \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Routing mode `full` preserves the current full-tunnel behavior. Mode `split` accepts one or more IPv4 CIDRs and renders only those normalized prefixes in the generated client `AllowedIPs`. Routing is client-only: it does not change interface grouping or the server-side peer `/32`, and the updated configuration must be downloaded and reapplied on the client device.
+Routing mode `full` preserves full tunnel, `bypass` subtracts `excluded_ips` from all IPv4 routes, and `split` can subtract exclusions from its `allowed_ips`. Routing and DNS are client-only and do not change interface grouping or the server-side peer `/32`. After a routing, DNS, or per-client H/S regeneration change, fetch the generated configuration and reapply it on the client device. See the [API reference](docs/api.md) for validation, deterministic route subtraction, the 4,096/16,384 routing limits, error statuses, and the regeneration reapplication warning.
 
 ## Configuration
 
@@ -194,7 +226,7 @@ Environment variables:
 | `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned sequentially; per-client `port` accepts 1024-65535, while omitted or zero uses automatic assignment) |
 | `AWG_HTTP_PORT` | no | `7777` | HTTP API port |
 | `AWG_MTU` | no | `1420` | Default MTU for client configs (per-client override: `mtu` in `awg_params`, range 1280-1420) |
-| `AWG_DNS` | no | `1.1.1.1` | Default DNS for client configs (per-client override: one IPv4 in `awg_params.dns`) |
+| `AWG_DNS` | no | `1.1.1.1` | Default DNS inherited by omitted/default per-client settings; custom mode uses `dns_servers`, while system mode omits the client `DNS` line |
 | `AWG_DATA_DIR` | no | `/data` | Persistence directory |
 | `AWG_INTERFACE` | no | auto-detect | Override outbound network interface for NAT |
 | `AWG_MAX_INTERFACES` | no | `0` | Max AWG interfaces (0 = unlimited) |
@@ -224,7 +256,7 @@ These are reused across restarts. No env vars needed.
 
 Advanced clients can override `persistent_keepalive` through `awg_params`. Omit the field to use 25 seconds, set it to 0 to disable keepalive, or provide an interval from 1 through 65535. The new value takes effect after the generated configuration is downloaded and reapplied on the client device.
 
-Clients can override DNS with one IPv4 address in `awg_params.dns`. Omit it or send an empty string to inherit `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected; DoH requires a separate client-side resolver or server-side DNS-to-DoH proxy. The new DNS value takes effect after the generated configuration is downloaded and reapplied on the client device.
+Clients can keep the legacy single-IPv4 `awg_params.dns` override or use `dns_mode`: `default` inherits `AWG_DNS`, `custom` renders the unique IPv4 values from `dns_servers`, and `system` omits the complete client `DNS` line. The legacy field cannot be combined with mode-based fields. See the [DNS contract](docs/api.md#dns-settings) for accepted shapes and validation. A DNS change takes effect after the generated configuration is downloaded and reapplied on the client device.
 
 Clients can set a local UDP port with `awg_params.client_listen_port` in the range 1024-65535. Omit it or set it to 0 to let the client choose automatically. This renders `ListenPort` in the client `[Interface]` and does not change the server `Endpoint` port.
 
@@ -281,7 +313,7 @@ AmneziaWG sets CPS obfuscation parameters at the **interface level**, not per-pe
 
 - Each unique set of CPS parameters gets its own `awgN` interface (awg0, awg1, awg2, ...)
 - Clients with identical CPS parameters share an interface
-- Per-client `mtu`, `dns`, `persistent_keepalive`, routing, and PSK do not affect interface grouping; PSK is also installed on the corresponding server peer
+- Per-client `mtu`, all legacy and mode-based DNS fields, `persistent_keepalive`, all routing fields, and PSK do not affect interface grouping; PSK is also installed on the corresponding server peer
 - Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from base port)
 - Interfaces are created on demand and destroyed when their last peer is removed
 - All interfaces share the same server private key
