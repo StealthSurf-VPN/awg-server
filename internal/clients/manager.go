@@ -247,11 +247,15 @@ func (m *Manager) GetClientConfig(id string) (string, error) {
 		return "", fmt.Errorf("get port for params: %w", err)
 	}
 
+	return renderClientConfig(client, params, serverPubKey, m.config.Endpoint, port), nil
+}
+
+func renderClientConfig(client *ClientData, params awg.AWGParams, serverPubKey [32]byte, endpoint string, port int) string {
 	cfg := fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = %s/32
 DNS = %s
-MTU = %d`, client.PrivateKey, client.Address, m.config.DNS, params.MTU)
+MTU = %d`, client.PrivateKey, client.Address, params.DNS, params.MTU)
 
 	cfg += params.ConfigLines()
 
@@ -261,9 +265,9 @@ MTU = %d`, client.PrivateKey, client.Address, m.config.DNS, params.MTU)
 PublicKey = %s
 Endpoint = %s:%d
 AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25`, awg.KeyToBase64(serverPubKey), m.config.Endpoint, port)
+PersistentKeepalive = %d`, awg.KeyToBase64(serverPubKey), endpoint, port, params.PersistentKeepaliveValue())
 
-	return cfg, nil
+	return cfg
 }
 
 func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
@@ -275,6 +279,14 @@ func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
 
 	if params.MTU > 0 {
 		result.MTU = params.MTU
+	}
+
+	if params.DNS != "" {
+		result.DNS = params.DNS
+	}
+
+	if params.PersistentKeepalive != nil {
+		result.PersistentKeepalive = params.PersistentKeepalive
 	}
 
 	if params.Port > 0 {

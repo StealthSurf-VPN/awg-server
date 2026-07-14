@@ -79,6 +79,16 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		if err := awg.ValidateDNS(req.AWGParams.DNS); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := awg.ValidatePersistentKeepalive(req.AWGParams.PersistentKeepalive); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	client, err := s.manager.CreateClient(req.ID, req.AWGParams)
@@ -128,6 +138,16 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := awg.ValidateMTU(req.AWGParams.MTU); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := awg.ValidateDNS(req.AWGParams.DNS); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := awg.ValidatePersistentKeepalive(req.AWGParams.PersistentKeepalive); err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
