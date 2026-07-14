@@ -111,6 +111,10 @@ func main() {
 		I5:   cfg.I5,
 	}
 
+	if err := awg.ValidateProfile(defaultParams); err != nil {
+		log.Fatalf("validate default AWG params: %v", err)
+	}
+
 	pool, err := awg.NewPool(cfg, privateKey, cfg.MaxInterfaces)
 	if err != nil {
 		log.Fatalf("create AWG pool: %v", err)

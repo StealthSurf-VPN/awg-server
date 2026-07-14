@@ -69,26 +69,9 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.AWGParams != nil {
-		if err := awg.ValidatePort(req.AWGParams.Port); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if err := awg.ValidateMTU(req.AWGParams.MTU); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if err := awg.ValidateDNS(req.AWGParams.DNS); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if err := awg.ValidatePersistentKeepalive(req.AWGParams.PersistentKeepalive); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+	if err := awg.ValidateOverrides(req.AWGParams); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	client, err := s.manager.CreateClient(req.ID, req.AWGParams)
@@ -100,6 +83,8 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, clients.ErrClientExists):
 			status = http.StatusConflict
+		case errors.Is(err, awg.ErrInvalidParams):
+			status = http.StatusBadRequest
 		case errors.Is(err, awg.ErrInvalidPort):
 			status = http.StatusBadRequest
 		case errors.Is(err, awg.ErrPortInUse):
@@ -131,26 +116,9 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.AWGParams != nil {
-		if err := awg.ValidatePort(req.AWGParams.Port); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if err := awg.ValidateMTU(req.AWGParams.MTU); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if err := awg.ValidateDNS(req.AWGParams.DNS); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if err := awg.ValidatePersistentKeepalive(req.AWGParams.PersistentKeepalive); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+	if err := awg.ValidateOverrides(req.AWGParams); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	client, err := s.manager.UpdateClient(id, req.AWGParams)
@@ -162,6 +130,8 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, clients.ErrClientNotFound):
 			status = http.StatusNotFound
+		case errors.Is(err, awg.ErrInvalidParams):
+			status = http.StatusBadRequest
 		case errors.Is(err, awg.ErrInvalidPort):
 			status = http.StatusBadRequest
 		case errors.Is(err, awg.ErrPortInUse):
