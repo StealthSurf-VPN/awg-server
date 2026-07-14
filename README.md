@@ -158,7 +158,7 @@ curl -X POST http://localhost:7777/api/clients \
 curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"awg_params":{"port":51825,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":0,"jc":10,"jmin":100,"jmax":2000}}'
+  -d '{"awg_params":{"port":51825,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":0,"jc":10,"jmin":100,"jmax":1000}}'
 
 # Get client config (.conf)
 curl http://localhost:7777/api/clients/my-client-uuid/configuration \
@@ -218,6 +218,20 @@ Advanced clients can override `persistent_keepalive` through `awg_params`. Omit 
 
 Clients can override DNS with one IPv4 address in `awg_params.dns`. Omit it or send an empty string to inherit `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected; DoH requires a separate client-side resolver or server-side DNS-to-DoH proxy. The new DNS value takes effect after the generated configuration is downloaded and reapplied on the client device.
 
+### CPS Parameter Validation
+
+Invalid CPS overrides return `400 Bad Request` before client state changes. The merged server/client profile is checked again so cross-field conflicts with inherited defaults are also rejected. Server defaults are validated during startup.
+
+| Parameters | Accepted values |
+| ---------- | --------------- |
+| `Jc` | 0-128 |
+| `Jmin`, `Jmax` | 0-1280; when effective `Jc > 0`, both are positive and `Jmin < Jmax` |
+| `S1`, `S2`, `S3`, `S4` | 0-1132, 0-1188, 0-64, 0-32; effective `S2` must not equal `S1 + 56` |
+| `H1`-`H4` | Unsigned decimal `uint32` or inclusive `start-end`; all effective ranges are required and non-overlapping |
+| `I1`-`I5` | Only `<b 0xHEX>`, `<t>`, `<r N>`, `<rc N>`, and `<rd N>` tags; `N` is 0-1000 and the expanded packet is at most 1280 bytes |
+
+Zero integer overrides and empty string overrides inherit server defaults. `persistent_keepalive` is the exception: an explicit zero disables it.
+
 ### Per-Client Preshared Keys
 
 The server generates a unique 32-byte PSK for every new client. It stores the key in `/data/clients.json` with the rest of the client secrets, installs it on the server peer through stdin, and adds `PresharedKey` to the authenticated `.conf` response. The PSK is not accepted in create/update requests and is not exposed by list, create, or update responses.
@@ -246,7 +260,7 @@ Auto-generated H1-H4 still provide header masking (zero overhead).
 
 ```bash
 AWG_JC=8 AWG_JMIN=50 AWG_JMAX=1000
-AWG_I1='<b 0xc0><r 32><c><t>'
+AWG_I1='<b 0xc0><r 32><t>'
 ```
 
 Ping: same after connect (~100ms extra at handshake). Protection: maximum without per-packet overhead.

@@ -44,6 +44,8 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - `CLIArgs()` — args for `awg set`: H1-H4, S1-S4, Jc/Jmin/Jmax (excludes I1-I5 — client-only)
 - `ConfigLines()` — CPS lines for the client `.conf` `[Interface]` section, including I1-I5; MTU, DNS, and PersistentKeepalive are rendered separately by the client manager
 - `GenerateParams()` — generates H1-H4 (random non-overlapping ranges, format `min-max`) and S1, S2 (random 15-150, `S1+56 ≠ S2`)
+- `ValidateOverrides()` validates raw API values before inheritance so invalid negative or malformed values cannot disappear during the merge
+- `ValidateProfile()` validates the complete effective profile, including cross-field J/S relationships and H-range overlap
 - Per-client: stored as `*AWGParams` in `ClientData` (nil = use server defaults)
 - `ClientData` has `ID` (no separate `Name` field; POST body uses `id` directly)
 - `ClientData.PresharedKey` is a server-generated per-peer secret, not an `AWGParams` field and never part of interface grouping
@@ -54,6 +56,8 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - **I1-I5**: client-side CPS packets, server does not use them in `awg set`
 - **DNS**: client-side `[Interface]` behavior; server does not configure it on AWG interfaces
 - **PersistentKeepalive**: client-side `[Peer]` behavior; server does not set it on the peer
+
+Create and update operations validate raw overrides and the effective profile before key generation, IP allocation, peer migration, or persistence. `main.go` validates the default profile before creating the interface pool. Existing persisted clients use the legacy restoration path without the new strict profile gate so an upgrade does not silently discard them.
 
 ## Persistence
 

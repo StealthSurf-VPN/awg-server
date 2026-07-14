@@ -99,7 +99,7 @@ Every new client automatically receives a unique server-generated 32-byte presha
 
 **Errors:**
 
-- `400` — missing or invalid `id`, id too long (max 256 chars), `port` outside 1024-65535 (except zero for inheritance), `mtu` outside 1280-1420, invalid per-client `dns`, or `persistent_keepalive` outside 0-65535
+- `400` — missing or invalid `id`, id too long (max 256 chars), or invalid `awg_params`
 - `409` — client with this id already exists, or requested port is already in use
 - `503` — maximum number of interfaces reached
 
@@ -116,7 +116,7 @@ Content-Type: application/json
     "persistent_keepalive": 0,
     "jc": 10,
     "jmin": 100,
-    "jmax": 2000
+    "jmax": 1000
   }
 }
 ```
@@ -138,14 +138,14 @@ Updates the client's MTU, DNS, persistent keepalive, and obfuscation parameters.
     "persistent_keepalive": 0,
     "jc": 10,
     "jmin": 100,
-    "jmax": 2000
+    "jmax": 1000
   }
 }
 ```
 
 **Errors:**
 
-- `400` — invalid request body, `port` outside 1024-65535 (except zero for inheritance), `mtu` outside 1280-1420, invalid per-client `dns`, or `persistent_keepalive` outside 0-65535
+- `400` — invalid request body or invalid `awg_params`
 - `404` — client not found
 - `409` — requested port is already in use, or port change on shared interface
 - `503` — maximum number of interfaces reached
@@ -226,7 +226,7 @@ If this was the last client on an interface, the interface is automatically dest
 
 ## AWG Params Object
 
-All fields are optional. `mtu` accepts values from 1280 through 1420; omitted or zero inherits `AWG_MTU`. `dns` accepts a single IPv4 address; omitted or empty inherits `AWG_DNS`, and DoH URLs are not supported. `persistent_keepalive` accepts values from 0 through 65535; omission inherits 25 and zero explicitly disables it. Other parameters with value `0` (or empty string for I1-I5) are omitted, **except `s3`/`s4` which are always emitted (even when 0)**.
+All fields are optional. Except for the pointer-valued `persistent_keepalive`, zero integer values and empty strings inherit the corresponding server default. Validation is performed both on the supplied override and on the effective profile after inheritance.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
@@ -234,12 +234,17 @@ All fields are optional. `mtu` accepts values from 1280 through 1420; omitted or
 | `mtu` | int | MTU for this client's generated config, range 1280-1420. Omit or set to 0 to inherit `AWG_MTU`. Does not affect interface grouping. |
 | `dns` | string | One IPv4 DNS server for the generated client `[Interface]`. Omit or set to an empty string to inherit `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected. Does not affect interface grouping. |
 | `persistent_keepalive` | int | Keepalive interval in seconds for the generated client `[Peer]`, range 0-65535. Omit to inherit 25; set to 0 to disable. Does not affect interface grouping. |
-| `jc` | int | Junk packet count |
-| `jmin` | int | Junk packet minimum size |
-| `jmax` | int | Junk packet maximum size |
-| `s1` - `s4` | int | Packet padding (init, response, underload, transport) |
-| `h1` - `h4` | string | Packet header ranges, format `"min-max"` (init, response, underload, transport) |
-| `i1` - `i5` | string | CPS signature packets (AmneziaWG 2.0) |
+| `jc` | int | Junk packet count, range 0-128. Zero inherits the server default. |
+| `jmin` | int | Junk packet minimum size, range 0-1280. Zero inherits the server default. When effective `jc > 0`, effective `jmin` must be positive and less than `jmax`. |
+| `jmax` | int | Junk packet maximum size, range 0-1280. Zero inherits the server default. When effective `jc > 0`, effective `jmax` must be positive and greater than `jmin`. |
+| `s1` | int | Init packet padding, range 0-1132. Zero inherits the server default. |
+| `s2` | int | Response packet padding, range 0-1188. Zero inherits the server default; effective `s2` must not equal `s1 + 56`. |
+| `s3` | int | Underload packet padding, range 0-64. Zero inherits the server default. |
+| `s4` | int | Transport packet padding, range 0-32. Zero inherits the server default. |
+| `h1` - `h4` | string | Unsigned decimal `uint32` values or inclusive `start-end` ranges. Empty values inherit server defaults; all four effective ranges are required and must not overlap. |
+| `i1` - `i5` | string | Tag-only CPS strings. Supported tags are `<b 0xHEX>`, `<t>`, `<r N>`, `<rc N>`, and `<rd N>`; `N` is 0-1000 and each expanded packet is at most 1280 bytes. Empty values inherit server defaults. |
+
+Malformed ranges, overlapping effective header ranges, unsupported CPS tags, text outside CPS tags, control characters, and expanded CPS packets larger than 1280 bytes are rejected with `400 Bad Request` before client state is changed.
 
 ## Error Handling
 
