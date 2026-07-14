@@ -100,10 +100,14 @@ Client data is stored in `{AWG_DATA_DIR}/clients.json`:
         "jc": 5,
         "jmin": 50,
         "jmax": 1000
+      },
+      "routing": {
+        "mode": "split",
+        "allowed_ips": ["91.108.4.0/22", "149.154.160.0/20"]
       }
     }
   ]
 }
 ```
 
-Clients without custom parameters have `awg_params` omitted (uses automatic client listen-port selection and server defaults, including `AWG_DNS` and `PersistentKeepalive = 25`). Clients created before PSK support can also omit `preshared_key`. On startup, all clients are restored and interfaces are recreated as needed, using the persisted PSK when present.
+Clients without custom parameters have `awg_params` omitted (uses automatic client listen-port selection and server defaults, including `AWG_DNS` and `PersistentKeepalive = 25`). Omitted `routing` means full tunnel for backward compatibility; an explicit `{"mode":"full"}` supplied through the API is canonically persisted by omitting `routing`. Split routing is persisted with normalized IPv4 CIDRs. Clients created before PSK support can also omit `preshared_key`. On startup, all clients are restored and interfaces are recreated as needed, using the persisted PSK when present.

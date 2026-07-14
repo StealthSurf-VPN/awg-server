@@ -43,4 +43,5 @@
 - H1-H4 accept only unsigned decimal `uint32` values or inclusive `start-end` ranges; all effective ranges must be present and non-overlapping
 - I1-I5 accept only exact `b`, `t`, `r`, `rc`, and `rd` CPS tag sequences; dynamic sizes are 0-1000 and each expanded packet is limited to 1280 bytes
 - Invalid AWG overrides and effective profiles return 400 before key generation, IP allocation, peer migration, or persistence
+- Split routing accepts only IPv4 CIDRs, masks host bits, stably deduplicates normalized prefixes, and rejects invalid syntax before mutation; private, overlapping, and default networks are intentionally accepted when chosen by authenticated callers
 - Interface limit enforced via `AWG_MAX_INTERFACES` (503 when exceeded)

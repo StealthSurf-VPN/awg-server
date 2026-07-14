@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"log"
@@ -11,20 +12,45 @@ import (
 	"github.com/stealthsurf-vpn/awg-server/internal/clients"
 )
 
+type optionalField[T any] struct {
+	Set   bool
+	Value *T
+}
+
+func (f *optionalField[T]) UnmarshalJSON(data []byte) error {
+	f.Set = true
+
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		f.Value = nil
+		return nil
+	}
+
+	var value T
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+
+	f.Value = &value
+	return nil
+}
+
 type createClientRequest struct {
-	ID        string         `json:"id"`
-	AWGParams *awg.AWGParams `json:"awg_params,omitempty"`
+	ID        string           `json:"id"`
+	AWGParams *awg.AWGParams   `json:"awg_params,omitempty"`
+	Routing   *clients.Routing `json:"routing,omitempty"`
 }
 
 type updateClientRequest struct {
-	AWGParams *awg.AWGParams `json:"awg_params"`
+	AWGParams optionalField[awg.AWGParams]   `json:"awg_params"`
+	Routing   optionalField[clients.Routing] `json:"routing"`
 }
 
 type clientResponse struct {
-	ID        string         `json:"id"`
-	Address   string         `json:"address"`
-	CreatedAt string         `json:"created_at"`
-	AWGParams *awg.AWGParams `json:"awg_params,omitempty"`
+	ID        string          `json:"id"`
+	Address   string          `json:"address"`
+	CreatedAt string          `json:"created_at"`
+	AWGParams *awg.AWGParams  `json:"awg_params,omitempty"`
+	Routing   clients.Routing `json:"routing"`
 }
 
 func toResponse(c clients.ClientData) clientResponse {
@@ -33,6 +59,7 @@ func toResponse(c clients.ClientData) clientResponse {
 		Address:   c.Address,
 		CreatedAt: c.CreatedAt,
 		AWGParams: c.AWGParams,
+		Routing:   clients.EffectiveRouting(c.Routing),
 	}
 }
 
@@ -74,7 +101,13 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := s.manager.CreateClient(req.ID, req.AWGParams)
+	normalizedRouting, err := clients.NormalizeRouting(req.Routing)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	client, err := s.manager.CreateClient(req.ID, req.AWGParams, normalizedRouting)
 	if err != nil {
 		log.Printf("create client error: %v", err)
 
@@ -86,6 +119,8 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, awg.ErrInvalidParams):
 			status = http.StatusBadRequest
 		case errors.Is(err, awg.ErrInvalidPort):
+			status = http.StatusBadRequest
+		case errors.Is(err, clients.ErrInvalidRouting):
 			status = http.StatusBadRequest
 		case errors.Is(err, awg.ErrPortInUse):
 			status = http.StatusConflict
@@ -116,12 +151,34 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := awg.ValidateOverrides(req.AWGParams); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+	if !req.AWGParams.Set && !req.Routing.Set {
+		jsonError(w, clients.ErrEmptyClientUpdate.Error(), http.StatusBadRequest)
 		return
 	}
 
-	client, err := s.manager.UpdateClient(id, req.AWGParams)
+	if req.AWGParams.Set {
+		if err := awg.ValidateOverrides(req.AWGParams.Value); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	if req.Routing.Set {
+		normalizedRouting, err := clients.NormalizeRouting(req.Routing.Value)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		req.Routing.Value = normalizedRouting
+	}
+
+	client, err := s.manager.UpdateClient(id, clients.ClientUpdate{
+		AWGParams:    req.AWGParams.Value,
+		AWGParamsSet: req.AWGParams.Set,
+		Routing:      req.Routing.Value,
+		RoutingSet:   req.Routing.Set,
+	})
 	if err != nil {
 		log.Printf("update client error: %v", err)
 
@@ -133,6 +190,10 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, awg.ErrInvalidParams):
 			status = http.StatusBadRequest
 		case errors.Is(err, awg.ErrInvalidPort):
+			status = http.StatusBadRequest
+		case errors.Is(err, clients.ErrInvalidRouting):
+			status = http.StatusBadRequest
+		case errors.Is(err, clients.ErrEmptyClientUpdate):
 			status = http.StatusBadRequest
 		case errors.Is(err, awg.ErrPortInUse):
 			status = http.StatusConflict

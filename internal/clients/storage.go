@@ -17,6 +17,7 @@ type ClientData struct {
 	Address      string         `json:"address"`
 	CreatedAt    string         `json:"created_at"`
 	AWGParams    *awg.AWGParams `json:"awg_params,omitempty"`
+	Routing      *Routing       `json:"routing,omitempty"`
 }
 
 type StorageData struct {

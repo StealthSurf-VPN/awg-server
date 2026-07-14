@@ -61,6 +61,13 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 
 Create and update operations validate raw overrides and the effective profile before key generation, IP allocation, peer migration, or persistence. `main.go` validates the default profile before creating the interface pool. Existing persisted clients use the legacy restoration path without the new strict profile gate so an upgrade does not silently discard them.
 
+## Client Routing
+
+- Per-client routing is stored as `*clients.Routing`; nil means full tunnel for backward compatibility.
+- `full` renders `0.0.0.0/0, ::/0`; `split` renders normalized IPv4 CIDRs.
+- Client routing never participates in `AWGParams`, interface grouping, port allocation, peer migration, or server-side peer `allowed-ips`.
+- Domain, application, and geosite routing require client-side logic and are not part of the generated AWG configuration contract.
+
 ## Persistence
 
 - **Clients**: `{AWG_DATA_DIR}/clients.json` — server private key, generated AWG params, client data
@@ -69,6 +76,7 @@ Create and update operations validate raw overrides and the effective profile be
 - Server private key generated once and persisted
 - Generated AWG params (H1-H4, S1, S2) generated once at first start and persisted as `generated_params` in clients.json
 - Per-client `awg_params` persisted (omitted if nil/default)
+- Per-client `routing` persisted for split policies; nil/full is omitted for backward compatibility
 - New clients receive a unique 32-byte PSK persisted as `preshared_key`; legacy records may omit it
 - On startup: load JSON → load/generate params → group by effective params → recreate interfaces → re-add peers with their persisted PSKs when present
 

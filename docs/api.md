@@ -40,12 +40,16 @@ GET /api/clients
       "jc": 5,
       "jmin": 50,
       "jmax": 1000
+    },
+    "routing": {
+      "mode": "split",
+      "allowed_ips": ["91.108.4.0/22", "149.154.160.0/20"]
     }
   }
 ]
 ```
 
-Returns empty array `[]` if no clients. The `awg_params` field is omitted for clients using default server parameters.
+Returns empty array `[]` if no clients. The `awg_params` field is omitted for clients using default server parameters. The `routing` field is always present and contains the effective routing policy; clients with omitted persisted routing are returned as `{"mode":"full"}`.
 
 ## Create Client
 
@@ -54,6 +58,21 @@ POST /api/clients
 Content-Type: application/json
 
 {"id": "550e8400-e29b-41d4-a716-446655440000"}
+```
+
+With split routing:
+
+```http
+POST /api/clients
+Content-Type: application/json
+
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "routing": {
+    "mode": "split",
+    "allowed_ips": ["91.108.4.0/22", "149.154.160.0/20"]
+  }
+}
 ```
 
 With custom server port, client listen port, MTU, DNS, persistent keepalive, and obfuscation parameters:
@@ -79,6 +98,8 @@ Content-Type: application/json
 
 If `awg_params` is omitted, the client uses server defaults (global `AWG_MTU`, global `AWG_DNS`, `PersistentKeepalive = 25`, auto-generated H/S, and env Jc/Jmin/Jmax). Per-client params are merged over defaults. A custom server-side `port` must be in the inclusive range 1024-65535; omitted or zero uses automatic server interface assignment. `client_listen_port` accepts the same range and adds `ListenPort` to the generated client `[Interface]`; omitted or zero leaves client-side port selection automatic. `dns` accepts one IPv4 address; omission or an empty string inherits `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected. `persistent_keepalive` accepts 0-65535: omission inherits 25, while an explicit zero disables keepalive.
 
+If `routing` is omitted, `null`, or `{"mode":"full"}`, the client uses full-tunnel routing. See [Routing Object](#routing-object) for split-tunnel behavior and validation.
+
 Every new client automatically receives a unique server-generated 32-byte preshared key. The API does not accept a PSK in the request and does not expose it in list, create, or update JSON responses. It is returned only as part of the authenticated client configuration.
 
 **Response** `201 Created`:
@@ -96,13 +117,16 @@ Every new client automatically receives a unique server-generated 32-byte presha
     "jc": 5,
     "jmin": 50,
     "jmax": 1000
+  },
+  "routing": {
+    "mode": "full"
   }
 }
 ```
 
 **Errors:**
 
-- `400` — missing or invalid `id`, id too long (max 256 chars), or invalid `awg_params`
+- `400` — missing or invalid `id`, id too long (max 256 chars), invalid `awg_params`, or invalid `routing`
 - `409` — client with this id already exists, or requested port is already in use
 - `503` — maximum number of interfaces reached
 
@@ -121,13 +145,19 @@ Content-Type: application/json
     "jc": 10,
     "jmin": 100,
     "jmax": 1000
+  },
+  "routing": {
+    "mode": "split",
+    "allowed_ips": ["91.108.4.0/22", "149.154.160.0/20"]
   }
 }
 ```
 
-Updates the client's local listen port, MTU, DNS, persistent keepalive, and obfuscation parameters. When all other fields remain unchanged, changing only `client_listen_port`, `mtu`, `dns`, or `persistent_keepalive` updates the generated client config without moving the peer to another interface. If interface-level parameters differ, the peer is moved to the appropriate interface (created on demand if needed).
+Updates `awg_params` and `routing` independently. Omitting either field preserves its current value, JSON `null` resets that field to its default behavior, and an object replaces the complete stored value for that field. A request containing neither field returns `400 Bad Request`.
 
-`PATCH` replaces the complete `awg_params` override object rather than merging with the client's previous object. Include every custom field that must be retained. Set `awg_params` to `null` to revert all fields to their automatic or server-default behavior. Changes to client-only values such as `client_listen_port`, `mtu`, `dns`, and `persistent_keepalive` apply after the regenerated configuration is downloaded and reapplied on the client device.
+For `awg_params`, include every custom field that must be retained; `null` reverts all fields to their automatic or server-default behavior. When all other fields remain unchanged, changing only `client_listen_port`, `mtu`, `dns`, or `persistent_keepalive` updates the generated client config without moving the peer to another interface. If interface-level parameters differ, the peer is moved to the appropriate interface (created on demand if needed).
+
+For `routing`, an object replaces the complete policy and `null` resets it to full tunnel. Routing-only updates never move the peer or change its server-side `/32`; download and reapply the regenerated configuration on the client device for the new routing policy to take effect. The same re-download/reapply requirement applies to other client-only values.
 
 **Response** `200 OK`:
 
@@ -144,13 +174,17 @@ Updates the client's local listen port, MTU, DNS, persistent keepalive, and obfu
     "jc": 10,
     "jmin": 100,
     "jmax": 1000
+  },
+  "routing": {
+    "mode": "split",
+    "allowed_ips": ["91.108.4.0/22", "149.154.160.0/20"]
   }
 }
 ```
 
 **Errors:**
 
-- `400` — invalid request body or invalid `awg_params`
+- `400` — invalid request body, neither supported field supplied, invalid `awg_params`, or invalid `routing`
 - `404` — client not found
 - `409` — requested port is already in use, or port change on shared interface
 - `503` — maximum number of interfaces reached
@@ -229,6 +263,21 @@ If this was the last client on an interface, the interface is automatically dest
 **Errors:**
 
 - `404` — client not found
+
+## Routing Object
+
+`routing` is a top-level client field, separate from `awg_params`. It controls the `AllowedIPs` line rendered in the generated client configuration.
+
+| Mode | `allowed_ips` | Generated behavior |
+| ---- | ------------- | ------------------ |
+| `full` | Omitted or empty | `AllowedIPs = 0.0.0.0/0, ::/0` |
+| `split` | One or more IPv4 CIDRs | Only the normalized listed prefixes are rendered |
+
+For `split`, each CIDR is masked to its network prefix. Duplicate normalized prefixes are removed while preserving the first occurrence order; for example, `10.1.2.3/8`, `10.0.0.0/8`, `192.168.1.7/24` becomes `10.0.0.0/8`, `192.168.1.0/24`.
+
+Missing or unknown modes, a non-empty `allowed_ips` array with `full`, an empty `allowed_ips` array with `split`, malformed CIDRs, and IPv6 CIDRs in `split` return `400 Bad Request` before client state changes. Syntactically valid private, overlapping, and default IPv4 CIDRs such as `0.0.0.0/0` are intentionally accepted; authenticated callers are responsible for the resulting route selection.
+
+Omitted routing and explicit `full` are equivalent. API responses always expose the effective object as `{"mode":"full"}` or a normalized `split` object. Routing changes affect only the generated client configuration: the client must download and reapply it, while interface grouping, peer migration, and the server-side peer `/32` remain unchanged. Domain, application, and geosite routing require separate client-side logic and are not accepted by this CIDR-only contract.
 
 ## AWG Params Object
 

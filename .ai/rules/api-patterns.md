@@ -29,10 +29,18 @@
 | ------ | ---- | ------- |
 | `GET` | `/health` | Unauthenticated health check |
 | `GET` | `/api/clients` | List clients for backend reconciliation and orphan cleanup |
-| `POST` | `/api/clients` | Create a client, optionally with custom `awg_params` |
-| `PATCH` | `/api/clients/{id}` | Change or reset the client's listen port, MTU, DNS, persistent keepalive, and obfuscation profile |
+| `POST` | `/api/clients` | Create a client, optionally with custom `awg_params` and `routing` |
+| `PATCH` | `/api/clients/{id}` | Independently replace or reset the client's `awg_params` and `routing` |
 | `GET` | `/api/clients/{id}/configuration` | Return the generated `.conf` file |
 | `GET` | `/api/clients/{id}/stats` | Return accumulated usage and last handshake |
 | `DELETE` | `/api/clients/{id}` | Remove the client and any now-empty interface |
+
+## Client Fields
+
+- `POST /api/clients` accepts optional top-level `awg_params` and `routing` objects. Omitted or null routing creates the backward-compatible full-tunnel policy.
+- `PATCH /api/clients/{id}` treats `awg_params` and `routing` independently: omission preserves a field, JSON null resets it, and an object replaces its complete stored value.
+- A PATCH body containing neither `awg_params` nor `routing` returns `400 Bad Request`; null counts as an explicitly supplied reset.
+- List, create, and update responses return effective routing as `{"mode":"full"}` or a normalized split object, even when full routing is omitted from persistence.
+- Routing-only updates do not migrate peers because routing is not part of `AWGParams` or interface grouping.
 
 When the contract changes, update `docs/api.md` and any affected examples in `README.md` in the same patch.
