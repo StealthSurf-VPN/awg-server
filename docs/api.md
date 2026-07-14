@@ -51,6 +51,36 @@ GET /api/clients
 
 Returns empty array `[]` if no clients. The `awg_params` field is omitted for clients using default server parameters. The `routing` field is always present and contains the effective routing policy; clients with omitted persisted routing are returned as `{"mode":"full"}`.
 
+## Generate AWG Parameters
+
+```http
+POST /api/awg-params/generate
+Authorization: Bearer <AWG_API_TOKEN>
+```
+
+This bearer-authenticated endpoint requires no request body. It generates a standalone H/S fragment with the server's secure-random algorithm and does not read, mutate, or persist any server or client state.
+
+**Response** `200 OK` (`Content-Type: application/json`):
+
+```json
+{
+  "h1": "234567-678901",
+  "h2": "2345678-6789012",
+  "h3": "23456789-67890123",
+  "h4": "234567890-678901234",
+  "s1": 42,
+  "s2": 87
+}
+```
+
+The response is the raw generated fragment, without a wrapper object, and its fields can be inserted into an `awg_params` object.
+
+| Status | Meaning |
+| ------ | ------- |
+| `200` | A valid H1-H4 and S1-S2 fragment was generated. |
+| `401` | The bearer token is missing or invalid. |
+| `500` | Secure randomness failed. The response is the generic internal-error JSON and no state was changed. |
+
 ## Create Client
 
 ```http
@@ -205,6 +235,61 @@ For `routing`, an object replaces the complete policy and `null` resets it to fu
 - `404` — client not found
 - `409` — requested port is already in use, or port change on shared interface
 - `503` — maximum number of interfaces reached
+
+## Regenerate Client AWG Parameters
+
+```http
+POST /api/clients/{id}/regenerate-awg-params
+Authorization: Bearer <AWG_API_TOKEN>
+```
+
+This bearer-authenticated endpoint requires no request body. It generates a new H1-H4 and S1-S2 set for the client, validates the resulting effective profile, migrates the peer through the existing interface pool, and returns the normal client response shape.
+
+**Response** `200 OK` (`Content-Type: application/json`):
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "address": "10.0.0.2",
+  "created_at": "2026-01-01T00:00:00Z",
+  "awg_params": {
+    "port": 51825,
+    "client_listen_port": 54321,
+    "mtu": 1280,
+    "dns_mode": "custom",
+    "dns_servers": ["9.9.9.9", "149.112.112.112"],
+    "persistent_keepalive": 60,
+    "jc": 8,
+    "jmin": 50,
+    "jmax": 1000,
+    "s1": 42,
+    "s2": 87,
+    "h1": "234567-678901",
+    "h2": "2345678-6789012",
+    "h3": "23456789-67890123",
+    "h4": "234567890-678901234"
+  },
+  "routing": {
+    "mode": "full"
+  }
+}
+```
+
+Only H1-H4 and S1-S2 are replaced. The operation preserves the server port, client listen port, MTU, all legacy and mode-based DNS fields, persistent keepalive, Jc/Jmin/Jmax, S3/S4, I1-I5, routing, client ID, address, creation time, private/public keys, and preshared key. If the client previously inherited all AWG overrides, the stored object gains only the generated H/S fields and every unrelated value continues to inherit its server default.
+
+> **Warning:** A successful response means the server-side peer has already moved to the new H/S profile, so the old client configuration is immediately invalid. Immediately fetch `GET /api/clients/{id}/configuration`, then deliver and reapply that configuration on the client device.
+
+| Status | Meaning |
+| ------ | ------- |
+| `200` | The client was migrated and the updated normal client response is returned. |
+| `400` | The resulting effective AWG profile is invalid. |
+| `401` | The bearer token is missing or invalid. |
+| `404` | The client was not found. |
+| `409` | The preserved server port conflicts with another interface, including the shared explicit-port case described below. |
+| `503` | The interface limit prevents migration. |
+| `500` | Secure randomness, distinct-parameter generation, or another internal device operation failed. The response is generic. |
+
+The explicit shared-port conflict is a `409`: when a client has a fixed server-side `port` and shares its current interface, the new H/S grouping key needs a different interface while that same port is still occupied by the shared old interface. The failed request leaves the stored client parameters unchanged.
 
 ## Get Client Configuration
 

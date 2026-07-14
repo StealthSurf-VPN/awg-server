@@ -76,6 +76,18 @@ func (s *Server) handleListClients(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+func (s *Server) handleGenerateAWGParams(w http.ResponseWriter, r *http.Request) {
+	params, err := awg.GenerateParams()
+	if err != nil {
+		log.Printf("generate awg params error: %v", err)
+		writeError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(params)
+}
+
 func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
@@ -187,36 +199,47 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		log.Printf("update client error: %v", err)
-
-		var status int
-
-		switch {
-		case errors.Is(err, clients.ErrClientNotFound):
-			status = http.StatusNotFound
-		case errors.Is(err, awg.ErrInvalidParams):
-			status = http.StatusBadRequest
-		case errors.Is(err, awg.ErrInvalidPort):
-			status = http.StatusBadRequest
-		case errors.Is(err, clients.ErrInvalidRouting):
-			status = http.StatusBadRequest
-		case errors.Is(err, clients.ErrEmptyClientUpdate):
-			status = http.StatusBadRequest
-		case errors.Is(err, awg.ErrPortInUse):
-			status = http.StatusConflict
-		case errors.Is(err, awg.ErrPortShared):
-			status = http.StatusConflict
-		case errors.Is(err, awg.ErrMaxInterfacesReached):
-			status = http.StatusServiceUnavailable
-		default:
-			status = http.StatusInternalServerError
-		}
-
-		writeError(w, err, status)
+		writeError(w, err, clientUpdateErrorStatus(err))
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(toResponse(*client))
+}
+
+func (s *Server) handleRegenerateClientAWGParams(w http.ResponseWriter, r *http.Request) {
+	client, err := s.manager.RegenerateAWGParams(r.PathValue("id"))
+	if err != nil {
+		log.Printf("regenerate client awg params error: %v", err)
+		writeError(w, err, clientUpdateErrorStatus(err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(toResponse(*client))
+}
+
+func clientUpdateErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, clients.ErrClientNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, awg.ErrInvalidParams):
+		return http.StatusBadRequest
+	case errors.Is(err, awg.ErrInvalidPort):
+		return http.StatusBadRequest
+	case errors.Is(err, clients.ErrInvalidRouting):
+		return http.StatusBadRequest
+	case errors.Is(err, clients.ErrEmptyClientUpdate):
+		return http.StatusBadRequest
+	case errors.Is(err, awg.ErrPortInUse):
+		return http.StatusConflict
+	case errors.Is(err, awg.ErrPortShared):
+		return http.StatusConflict
+	case errors.Is(err, awg.ErrMaxInterfacesReached):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (s *Server) handleGetConfiguration(w http.ResponseWriter, r *http.Request) {
