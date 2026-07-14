@@ -57,7 +57,7 @@ func NewPool(cfg *config.Config, privateKey [32]byte, maxIfaces int) (*Pool, err
 	}, nil
 }
 
-func (p *Pool) AddPeer(params AWGParams, publicKey [32]byte, allowedIP string) error {
+func (p *Pool) AddPeer(params AWGParams, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -66,7 +66,7 @@ func (p *Pool) AddPeer(params AWGParams, publicKey [32]byte, allowedIP string) e
 		return fmt.Errorf("get or create interface: %w", err)
 	}
 
-	if err := addPeerToInterface(ifc.ifName, publicKey, allowedIP); err != nil {
+	if err := addPeerToInterface(ifc.ifName, publicKey, presharedKey, allowedIP); err != nil {
 		return err
 	}
 
@@ -102,7 +102,7 @@ func (p *Pool) RemovePeer(params AWGParams, publicKey [32]byte, allowedIP string
 	return nil
 }
 
-func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, allowedIP string) error {
+func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -132,17 +132,17 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, a
 
 		newIfc, err := p.getOrCreateInterface(newParams)
 		if err != nil {
-			p.rollbackPeer(oldParams, publicKey, allowedIP)
+			p.rollbackPeer(oldParams, publicKey, presharedKey, allowedIP)
 			return fmt.Errorf("get or create interface: %w", err)
 		}
 
-		if err := addPeerToInterface(newIfc.ifName, publicKey, allowedIP); err != nil {
+		if err := addPeerToInterface(newIfc.ifName, publicKey, presharedKey, allowedIP); err != nil {
 			if newIfc.peerCount == 0 {
 				destroyInterface(newIfc.ifName)
 				delete(p.usedPorts, newIfc.port)
 				delete(p.ifaces, newKey)
 			}
-			p.rollbackPeer(oldParams, publicKey, allowedIP)
+			p.rollbackPeer(oldParams, publicKey, presharedKey, allowedIP)
 			return fmt.Errorf("add peer to new interface: %w", err)
 		}
 
@@ -156,7 +156,7 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, a
 		return fmt.Errorf("get or create interface: %w", err)
 	}
 
-	if err := addPeerToInterface(newIfc.ifName, publicKey, allowedIP); err != nil {
+	if err := addPeerToInterface(newIfc.ifName, publicKey, presharedKey, allowedIP); err != nil {
 		if newIfc.peerCount == 0 {
 			destroyInterface(newIfc.ifName)
 			delete(p.usedPorts, newIfc.port)
@@ -184,14 +184,14 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, a
 	return nil
 }
 
-func (p *Pool) rollbackPeer(params AWGParams, publicKey [32]byte, allowedIP string) {
+func (p *Pool) rollbackPeer(params AWGParams, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) {
 	ifc, err := p.getOrCreateInterface(params)
 	if err != nil {
 		log.Printf("warning: rollback failed, could not recreate interface: %v", err)
 		return
 	}
 
-	if err := addPeerToInterface(ifc.ifName, publicKey, allowedIP); err != nil {
+	if err := addPeerToInterface(ifc.ifName, publicKey, presharedKey, allowedIP); err != nil {
 		log.Printf("warning: rollback failed, could not re-add peer: %v", err)
 		return
 	}

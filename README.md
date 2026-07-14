@@ -4,6 +4,8 @@ HTTP API server for managing **AmneziaWG 2.0** VPN clients. Uses the **AmneziaWG
 
 Supports **per-client obfuscation profiles** — each unique set of CPS parameters gets its own AWG interface, created on demand.
 
+Every newly created client also receives a unique, server-generated WireGuard preshared key (PSK). The PSK is installed on the AWG peer and included only in that client's generated configuration.
+
 ## Quick Install (Linux)
 
 One-liner that installs AmneziaWG 2.0, downloads the latest `awg-server` binary, and gets you ready to run:
@@ -216,6 +218,12 @@ Advanced clients can override `persistent_keepalive` through `awg_params`. Omit 
 
 Clients can override DNS with one IPv4 address in `awg_params.dns`. Omit it or send an empty string to inherit `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected; DoH requires a separate client-side resolver or server-side DNS-to-DoH proxy. The new DNS value takes effect after the generated configuration is downloaded and reapplied on the client device.
 
+### Per-Client Preshared Keys
+
+The server generates a unique 32-byte PSK for every new client. It stores the key in `/data/clients.json` with the rest of the client secrets, installs it on the server peer through stdin, and adds `PresharedKey` to the authenticated `.conf` response. The PSK is not accepted in create/update requests and is not exposed by list, create, or update responses.
+
+Persisted clients created by an older server version have no PSK and continue to work unchanged. They are not upgraded automatically because enabling a PSK on only the server would break their existing client configurations.
+
 ### Obfuscation Profiles
 
 > **Rule of thumb:** H1-H4 and S1/S2 are auto-generated. `Jc/Jmin/Jmax` only affect connection time. `S4` affects every packet — use with care.
@@ -249,7 +257,7 @@ AmneziaWG sets CPS obfuscation parameters at the **interface level**, not per-pe
 
 - Each unique set of CPS parameters gets its own `awgN` interface (awg0, awg1, awg2, ...)
 - Clients with identical CPS parameters share an interface
-- Per-client `mtu`, `dns`, and `persistent_keepalive` only change the generated client config and do not create a new interface
+- Per-client `mtu`, `dns`, `persistent_keepalive`, and PSK do not affect interface grouping; PSK is also installed on the corresponding server peer
 - Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from base port)
 - Interfaces are created on demand and destroyed when their last peer is removed
 - All interfaces share the same server private key

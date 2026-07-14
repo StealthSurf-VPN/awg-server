@@ -77,6 +77,8 @@ Content-Type: application/json
 
 If `awg_params` is omitted, the client uses server defaults (global `AWG_MTU`, global `AWG_DNS`, `PersistentKeepalive = 25`, auto-generated H/S, and env Jc/Jmin/Jmax). Per-client params are merged over defaults. A custom `port` must be in the inclusive range 1024-65535; omitted or zero inherits automatic assignment. `dns` accepts one IPv4 address; omission or an empty string inherits `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected. `persistent_keepalive` accepts 0-65535: omission inherits 25, while an explicit zero disables keepalive.
 
+Every new client automatically receives a unique server-generated 32-byte preshared key. The API does not accept a PSK in the request and does not expose it in list, create, or update JSON responses. It is returned only as part of the authenticated client configuration.
+
 **Response** `201 Created`:
 
 ```json
@@ -174,12 +176,13 @@ H4 = 234567890-678901234
 
 [Peer]
 PublicKey = <base64>
+PresharedKey = <base64>
 Endpoint = 1.2.3.4:51820
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 60
 ```
 
-The MTU is the client's `awg_params.mtu` override, or the global `AWG_MTU` value when the override is omitted or zero. DNS is the client's validated IPv4 `awg_params.dns` override, or global `AWG_DNS` when omitted or empty. Persistent keepalive is the client's `awg_params.persistent_keepalive` override; omission uses 25 and zero disables it. The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
+The MTU is the client's `awg_params.mtu` override, or the global `AWG_MTU` value when the override is omitted or zero. DNS is the client's validated IPv4 `awg_params.dns` override, or global `AWG_DNS` when omitted or empty. Persistent keepalive is the client's `awg_params.persistent_keepalive` override; omission uses 25 and zero disables it. `PresharedKey` is generated and stored by the server for new clients and must match the key installed on the server peer. Legacy clients created before PSK support omit this line and continue to work without a PSK. The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
 
 **Errors:**
 

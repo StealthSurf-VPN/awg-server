@@ -47,9 +47,15 @@ func NewManager(pool *awg.Pool, storage *Storage, cfg *config.Config, defaultPar
 			continue
 		}
 
+		presharedKey, err := decodePresharedKey(c.PresharedKey)
+		if err != nil {
+			log.Printf("skip client %s: invalid preshared key: %v", c.ID, err)
+			continue
+		}
+
 		params := m.effectiveParams(c.AWGParams)
 
-		if err := pool.AddPeer(params, pubKey, c.Address); err != nil {
+		if err := pool.AddPeer(params, pubKey, presharedKey, c.Address); err != nil {
 			log.Printf("skip client %s: failed to add peer: %v", c.ID, err)
 			continue
 		}
@@ -86,6 +92,11 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams) (*ClientData,
 
 	pubKey := awg.PublicKeyFromPrivate(privKey)
 
+	presharedKey, err := awg.GeneratePresharedKey()
+	if err != nil {
+		return nil, fmt.Errorf("generate preshared key: %w", err)
+	}
+
 	ip, err := m.allocateIP()
 	if err != nil {
 		return nil, fmt.Errorf("allocate IP: %w", err)
@@ -93,17 +104,18 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams) (*ClientData,
 
 	effective := m.effectiveParams(params)
 
-	if err := m.pool.AddPeer(effective, pubKey, ip); err != nil {
+	if err := m.pool.AddPeer(effective, pubKey, &presharedKey, ip); err != nil {
 		return nil, fmt.Errorf("add peer to device: %w", err)
 	}
 
 	client := &ClientData{
-		ID:         name,
-		PrivateKey: awg.KeyToBase64(privKey),
-		PublicKey:  awg.KeyToBase64(pubKey),
-		Address:    ip,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		AWGParams:  params,
+		ID:           name,
+		PrivateKey:   awg.KeyToBase64(privKey),
+		PublicKey:    awg.KeyToBase64(pubKey),
+		PresharedKey: awg.KeyToBase64(presharedKey),
+		Address:      ip,
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		AWGParams:    params,
 	}
 
 	m.clients[client.ID] = client
@@ -140,7 +152,12 @@ func (m *Manager) UpdateClient(id string, params *awg.AWGParams) (*ClientData, e
 			return nil, fmt.Errorf("decode public key: %w", err)
 		}
 
-		if err := m.pool.MigratePeer(oldParams, newParams, pubKey, client.Address); err != nil {
+		presharedKey, err := decodePresharedKey(client.PresharedKey)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := m.pool.MigratePeer(oldParams, newParams, pubKey, presharedKey, client.Address); err != nil {
 			return nil, fmt.Errorf("migrate peer: %w", err)
 		}
 	}
@@ -262,12 +279,32 @@ MTU = %d`, client.PrivateKey, client.Address, params.DNS, params.MTU)
 	cfg += fmt.Sprintf(`
 
 [Peer]
-PublicKey = %s
+PublicKey = %s`, awg.KeyToBase64(serverPubKey))
+
+	if client.PresharedKey != "" {
+		cfg += fmt.Sprintf(`
+PresharedKey = %s`, client.PresharedKey)
+	}
+
+	cfg += fmt.Sprintf(`
 Endpoint = %s:%d
 AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = %d`, awg.KeyToBase64(serverPubKey), endpoint, port, params.PersistentKeepaliveValue())
+PersistentKeepalive = %d`, endpoint, port, params.PersistentKeepaliveValue())
 
 	return cfg
+}
+
+func decodePresharedKey(encoded string) (*[32]byte, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+
+	key, err := awg.Base64ToKey(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("decode preshared key: %w", err)
+	}
+
+	return &key, nil
 }
 
 func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {

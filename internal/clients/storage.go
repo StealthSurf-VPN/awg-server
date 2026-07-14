@@ -10,18 +10,19 @@ import (
 )
 
 type ClientData struct {
-	ID         string `json:"id"`
-	PrivateKey string `json:"private_key"`
-	PublicKey  string `json:"public_key"`
-	Address    string         `json:"address"`
-	CreatedAt  string         `json:"created_at"`
-	AWGParams  *awg.AWGParams `json:"awg_params,omitempty"`
+	ID           string         `json:"id"`
+	PrivateKey   string         `json:"private_key"`
+	PublicKey    string         `json:"public_key"`
+	PresharedKey string         `json:"preshared_key,omitempty"`
+	Address      string         `json:"address"`
+	CreatedAt    string         `json:"created_at"`
+	AWGParams    *awg.AWGParams `json:"awg_params,omitempty"`
 }
 
 type StorageData struct {
-	ServerPrivateKey string              `json:"server_private_key"`
+	ServerPrivateKey string               `json:"server_private_key"`
 	GeneratedParams  *awg.GeneratedParams `json:"generated_params,omitempty"`
-	Clients          []ClientData        `json:"clients"`
+	Clients          []ClientData         `json:"clients"`
 }
 
 type Storage struct {

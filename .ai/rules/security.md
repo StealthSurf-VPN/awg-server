@@ -12,6 +12,9 @@
 - AWG obfuscation params (H1-H4, S1, S2) generated once via `crypto/rand` and persisted in `/data/clients.json`
 - All AWG interfaces share the same server private key
 - Client private keys stored in JSON for config regeneration
+- Each new client receives an independent 32-byte PSK generated with `crypto/rand`; it is stored in JSON and passed to `awg` through stdin, never command-line arguments
+- PSKs are not accepted from API callers and are omitted from list, create, and update JSON responses; they appear only in authenticated generated client configurations
+- Legacy client records without PSKs remain supported and are not upgraded automatically
 - WireGuard keys: Curve25519 with proper clamping
 - JSON file permissions: `0600`
 

@@ -23,6 +23,17 @@ func GeneratePrivateKey() ([32]byte, error) {
 	return key, nil
 }
 
+func GeneratePresharedKey() ([32]byte, error) {
+	var key [32]byte
+
+	_, err := rand.Read(key[:])
+	if err != nil {
+		return key, fmt.Errorf("generate preshared key: %w", err)
+	}
+
+	return key, nil
+}
+
 func PublicKeyFromPrivate(private [32]byte) [32]byte {
 	var public [32]byte
 
@@ -51,4 +62,3 @@ func Base64ToKey(s string) ([32]byte, error) {
 
 	return key, nil
 }
-

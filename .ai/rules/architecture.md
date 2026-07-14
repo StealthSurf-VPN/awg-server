@@ -29,7 +29,7 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - Each interface configured via `awg set` with private key through stdin
 - Server-side obfuscation params via `awg set`: Jc/Jmin/Jmax, S1-S4, H1-H4 — encapsulated in `AWGParams`
 - Client-side only: MTU, DNS, PersistentKeepalive, and I1-I5 (`MTU`, DNS, and PersistentKeepalive are rendered by the client manager; I1-I5 are included in `.conf` but not in `awg set`)
-- Peer operations via `awg set ... peer`; stats via `awg show ... dump` (used by usage collector)
+- Peer operations via `awg set ... peer`; optional per-peer PSKs are passed through stdin using `preshared-key /dev/stdin`; stats via `awg show ... dump` (used by usage collector)
 - Network configuration (IP, routing, NAT) via `exec.Command`
 - MASQUERADE rule added once for the subnet, removed on pool close
 
@@ -46,6 +46,7 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - `GenerateParams()` — generates H1-H4 (random non-overlapping ranges, format `min-max`) and S1, S2 (random 15-150, `S1+56 ≠ S2`)
 - Per-client: stored as `*AWGParams` in `ClientData` (nil = use server defaults)
 - `ClientData` has `ID` (no separate `Name` field; POST body uses `id` directly)
+- `ClientData.PresharedKey` is a server-generated per-peer secret, not an `AWGParams` field and never part of interface grouping
 
 **Protocol rules:**
 - **Must match** server↔client: H1-H4, S1-S4
@@ -62,7 +63,8 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - Server private key generated once and persisted
 - Generated AWG params (H1-H4, S1, S2) generated once at first start and persisted as `generated_params` in clients.json
 - Per-client `awg_params` persisted (omitted if nil/default)
-- On startup: load JSON → load/generate params → group by effective params → recreate interfaces → re-add peers
+- New clients receive a unique 32-byte PSK persisted as `preshared_key`; legacy records may omit it
+- On startup: load JSON → load/generate params → group by effective params → recreate interfaces → re-add peers with their persisted PSKs when present
 
 ## Deployment
 
