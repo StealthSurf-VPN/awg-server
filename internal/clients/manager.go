@@ -13,9 +13,12 @@ import (
 	"github.com/stealthsurf-vpn/awg-server/internal/config"
 )
 
+const maxRegenerationAttempts = 8
+
 var ErrClientExists = errors.New("client already exists")
 var ErrClientNotFound = errors.New("client not found")
 var ErrEmptyClientUpdate = errors.New("at least one of awg_params or routing is required")
+var ErrGeneratedParamsUnchanged = errors.New("failed to generate distinct awg params")
 
 type ClientUpdate struct {
 	AWGParams    *awg.AWGParams
@@ -193,13 +196,56 @@ func (m *Manager) UpdateClient(id string, update ClientUpdate) (*ClientData, err
 		return nil, err
 	}
 
-	if update.AWGParamsSet {
-		normalizedParams, err := awg.NormalizeOverrides(params)
+	return m.applyClientUpdateLocked(client, params, routing, update.AWGParamsSet)
+}
+
+func (m *Manager) RegenerateAWGParams(id string) (*ClientData, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	client, ok := m.clients[id]
+	if !ok {
+		return nil, ErrClientNotFound
+	}
+
+	oldKey := m.effectiveParams(client.AWGParams).Key()
+
+	for attempt := 0; attempt < maxRegenerationAttempts; attempt++ {
+		generated, err := awg.GenerateParams()
+		if err != nil {
+			return nil, fmt.Errorf("generate awg params: %w", err)
+		}
+
+		candidate := awg.ApplyGeneratedParams(client.AWGParams, *generated)
+
+		normalized, err := awg.NormalizeOverrides(candidate)
 		if err != nil {
 			return nil, err
 		}
 
-		params = normalizedParams
+		effective, err := m.validatedParams(normalized)
+		if err != nil {
+			return nil, err
+		}
+
+		if effective.Key() == oldKey {
+			continue
+		}
+
+		return m.applyClientUpdateLocked(client, normalized, client.Routing, true)
+	}
+
+	return nil, ErrGeneratedParamsUnchanged
+}
+
+func (m *Manager) applyClientUpdateLocked(client *ClientData, params *awg.AWGParams, routing *Routing, awgParamsSet bool) (*ClientData, error) {
+	if awgParamsSet {
+		normalized, err := awg.NormalizeOverrides(params)
+		if err != nil {
+			return nil, err
+		}
+
+		params = normalized
 
 		oldParams := m.effectiveParams(client.AWGParams)
 
@@ -208,10 +254,8 @@ func (m *Manager) UpdateClient(id string, update ClientUpdate) (*ClientData, err
 			return nil, err
 		}
 
-		needsMigration := oldParams.Key() != newParams.Key() || oldParams.Port != newParams.Port
-
-		if needsMigration {
-			pubKey, err := awg.Base64ToKey(client.PublicKey)
+		if oldParams.Key() != newParams.Key() || oldParams.Port != newParams.Port {
+			publicKey, err := awg.Base64ToKey(client.PublicKey)
 			if err != nil {
 				return nil, fmt.Errorf("decode public key: %w", err)
 			}
@@ -221,7 +265,7 @@ func (m *Manager) UpdateClient(id string, update ClientUpdate) (*ClientData, err
 				return nil, err
 			}
 
-			if err := m.pool.MigratePeer(oldParams, newParams, pubKey, presharedKey, client.Address); err != nil {
+			if err := m.pool.MigratePeer(oldParams, newParams, publicKey, presharedKey, client.Address); err != nil {
 				return nil, fmt.Errorf("migrate peer: %w", err)
 			}
 		}
@@ -230,8 +274,8 @@ func (m *Manager) UpdateClient(id string, update ClientUpdate) (*ClientData, err
 	client.AWGParams = params
 	client.Routing = routing
 
-	for i, c := range m.data.Clients {
-		if c.ID == id {
+	for i, stored := range m.data.Clients {
+		if stored.ID == client.ID {
 			m.data.Clients[i] = *client
 			break
 		}
@@ -241,8 +285,8 @@ func (m *Manager) UpdateClient(id string, update ClientUpdate) (*ClientData, err
 		log.Printf("warning: failed to save storage: %v", err)
 	}
 
-	cp := *client
-	return &cp, nil
+	result := *client
+	return &result, nil
 }
 
 func (m *Manager) ListClients() []ClientData {

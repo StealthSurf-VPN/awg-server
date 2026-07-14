@@ -263,6 +263,22 @@ func GenerateParams() (*GeneratedParams, error) {
 	}, nil
 }
 
+func ApplyGeneratedParams(params *AWGParams, generated GeneratedParams) *AWGParams {
+	result := cloneAWGParams(params)
+	if result == nil {
+		result = &AWGParams{}
+	}
+
+	result.H1 = generated.H1
+	result.H2 = generated.H2
+	result.H3 = generated.H3
+	result.H4 = generated.H4
+	result.S1 = generated.S1
+	result.S2 = generated.S2
+
+	return result
+}
+
 func generateHRange(tierMin, tierMax uint32) (string, error) {
 	mid := tierMin + (tierMax-tierMin)/2
 
