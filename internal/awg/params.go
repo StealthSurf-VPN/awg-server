@@ -3,35 +3,43 @@ package awg
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"net/netip"
 )
 
 const MinPort = 1024
 const MaxPort = 65535
 const MinMTU = 1280
 const MaxMTU = 1420
+const DefaultPersistentKeepalive = 25
+const MaxPersistentKeepalive = 65535
 
 var ErrInvalidPort = fmt.Errorf("port must be 0 or between %d and %d", MinPort, MaxPort)
+var ErrInvalidPersistentKeepalive = fmt.Errorf("persistent_keepalive must be between 0 and %d", MaxPersistentKeepalive)
+var ErrInvalidDNS = errors.New("dns must be empty or a valid IPv4 address")
 
 type AWGParams struct {
-	Port int    `json:"port,omitempty"`
-	MTU  int    `json:"mtu,omitempty"`
-	Jc   int    `json:"jc,omitempty"`
-	Jmin int    `json:"jmin,omitempty"`
-	Jmax int    `json:"jmax,omitempty"`
-	S1   int    `json:"s1,omitempty"`
-	S2   int    `json:"s2,omitempty"`
-	S3   int    `json:"s3,omitempty"`
-	S4   int    `json:"s4,omitempty"`
-	H1   string `json:"h1,omitempty"`
-	H2   string `json:"h2,omitempty"`
-	H3   string `json:"h3,omitempty"`
-	H4   string `json:"h4,omitempty"`
-	I1   string `json:"i1,omitempty"`
-	I2   string `json:"i2,omitempty"`
-	I3   string `json:"i3,omitempty"`
-	I4   string `json:"i4,omitempty"`
-	I5   string `json:"i5,omitempty"`
+	Port                int    `json:"port,omitempty"`
+	MTU                 int    `json:"mtu,omitempty"`
+	DNS                 string `json:"dns,omitempty"`
+	PersistentKeepalive *int   `json:"persistent_keepalive,omitempty"`
+	Jc                  int    `json:"jc,omitempty"`
+	Jmin                int    `json:"jmin,omitempty"`
+	Jmax                int    `json:"jmax,omitempty"`
+	S1                  int    `json:"s1,omitempty"`
+	S2                  int    `json:"s2,omitempty"`
+	S3                  int    `json:"s3,omitempty"`
+	S4                  int    `json:"s4,omitempty"`
+	H1                  string `json:"h1,omitempty"`
+	H2                  string `json:"h2,omitempty"`
+	H3                  string `json:"h3,omitempty"`
+	H4                  string `json:"h4,omitempty"`
+	I1                  string `json:"i1,omitempty"`
+	I2                  string `json:"i2,omitempty"`
+	I3                  string `json:"i3,omitempty"`
+	I4                  string `json:"i4,omitempty"`
+	I5                  string `json:"i5,omitempty"`
 }
 
 func ValidatePort(port int) error {
@@ -56,6 +64,39 @@ func ValidateMTU(mtu int) error {
 	}
 
 	return nil
+}
+
+func ValidateDNS(dns string) error {
+	if dns == "" {
+		return nil
+	}
+
+	ip, err := netip.ParseAddr(dns)
+	if err != nil || !ip.Is4() {
+		return ErrInvalidDNS
+	}
+
+	return nil
+}
+
+func ValidatePersistentKeepalive(value *int) error {
+	if value == nil {
+		return nil
+	}
+
+	if *value < 0 || *value > MaxPersistentKeepalive {
+		return ErrInvalidPersistentKeepalive
+	}
+
+	return nil
+}
+
+func (p AWGParams) PersistentKeepaliveValue() int {
+	if p.PersistentKeepalive == nil {
+		return DefaultPersistentKeepalive
+	}
+
+	return *p.PersistentKeepalive
 }
 
 func (p AWGParams) Key() string {

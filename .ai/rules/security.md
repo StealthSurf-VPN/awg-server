@@ -31,5 +31,7 @@
 - Internal server errors (500) return generic message, details logged server-side only
 - `awg_params` deserialized from JSON with Go's type safety
 - Per-client MTU accepts 0 for inheritance or values in the inclusive range 1280-1420
+- Per-client DNS accepts an empty string for `AWG_DNS` inheritance or one IPv4 address; URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected
+- Per-client persistent keepalive accepts 0 to disable or values through 65535; omission inherits 25
 - Per-client port accepts 0 for automatic assignment or values in the inclusive range 1024-65535; uniqueness is enforced (409 Conflict if in use)
 - Interface limit enforced via `AWG_MAX_INTERFACES` (503 when exceeded)

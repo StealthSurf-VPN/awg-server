@@ -146,17 +146,17 @@ curl -X POST http://localhost:7777/api/clients \
   -H "Content-Type: application/json" \
   -d '{"id":"my-client-uuid"}'
 
-# Create client with custom MTU, obfuscation params, and port
+# Create client with custom MTU, DNS, persistent keepalive, obfuscation params, and port
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"mtu":1280,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":"100000-800000"}}'
+  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":60,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":"100000-800000"}}'
 
-# Update client MTU and obfuscation params
+# Update client MTU, DNS, persistent keepalive, and obfuscation params
 curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"awg_params":{"port":51825,"mtu":1280,"jc":10,"jmin":100,"jmax":2000}}'
+  -d '{"awg_params":{"port":51825,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":0,"jc":10,"jmin":100,"jmax":2000}}'
 
 # Get client config (.conf)
 curl http://localhost:7777/api/clients/my-client-uuid/configuration \
@@ -184,7 +184,7 @@ Environment variables:
 | `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned sequentially; per-client `port` accepts 1024-65535, while omitted or zero uses automatic assignment) |
 | `AWG_HTTP_PORT` | no | `7777` | HTTP API port |
 | `AWG_MTU` | no | `1420` | Default MTU for client configs (per-client override: `mtu` in `awg_params`, range 1280-1420) |
-| `AWG_DNS` | no | `1.1.1.1` | DNS for client configs |
+| `AWG_DNS` | no | `1.1.1.1` | Default DNS for client configs (per-client override: one IPv4 in `awg_params.dns`) |
 | `AWG_DATA_DIR` | no | `/data` | Persistence directory |
 | `AWG_INTERFACE` | no | auto-detect | Override outbound network interface for NAT |
 | `AWG_MAX_INTERFACES` | no | `0` | Max AWG interfaces (0 = unlimited) |
@@ -211,6 +211,10 @@ These are reused across restarts. No env vars needed.
 | `AWG_S3` | `0` | Extra bytes added to cookie reply packets | **0-32** = good. Only under load. |
 | `AWG_S4` | `0` | Extra bytes added to **every** data packet | **0** = recommended. Adds overhead to every packet. |
 | `AWG_I1`-`AWG_I5` | empty | CPS signature packets (client config only) | Decoy UDP packets mimicking another protocol. Uses [CPS tag format](https://github.com/amnezia-vpn/amneziawg-go#i-parameters). |
+
+Advanced clients can override `persistent_keepalive` through `awg_params`. Omit the field to use 25 seconds, set it to 0 to disable keepalive, or provide an interval from 1 through 65535. The new value takes effect after the generated configuration is downloaded and reapplied on the client device.
+
+Clients can override DNS with one IPv4 address in `awg_params.dns`. Omit it or send an empty string to inherit `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected; DoH requires a separate client-side resolver or server-side DNS-to-DoH proxy. The new DNS value takes effect after the generated configuration is downloaded and reapplied on the client device.
 
 ### Obfuscation Profiles
 
@@ -245,7 +249,7 @@ AmneziaWG sets CPS obfuscation parameters at the **interface level**, not per-pe
 
 - Each unique set of CPS parameters gets its own `awgN` interface (awg0, awg1, awg2, ...)
 - Clients with identical CPS parameters share an interface
-- Per-client `mtu` only changes the generated client config and does not create a new interface
+- Per-client `mtu`, `dns`, and `persistent_keepalive` only change the generated client config and do not create a new interface
 - Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from base port)
 - Interfaces are created on demand and destroyed when their last peer is removed
 - All interfaces share the same server private key

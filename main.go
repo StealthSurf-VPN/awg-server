@@ -92,6 +92,7 @@ func main() {
 
 	defaultParams := awg.AWGParams{
 		MTU:  cfg.MTU,
+		DNS:  cfg.DNS,
 		Jc:   cfg.Jc,
 		Jmin: cfg.Jmin,
 		Jmax: cfg.Jmax,
