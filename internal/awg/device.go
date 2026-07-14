@@ -55,14 +55,22 @@ func configureInterfaceNetwork(ifName string, address string) error {
 	return nil
 }
 
-func addPeerToInterface(ifName string, publicKey [32]byte, allowedIP string) error {
-	pubKeyB64 := KeyToBase64(publicKey)
+func addPeerToInterface(ifName string, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
+	args := []string{"set", ifName, "peer", KeyToBase64(publicKey)}
 
-	output, err := exec.Command(
-		"awg", "set", ifName,
-		"peer", pubKeyB64,
-		"allowed-ips", allowedIP+"/32",
-	).CombinedOutput()
+	if presharedKey != nil {
+		args = append(args, "preshared-key", "/dev/stdin")
+	}
+
+	args = append(args, "allowed-ips", allowedIP+"/32")
+
+	cmd := exec.Command("awg", args...)
+
+	if presharedKey != nil {
+		cmd.Stdin = strings.NewReader(KeyToBase64(*presharedKey))
+	}
+
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("awg set peer: %s: %w", string(output), err)
 	}
@@ -95,8 +103,8 @@ func removePeerFromInterface(ifName string, publicKey [32]byte, allowedIP string
 
 type PeerDump struct {
 	PublicKey     string
-	TransferRx   int64
-	TransferTx   int64
+	TransferRx    int64
+	TransferTx    int64
 	LastHandshake time.Time
 }
 
@@ -138,8 +146,8 @@ func ShowDump(ifName string) ([]PeerDump, error) {
 
 		peers = append(peers, PeerDump{
 			PublicKey:     fields[0],
-			TransferRx:   rx,
-			TransferTx:   tx,
+			TransferRx:    rx,
+			TransferTx:    tx,
 			LastHandshake: handshake,
 		})
 	}
@@ -163,4 +171,3 @@ func detectDefaultInterface() (string, error) {
 
 	return "", fmt.Errorf("no default route found")
 }
-

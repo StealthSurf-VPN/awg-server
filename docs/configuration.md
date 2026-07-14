@@ -31,6 +31,12 @@ On first start, the server generates and persists unique obfuscation values in `
 
 These are reused across restarts. No env vars needed.
 
+## Per-Client Preshared Keys
+
+Every newly created client receives an independent 32-byte WireGuard preshared key generated with `crypto/rand`. The key is stored as `preshared_key` in `{AWG_DATA_DIR}/clients.json`, installed on the corresponding AWG peer, and included in the generated client configuration. It is not configurable through an environment variable or accepted from the API.
+
+Existing client records without `preshared_key` remain valid and continue without PSK. The server does not generate keys for them automatically because their already-issued configurations would no longer connect.
+
 ## Default AmneziaWG Obfuscation Parameters
 
 These env vars set **default** CPS parameters for clients that don't specify custom `awg_params` via the API.
@@ -80,6 +86,7 @@ Client data is stored in `{AWG_DATA_DIR}/clients.json`:
       "id": "uuid",
       "private_key": "<base64>",
       "public_key": "<base64>",
+      "preshared_key": "<base64>",
       "address": "10.0.0.2",
       "created_at": "2026-01-01T00:00:00Z",
       "awg_params": {
@@ -96,4 +103,4 @@ Client data is stored in `{AWG_DATA_DIR}/clients.json`:
 }
 ```
 
-Clients without custom parameters have `awg_params` omitted (uses server defaults, including `AWG_DNS` and `PersistentKeepalive = 25`). On startup, all clients are restored and interfaces are recreated as needed.
+Clients without custom parameters have `awg_params` omitted (uses server defaults, including `AWG_DNS` and `PersistentKeepalive = 25`). Clients created before PSK support can also omit `preshared_key`. On startup, all clients are restored and interfaces are recreated as needed, using the persisted PSK when present.
