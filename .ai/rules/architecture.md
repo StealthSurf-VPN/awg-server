@@ -77,7 +77,7 @@ Create and update operations validate raw overrides and the effective profile be
 - Server private key generated once and persisted
 - Generated AWG params (H1-H4, S1, S2) generated once at first start and persisted as `generated_params` in clients.json
 - Per-client `awg_params` persisted (omitted if nil/default)
-- Per-client `routing` persisted for split policies; nil/full is omitted for backward compatibility
+- Per-client `routing` persisted for bypass and split policies; nil/full is omitted for backward compatibility
 - New clients receive a unique 32-byte PSK persisted as `preshared_key`; legacy records may omit it
 - On startup: load JSON → load/generate params → group by effective params → recreate interfaces → re-add peers with their persisted PSKs when present
 

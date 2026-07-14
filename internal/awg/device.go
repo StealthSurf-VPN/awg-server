@@ -17,8 +17,13 @@ func createInterface(ifName string) error {
 	return nil
 }
 
-func destroyInterface(ifName string) {
-	exec.Command("ip", "link", "del", ifName).Run()
+func destroyInterface(ifName string) error {
+	output, err := exec.Command("ip", "link", "del", ifName).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ip link del: %s: %w", string(output), err)
+	}
+
+	return nil
 }
 
 func configureDevice(ifName string, port int, params AWGParams, privateKey [32]byte) error {

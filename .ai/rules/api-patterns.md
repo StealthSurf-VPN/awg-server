@@ -42,6 +42,7 @@
 - `POST /api/clients` accepts optional top-level `awg_params` and `routing` objects. Omitted or null routing creates the backward-compatible full-tunnel policy.
 - `PATCH /api/clients/{id}` treats `awg_params` and `routing` independently: omission preserves a field, JSON null resets it, and an object replaces its complete stored value.
 - `POST /api/clients` and `PATCH /api/clients/{id}` limit request bodies to 1 MiB; oversized bodies return `400 Bad Request` before mutation.
+- Create and update bodies must contain exactly one JSON document; a second value, trailing garbage, or over-limit trailing data returns the same generic `400 Bad Request` before mutation.
 - A PATCH body containing neither `awg_params` nor `routing` returns `400 Bad Request`; null counts as an explicitly supplied reset.
 - List, create, and update responses return effective routing as `{"mode":"full"}`, normalized bypass intent, or normalized split intent, even when full routing is omitted from persistence.
 - Routing-only updates do not migrate peers because routing is not part of `AWGParams` or interface grouping.

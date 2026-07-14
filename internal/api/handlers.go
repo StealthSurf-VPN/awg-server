@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -93,7 +94,12 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 
 	var req createClientRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -161,7 +167,12 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 
 	var req updateClientRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
