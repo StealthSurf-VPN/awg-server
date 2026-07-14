@@ -1,17 +1,16 @@
 # Architecture Rules
 
-## Module Boundaries
+## Package Responsibilities
 
-```text
-main.go
-  → internal/config    (no dependencies on other internal packages)
-  → internal/awg       (depends on config)
-  → internal/clients   (depends on awg, config)
-  → internal/usage     (depends on awg)
-  → internal/api       (depends on clients, usage, awg, config)
-```
+- `internal/config` parses and validates configuration without depending on other internal packages.
+- `internal/awg` owns keys, CPS parameters, device commands, interface lifecycle, and pool state.
+- `internal/clients` owns persisted client records, IP allocation, and configuration generation.
+- `internal/usage` polls peer counters and persists accumulated usage.
+- `internal/api` translates HTTP requests into manager, pool, and usage operations.
+- `internal/update` implements the standalone self-update path.
+- `main.go` is the composition root; keep dependency wiring and process lifecycle there.
 
-Dependency flow is one-directional. Never import `api` from `clients` or `awg`.
+The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level packages unaware of HTTP concerns.
 
 ## Multi-Interface Pool
 
@@ -59,15 +58,6 @@ Dependency flow is one-directional. Never import `api` from `clients` or `awg`.
 - Generated AWG params (H1-H4, S1, S2) generated once at first start and persisted as `generated_params` in clients.json
 - Per-client `awg_params` persisted (omitted if nil/default)
 - On startup: load JSON → load/generate params → group by effective params → recreate interfaces → re-add peers
-
-## HTTP API
-
-- Standard `net/http` ServeMux (Go 1.22+ method routing)
-- Bearer token middleware on all routes (except `/health`)
-- `GET /health` — unauthenticated health check for monitoring
-- JSON responses for structured data, plain text for .conf files
-- `GET /api/clients/{id}/stats` — per-client usage stats (rx_bytes, tx_bytes, last_handshake)
-- Status codes: 200 (list/get/update/stats), 201 (create), 204 (delete), 400 (bad request), 401 (auth), 404 (not found), 409 (conflict/port in use/port shared), 503 (max interfaces)
 
 ## Deployment
 

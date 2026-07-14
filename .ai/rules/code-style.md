@@ -2,7 +2,7 @@
 
 ## Go Conventions
 
-- Use standard library where possible, minimize dependencies
+- Minimize dependencies and prefer established project patterns
 - Early returns over deep nesting
 - Vertical spacing between variable declarations
 - Error wrapping with `fmt.Errorf("context: %w", err)`
@@ -20,14 +20,3 @@
 - Always wrap errors with context
 - Return errors up, log at boundary (main, HTTP handlers)
 - Use `log.Printf` for warnings, `log.Fatalf` for fatal startup errors
-
-## Testing
-
-- Table-driven tests preferred
-- Test file next to source: `keygen_test.go`
-- Use `testing.T` and subtests
-
-## Communication
-
-- Code, comments, docs: English
-- User communication: Russian
