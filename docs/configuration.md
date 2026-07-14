@@ -16,7 +16,7 @@ All configuration is done via environment variables.
 | -------- | ------- | ----------- |
 | `AWG_LISTEN_PORT` | `51820` | Base WireGuard UDP listen port. Auto-assigned interfaces use port+1, port+2, etc. Can be overridden per-client via `port` in `awg_params`. |
 | `AWG_HTTP_PORT` | `7777` | HTTP API listen port |
-| `AWG_MTU` | `1420` | MTU for client configs |
+| `AWG_MTU` | `1420` | Default MTU for client configs. Can be overridden per-client with `mtu` in `awg_params`. |
 | `AWG_DNS` | `1.1.1.1` | DNS server for client configs |
 | `AWG_DATA_DIR` | `/data` | Directory for clients.json persistence |
 | `AWG_INTERFACE` | auto-detect | Override outbound network interface for MASQUERADE (default: auto-detected from default route) |
@@ -46,13 +46,13 @@ These env vars set **default** CPS parameters for clients that don't specify cus
 
 Parameters with value `0` are omitted from client configs and `awg set` commands. **Exception:** `S3`/`S4` are always emitted (even when 0).
 
-Clients can override defaults by providing `awg_params` in the create/update API request. Per-client params are merged over defaults (non-zero values override).
+Clients can override defaults by providing `awg_params` in the create/update API request. Per-client params are merged over defaults (non-zero values override). The optional `port` field accepts 1024-65535 and uses automatic assignment when omitted or zero. The optional `mtu` field accepts 1280-1420 and inherits `AWG_MTU` when omitted or zero.
 
 ## Multi-Interface Behavior
 
 When clients have different CPS parameters, the server creates separate AWG interfaces:
 
-- Interface grouping key: H1-H4, S1-S4 only (Jc/Jmin/Jmax and I1-I5 do NOT create new interfaces)
+- Interface grouping key: H1-H4, S1-S4 only (MTU, Jc/Jmin/Jmax, and I1-I5 do NOT create new interfaces)
 - Each unique parameter set gets its own `awgN` interface (awg0, awg1, ...)
 - Each interface listens on the explicit `port` from `awg_params`, or auto-assigned sequentially from `AWG_LISTEN_PORT`
 - Interfaces are created on demand and destroyed when empty
@@ -84,6 +84,7 @@ Client data is stored in `{AWG_DATA_DIR}/clients.json`:
       "created_at": "2026-01-01T00:00:00Z",
       "awg_params": {
         "port": 51825,
+        "mtu": 1280,
         "jc": 5,
         "jmin": 50,
         "jmax": 1000

@@ -146,17 +146,17 @@ curl -X POST http://localhost:7777/api/clients \
   -H "Content-Type: application/json" \
   -d '{"id":"my-client-uuid"}'
 
-# Create client with custom obfuscation params and port
+# Create client with custom MTU, obfuscation params, and port
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":"100000-800000"}}'
+  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"mtu":1280,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":"100000-800000"}}'
 
-# Update client obfuscation params
+# Update client MTU and obfuscation params
 curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"awg_params":{"port":51825,"jc":10,"jmin":100,"jmax":2000}}'
+  -d '{"awg_params":{"port":51825,"mtu":1280,"jc":10,"jmin":100,"jmax":2000}}'
 
 # Get client config (.conf)
 curl http://localhost:7777/api/clients/my-client-uuid/configuration \
@@ -181,9 +181,9 @@ Environment variables:
 | `AWG_API_TOKEN` | yes | — | Bearer token for API auth |
 | `AWG_ADDRESS` | yes | — | Server VPN address (CIDR), e.g. `10.0.0.1/24` |
 | `AWG_ENDPOINT` | yes | — | Public IP/hostname for client configs |
-| `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned sequentially; can be overridden per-client via `port` in `awg_params`) |
+| `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned sequentially; per-client `port` accepts 1024-65535, while omitted or zero uses automatic assignment) |
 | `AWG_HTTP_PORT` | no | `7777` | HTTP API port |
-| `AWG_MTU` | no | `1420` | MTU value |
+| `AWG_MTU` | no | `1420` | Default MTU for client configs (per-client override: `mtu` in `awg_params`, range 1280-1420) |
 | `AWG_DNS` | no | `1.1.1.1` | DNS for client configs |
 | `AWG_DATA_DIR` | no | `/data` | Persistence directory |
 | `AWG_INTERFACE` | no | auto-detect | Override outbound network interface for NAT |
@@ -245,6 +245,7 @@ AmneziaWG sets CPS obfuscation parameters at the **interface level**, not per-pe
 
 - Each unique set of CPS parameters gets its own `awgN` interface (awg0, awg1, awg2, ...)
 - Clients with identical CPS parameters share an interface
+- Per-client `mtu` only changes the generated client config and does not create a new interface
 - Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from base port)
 - Interfaces are created on demand and destroyed when their last peer is removed
 - All interfaces share the same server private key

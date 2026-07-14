@@ -28,7 +28,7 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 
 - Each interface configured via `awg set` with private key through stdin
 - Server-side obfuscation params via `awg set`: Jc/Jmin/Jmax, S1-S4, H1-H4 — encapsulated in `AWGParams`
-- Client-side only: I1-I5 (CPS signature packets, included in `.conf` but not in `awg set`)
+- Client-side only: MTU and I1-I5 (`MTU` is rendered by the client manager; I1-I5 are included in `.conf` but not in `awg set`)
 - Peer operations via `awg set ... peer`; stats via `awg show ... dump` (used by usage collector)
 - Network configuration (IP, routing, NAT) via `exec.Command`
 - MASQUERADE rule added once for the subnet, removed on pool close
@@ -36,10 +36,11 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 ## AWGParams
 
 - Defined in `internal/awg/params.go`
-- `Port` — optional UDP listen port for the interface (not part of CPS, not in Key/CLIArgs/ConfigLines); validated range 1024-65535
-- `Key()` — deterministic string for interface grouping: **only H1-H4, S1-S4** (excludes Port, Jc/Jmin/Jmax, I1-I5)
+- `Port` — optional UDP listen port for the interface (not part of CPS, not in Key/CLIArgs/ConfigLines); zero selects automatic assignment, explicit values are validated in the range 1024-65535
+- `MTU` — optional client config override, range 1280-1420 (not part of CPS, not in Key/CLIArgs/ConfigLines); zero inherits `AWG_MTU`
+- `Key()` — deterministic string for interface grouping: **only H1-H4, S1-S4** (excludes Port, MTU, Jc/Jmin/Jmax, I1-I5)
 - `CLIArgs()` — args for `awg set`: H1-H4, S1-S4, Jc/Jmin/Jmax (excludes I1-I5 — client-only)
-- `ConfigLines()` — lines for client `.conf` `[Interface]` section: all params including I1-I5
+- `ConfigLines()` — CPS lines for the client `.conf` `[Interface]` section, including I1-I5; MTU is rendered separately by the client manager
 - `GenerateParams()` — generates H1-H4 (random non-overlapping ranges, format `min-max`) and S1, S2 (random 15-150, `S1+56 ≠ S2`)
 - Per-client: stored as `*AWGParams` in `ClientData` (nil = use server defaults)
 - `ClientData` has `ID` (no separate `Name` field; POST body uses `id` directly)
