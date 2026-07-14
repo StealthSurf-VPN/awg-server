@@ -52,7 +52,7 @@ These env vars set **default** CPS parameters for clients that don't specify cus
 
 Parameters with value `0` are omitted from client configs and `awg set` commands. **Exception:** `S3`/`S4` are always emitted (even when 0).
 
-Clients can override defaults by providing `awg_params` in the create/update API request. Per-client params are merged over defaults (non-zero values override unless documented otherwise). The optional `port` field accepts 1024-65535 and uses automatic assignment when omitted or zero. The optional `mtu` field accepts 1280-1420 and inherits `AWG_MTU` when omitted or zero. The optional `dns` field accepts one IPv4 address and inherits `AWG_DNS` when omitted or empty; DoH URLs and other formats are rejected. The optional `persistent_keepalive` field accepts 0-65535, inherits 25 when omitted, and is disabled by an explicit zero.
+Clients can override defaults by providing `awg_params` in the create/update API request. Per-client params are merged over defaults (non-zero values override unless documented otherwise). The optional `port` field accepts 1024-65535 and uses automatic server interface assignment when omitted or zero. The optional `client_listen_port` field accepts 1024-65535 and adds `ListenPort` to the generated client `[Interface]`; omission or zero leaves port selection automatic. It has no global environment default and does not affect the server-side interface port. The optional `mtu` field accepts 1280-1420 and inherits `AWG_MTU` when omitted or zero. The optional `dns` field accepts one IPv4 address and inherits `AWG_DNS` when omitted or empty; DoH URLs and other formats are rejected. The optional `persistent_keepalive` field accepts 0-65535, inherits 25 when omitted, and is disabled by an explicit zero.
 
 The complete default profile, including persisted generated H/S values and CPS environment values, is validated before the interface pool starts. Invalid defaults prevent startup and produce a field-specific log error. The accepted J/S/H/I constraints are the same as the [`awg_params` API contract](api.md#awg-params-object).
 
@@ -60,7 +60,7 @@ The complete default profile, including persisted generated H/S values and CPS e
 
 When clients have different CPS parameters, the server creates separate AWG interfaces:
 
-- Interface grouping key: H1-H4, S1-S4 only (MTU, DNS, PersistentKeepalive, Jc/Jmin/Jmax, and I1-I5 do NOT create new interfaces)
+- Interface grouping key: H1-H4, S1-S4 only (client listen port, MTU, DNS, PersistentKeepalive, Jc/Jmin/Jmax, and I1-I5 do NOT create new interfaces)
 - Each unique parameter set gets its own `awgN` interface (awg0, awg1, ...)
 - Each interface listens on the explicit `port` from `awg_params`, or auto-assigned sequentially from `AWG_LISTEN_PORT`
 - Interfaces are created on demand and destroyed when empty
@@ -93,6 +93,7 @@ Client data is stored in `{AWG_DATA_DIR}/clients.json`:
       "created_at": "2026-01-01T00:00:00Z",
       "awg_params": {
         "port": 51825,
+        "client_listen_port": 54321,
         "mtu": 1280,
         "dns": "9.9.9.9",
         "persistent_keepalive": 60,
@@ -105,4 +106,4 @@ Client data is stored in `{AWG_DATA_DIR}/clients.json`:
 }
 ```
 
-Clients without custom parameters have `awg_params` omitted (uses server defaults, including `AWG_DNS` and `PersistentKeepalive = 25`). Clients created before PSK support can also omit `preshared_key`. On startup, all clients are restored and interfaces are recreated as needed, using the persisted PSK when present.
+Clients without custom parameters have `awg_params` omitted (uses automatic client listen-port selection and server defaults, including `AWG_DNS` and `PersistentKeepalive = 25`). Clients created before PSK support can also omit `preshared_key`. On startup, all clients are restored and interfaces are recreated as needed, using the persisted PSK when present.

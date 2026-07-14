@@ -33,6 +33,7 @@ GET /api/clients
     "address": "10.0.0.2",
     "created_at": "2026-01-01T00:00:00Z",
     "awg_params": {
+      "client_listen_port": 54321,
       "mtu": 1280,
       "dns": "9.9.9.9",
       "persistent_keepalive": 60,
@@ -55,7 +56,7 @@ Content-Type: application/json
 {"id": "550e8400-e29b-41d4-a716-446655440000"}
 ```
 
-With custom MTU, DNS, persistent keepalive, obfuscation parameters, and port:
+With custom server port, client listen port, MTU, DNS, persistent keepalive, and obfuscation parameters:
 
 ```http
 POST /api/clients
@@ -65,6 +66,7 @@ Content-Type: application/json
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "awg_params": {
     "port": 51825,
+    "client_listen_port": 54321,
     "mtu": 1280,
     "dns": "9.9.9.9",
     "persistent_keepalive": 60,
@@ -75,7 +77,7 @@ Content-Type: application/json
 }
 ```
 
-If `awg_params` is omitted, the client uses server defaults (global `AWG_MTU`, global `AWG_DNS`, `PersistentKeepalive = 25`, auto-generated H/S, and env Jc/Jmin/Jmax). Per-client params are merged over defaults. A custom `port` must be in the inclusive range 1024-65535; omitted or zero inherits automatic assignment. `dns` accepts one IPv4 address; omission or an empty string inherits `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected. `persistent_keepalive` accepts 0-65535: omission inherits 25, while an explicit zero disables keepalive.
+If `awg_params` is omitted, the client uses server defaults (global `AWG_MTU`, global `AWG_DNS`, `PersistentKeepalive = 25`, auto-generated H/S, and env Jc/Jmin/Jmax). Per-client params are merged over defaults. A custom server-side `port` must be in the inclusive range 1024-65535; omitted or zero uses automatic server interface assignment. `client_listen_port` accepts the same range and adds `ListenPort` to the generated client `[Interface]`; omitted or zero leaves client-side port selection automatic. `dns` accepts one IPv4 address; omission or an empty string inherits `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected. `persistent_keepalive` accepts 0-65535: omission inherits 25, while an explicit zero disables keepalive.
 
 Every new client automatically receives a unique server-generated 32-byte preshared key. The API does not accept a PSK in the request and does not expose it in list, create, or update JSON responses. It is returned only as part of the authenticated client configuration.
 
@@ -87,6 +89,7 @@ Every new client automatically receives a unique server-generated 32-byte presha
   "address": "10.0.0.2",
   "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
+    "client_listen_port": 54321,
     "mtu": 1280,
     "dns": "9.9.9.9",
     "persistent_keepalive": 60,
@@ -111,6 +114,7 @@ Content-Type: application/json
 
 {
   "awg_params": {
+    "client_listen_port": 54321,
     "mtu": 1280,
     "dns": "9.9.9.9",
     "persistent_keepalive": 0,
@@ -121,9 +125,9 @@ Content-Type: application/json
 }
 ```
 
-Updates the client's MTU, DNS, persistent keepalive, and obfuscation parameters. When all other fields remain unchanged, changing only `mtu`, `dns`, or `persistent_keepalive` updates the generated client config without moving the peer to another interface. If interface-level parameters differ, the peer is moved to the appropriate interface (created on demand if needed).
+Updates the client's local listen port, MTU, DNS, persistent keepalive, and obfuscation parameters. When all other fields remain unchanged, changing only `client_listen_port`, `mtu`, `dns`, or `persistent_keepalive` updates the generated client config without moving the peer to another interface. If interface-level parameters differ, the peer is moved to the appropriate interface (created on demand if needed).
 
-`PATCH` replaces the complete `awg_params` override object rather than merging with the client's previous object. Include every custom field that must be retained. Set `awg_params` to `null` to revert all fields to server defaults. Changes to client-only values such as `mtu`, `dns`, and `persistent_keepalive` apply after the regenerated configuration is downloaded and reapplied on the client device.
+`PATCH` replaces the complete `awg_params` override object rather than merging with the client's previous object. Include every custom field that must be retained. Set `awg_params` to `null` to revert all fields to their automatic or server-default behavior. Changes to client-only values such as `client_listen_port`, `mtu`, `dns`, and `persistent_keepalive` apply after the regenerated configuration is downloaded and reapplied on the client device.
 
 **Response** `200 OK`:
 
@@ -133,6 +137,7 @@ Updates the client's MTU, DNS, persistent keepalive, and obfuscation parameters.
   "address": "10.0.0.2",
   "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
+    "client_listen_port": 54321,
     "mtu": 1280,
     "dns": "9.9.9.9",
     "persistent_keepalive": 0,
@@ -161,6 +166,7 @@ GET /api/clients/{id}/configuration
 ```ini
 [Interface]
 PrivateKey = <base64>
+ListenPort = 54321
 Address = 10.0.0.2/32
 DNS = 9.9.9.9
 MTU = 1280
@@ -182,7 +188,7 @@ AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 60
 ```
 
-The MTU is the client's `awg_params.mtu` override, or the global `AWG_MTU` value when the override is omitted or zero. DNS is the client's validated IPv4 `awg_params.dns` override, or global `AWG_DNS` when omitted or empty. Persistent keepalive is the client's `awg_params.persistent_keepalive` override; omission uses 25 and zero disables it. `PresharedKey` is generated and stored by the server for new clients and must match the key installed on the server peer. Legacy clients created before PSK support omit this line and continue to work without a PSK. The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
+`ListenPort` is included only when `awg_params.client_listen_port` is between 1024 and 65535; omission or zero lets the client choose automatically. It is local to the client and does not change the server `Endpoint` port. The MTU is the client's `awg_params.mtu` override, or the global `AWG_MTU` value when the override is omitted or zero. DNS is the client's validated IPv4 `awg_params.dns` override, or global `AWG_DNS` when omitted or empty. Persistent keepalive is the client's `awg_params.persistent_keepalive` override; omission uses 25 and zero disables it. `PresharedKey` is generated and stored by the server for new clients and must match the key installed on the server peer. Legacy clients created before PSK support omit this line and continue to work without a PSK. The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
 
 **Errors:**
 
@@ -226,11 +232,12 @@ If this was the last client on an interface, the interface is automatically dest
 
 ## AWG Params Object
 
-All fields are optional. Except for the pointer-valued `persistent_keepalive`, zero integer values and empty strings inherit the corresponding server default. Validation is performed both on the supplied override and on the effective profile after inheritance.
+All fields are optional. Unless documented otherwise below, zero integer values and empty strings inherit the corresponding server default. Validation is performed both on the supplied override and on the effective profile after inheritance.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `port` | int | UDP listen port for the interface, inclusive range 1024-65535. If omitted or zero, auto-assigned from the base port. Used in client config `Endpoint`. |
+| `client_listen_port` | int | Local UDP listen port for the generated client `[Interface]`, inclusive range 1024-65535. If omitted or zero, `ListenPort` is omitted and the client selects a port automatically. Does not affect server interface grouping or `Endpoint`. |
 | `mtu` | int | MTU for this client's generated config, range 1280-1420. Omit or set to 0 to inherit `AWG_MTU`. Does not affect interface grouping. |
 | `dns` | string | One IPv4 DNS server for the generated client `[Interface]`. Omit or set to an empty string to inherit `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected. Does not affect interface grouping. |
 | `persistent_keepalive` | int | Keepalive interval in seconds for the generated client `[Peer]`, range 0-65535. Omit to inherit 25; set to 0 to disable. Does not affect interface grouping. |

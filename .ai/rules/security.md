@@ -37,6 +37,7 @@
 - Per-client DNS accepts an empty string for `AWG_DNS` inheritance or one IPv4 address; URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected
 - Per-client persistent keepalive accepts 0 to disable or values through 65535; omission inherits 25
 - Per-client port accepts 0 for automatic assignment or values in the inclusive range 1024-65535; uniqueness is enforced (409 Conflict if in use)
+- Per-client listen port accepts 0 for automatic client-side selection or values in the inclusive range 1024-65535; it does not reserve or expose a server-side port
 - CPS integers are bounded before merge: Jc 0-128, Jmin/Jmax 0-1280, S1 0-1132, S2 0-1188, S3 0-64, and S4 0-32
 - When effective Jc is positive, Jmin and Jmax must both be positive and Jmin must be less than Jmax; effective S2 must not equal S1 + 56
 - H1-H4 accept only unsigned decimal `uint32` values or inclusive `start-end` ranges; all effective ranges must be present and non-overlapping

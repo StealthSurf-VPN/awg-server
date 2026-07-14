@@ -28,7 +28,7 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 
 - Each interface configured via `awg set` with private key through stdin
 - Server-side obfuscation params via `awg set`: Jc/Jmin/Jmax, S1-S4, H1-H4 — encapsulated in `AWGParams`
-- Client-side only: MTU, DNS, PersistentKeepalive, and I1-I5 (`MTU`, DNS, and PersistentKeepalive are rendered by the client manager; I1-I5 are included in `.conf` but not in `awg set`)
+- Client-side only: ClientListenPort, MTU, DNS, PersistentKeepalive, and I1-I5 (`ClientListenPort`, MTU, DNS, and PersistentKeepalive are rendered by the client manager; I1-I5 are included in `.conf` but not in `awg set`)
 - Peer operations via `awg set ... peer`; optional per-peer PSKs are passed through stdin using `preshared-key /dev/stdin`; stats via `awg show ... dump` (used by usage collector)
 - Network configuration (IP, routing, NAT) via `exec.Command`
 - MASQUERADE rule added once for the subnet, removed on pool close
@@ -37,12 +37,13 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 
 - Defined in `internal/awg/params.go`
 - `Port` — optional UDP listen port for the interface (not part of CPS, not in Key/CLIArgs/ConfigLines); zero selects automatic assignment, explicit values are validated in the range 1024-65535
+- `ClientListenPort` — optional local UDP listen port for the generated client `[Interface]`, range 1024-65535 (zero omits `ListenPort` for automatic client-side selection; not part of CPS, Key, CLIArgs, ConfigLines, server interface allocation, or peer migration)
 - `MTU` — optional client config override, range 1280-1420 (not part of CPS, not in Key/CLIArgs/ConfigLines); zero inherits `AWG_MTU`
 - `DNS` — optional client config override containing one IPv4 address (empty inherits `AWG_DNS`; DoH URLs and other formats are rejected; not part of CPS, not in Key/CLIArgs/ConfigLines)
 - `PersistentKeepalive` — optional pointer-valued client `[Peer]` override, range 0-65535 (nil inherits 25, explicit zero disables; not part of CPS, not in Key/CLIArgs/ConfigLines)
-- `Key()` — deterministic string for interface grouping: **only H1-H4, S1-S4** (excludes Port, MTU, DNS, PersistentKeepalive, Jc/Jmin/Jmax, I1-I5)
+- `Key()` — deterministic string for interface grouping: **only H1-H4, S1-S4** (excludes Port, ClientListenPort, MTU, DNS, PersistentKeepalive, Jc/Jmin/Jmax, I1-I5)
 - `CLIArgs()` — args for `awg set`: H1-H4, S1-S4, Jc/Jmin/Jmax (excludes I1-I5 — client-only)
-- `ConfigLines()` — CPS lines for the client `.conf` `[Interface]` section, including I1-I5; MTU, DNS, and PersistentKeepalive are rendered separately by the client manager
+- `ConfigLines()` — CPS lines for the client `.conf` `[Interface]` section, including I1-I5; ClientListenPort, MTU, DNS, and PersistentKeepalive are rendered separately by the client manager
 - `GenerateParams()` — generates H1-H4 (random non-overlapping ranges, format `min-max`) and S1, S2 (random 15-150, `S1+56 ≠ S2`)
 - `ValidateOverrides()` validates raw API values before inheritance so invalid negative or malformed values cannot disappear during the merge
 - `ValidateProfile()` validates the complete effective profile, including cross-field J/S relationships and H-range overlap
@@ -54,6 +55,7 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - **Must match** server↔client: H1-H4, S1-S4
 - **Can differ** server↔client: Jc, Jmin, Jmax, I1-I5
 - **I1-I5**: client-side CPS packets, server does not use them in `awg set`
+- **ClientListenPort**: client-side `[Interface]` behavior; server does not reserve the port, pass it to `awg set`, or use it in `Endpoint`
 - **DNS**: client-side `[Interface]` behavior; server does not configure it on AWG interfaces
 - **PersistentKeepalive**: client-side `[Peer]` behavior; server does not set it on the peer
 
