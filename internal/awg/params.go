@@ -239,7 +239,7 @@ func GenerateParams() (*GeneratedParams, error) {
 		return nil, fmt.Errorf("generate h4: %w", err)
 	}
 
-	s1, err := randIntRange(15, 150)
+	s1, err := randIntRange(15, 151)
 	if err != nil {
 		return nil, fmt.Errorf("generate s1: %w", err)
 	}
@@ -247,7 +247,7 @@ func GenerateParams() (*GeneratedParams, error) {
 	var s2 int
 
 	for {
-		s2, err = randIntRange(15, 150)
+		s2, err = randIntRange(15, 151)
 		if err != nil {
 			return nil, fmt.Errorf("generate s2: %w", err)
 		}

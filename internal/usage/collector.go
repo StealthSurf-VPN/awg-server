@@ -106,6 +106,14 @@ func (c *Collector) collect(requireComplete bool) error {
 			log.Printf("warning: failed to dump interface %s: %v", ifName, err)
 			continue
 		}
+		if len(peers) == 0 {
+			if requireComplete {
+				return fmt.Errorf("dump interface %s: no peers returned", ifName)
+			}
+
+			log.Printf("warning: interface %s returned no peers", ifName)
+			continue
+		}
 
 		allPeers = append(allPeers, peers...)
 	}
@@ -204,9 +212,25 @@ func (c *Collector) load() error {
 		return fmt.Errorf("read usage file: %w", err)
 	}
 
-	if err := json.Unmarshal(data, &c.stats); err != nil {
+	var loaded map[string]*PeerStats
+
+	if err := json.Unmarshal(data, &loaded); err != nil {
 		return fmt.Errorf("parse usage file: %w", err)
 	}
+	if loaded == nil {
+		return errors.New("parse usage file: expected a JSON object")
+	}
+
+	for _, stats := range loaded {
+		if stats == nil {
+			return errors.New("parse usage file: null peer stats entry")
+		}
+		if stats.TotalRx < 0 || stats.TotalTx < 0 || stats.LastRawRx < 0 || stats.LastRawTx < 0 {
+			return errors.New("parse usage file: negative traffic counter")
+		}
+	}
+
+	c.stats = loaded
 
 	return nil
 }

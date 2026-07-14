@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"strings"
 )
 
@@ -150,6 +151,14 @@ func NormalizeOverrides(params *AWGParams) (*AWGParams, error) {
 
 	if err := ValidateOverrides(normalized); err != nil {
 		return nil, err
+	}
+
+	normalized.dnsSet = false
+	normalized.dnsModeSet = false
+	normalized.dnsServersSet = false
+
+	if reflect.DeepEqual(*normalized, AWGParams{}) {
+		return nil, nil
 	}
 
 	return normalized, nil

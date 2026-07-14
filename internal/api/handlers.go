@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stealthsurf-vpn/awg-server/internal/awg"
 	"github.com/stealthsurf-vpn/awg-server/internal/clients"
@@ -109,7 +110,7 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.ID) > 256 {
+	if utf8.RuneCountInString(req.ID) > 256 {
 		jsonError(w, "id is too long (max 256 chars)", http.StatusBadRequest)
 		return
 	}
@@ -135,6 +136,8 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		var status int
 
 		switch {
+		case errors.Is(err, awg.ErrRollbackFailed):
+			status = http.StatusInternalServerError
 		case errors.Is(err, clients.ErrClientExists):
 			status = http.StatusConflict
 		case errors.Is(err, awg.ErrInvalidParams):
@@ -144,6 +147,8 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, clients.ErrInvalidRouting):
 			status = http.StatusBadRequest
 		case errors.Is(err, awg.ErrPortInUse):
+			status = http.StatusConflict
+		case errors.Is(err, awg.ErrProfilePortConflict):
 			status = http.StatusConflict
 		case errors.Is(err, awg.ErrMaxInterfacesReached):
 			status = http.StatusServiceUnavailable
@@ -207,7 +212,7 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		AWGParamsSet: req.AWGParams.Set,
 		Routing:      req.Routing.Value,
 		RoutingSet:   req.Routing.Set,
-	})
+	}, s.collector.WithRequiredSnapshot)
 	if err != nil {
 		log.Printf("update client error: %v", err)
 		writeError(w, err, clientUpdateErrorStatus(err))
@@ -241,6 +246,8 @@ func (s *Server) handleRegenerateClientAWGParams(w http.ResponseWriter, r *http.
 
 func clientUpdateErrorStatus(err error) int {
 	switch {
+	case errors.Is(err, awg.ErrRollbackFailed):
+		return http.StatusInternalServerError
 	case errors.Is(err, clients.ErrClientNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, awg.ErrInvalidParams):
@@ -254,6 +261,8 @@ func clientUpdateErrorStatus(err error) int {
 	case errors.Is(err, awg.ErrPortInUse):
 		return http.StatusConflict
 	case errors.Is(err, awg.ErrPortShared):
+		return http.StatusConflict
+	case errors.Is(err, awg.ErrProfilePortConflict):
 		return http.StatusConflict
 	case errors.Is(err, awg.ErrMaxInterfacesReached):
 		return http.StatusServiceUnavailable

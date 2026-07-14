@@ -47,6 +47,6 @@
 - List, create, and update responses return effective routing as `{"mode":"full"}`, normalized bypass intent, or normalized split intent, even when full routing is omitted from persistence.
 - Routing-only updates do not migrate peers because routing is not part of `AWGParams` or interface grouping.
 - Legacy `dns` and mode-based `dns_mode`/`dns_servers` are mutually exclusive under case-insensitive JSON field matching. DNS is client-only and never changes interface grouping.
-- Client H/S regeneration takes a required serialized usage snapshot while the manager write lock is held and keeps collection blocked through migration. Snapshot failure returns generic `500` before pool mutation; any migration failure leaves the stored override unchanged and never returns success.
+- Every interface-level PATCH and client H/S regeneration takes a required serialized usage snapshot while the manager write lock is held and keeps collection blocked through migration. Snapshot failure returns generic `500` before pool mutation; any migration failure leaves the stored override unchanged and never returns success.
 
 When the contract changes, update `docs/api.md` and any affected examples in `README.md` in the same patch.

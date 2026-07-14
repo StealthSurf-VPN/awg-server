@@ -58,6 +58,8 @@ Environment=AWG_ENDPOINT=your.server.ip
 # Environment=AWG_JC=5
 # Environment=AWG_JMIN=50
 # Environment=AWG_JMAX=1000
+# Environment=AWG_S3=0
+# Environment=AWG_S4=0
 # Environment=AWG_LISTEN_PORT=51820
 # Environment=AWG_HTTP_PORT=7777
 # Environment=AWG_DNS=1.1.1.1
@@ -107,18 +109,20 @@ After `awg-server update`, restart the service: `systemctl restart awg-server`.
 ```bash
 # Build for current platform (with version)
 make build VERSION=1.0.0
+# -> ./awg-server
 
 # Build for all platforms (linux, darwin, windows × amd64, arm64)
-make build-all
+make build-all VERSION=1.0.0
+# -> dist/awg-server-<os>-<arch>[.exe]
 
 # Static analysis
 make vet
 
-# Clean build artifacts
+# Remove dist/ release artifacts (does not remove ./awg-server)
 make clean
 ```
 
-Requires Go 1.24+. Binaries are output to `dist/`.
+Requires Go 1.24+. `make build` writes the current-platform binary to `./awg-server`; `make build-all` recreates `dist/` and writes all six release targets there.
 
 ## Deploy
 
@@ -134,6 +138,20 @@ AWG_ENDPOINT=your.server.ip \
 ## API
 
 All `/api` endpoints require `Authorization: Bearer <AWG_API_TOKEN>`.
+
+| Method | Path | Success |
+| ------ | ---- | ------- |
+| `GET` | `/health` | `200` (no authentication) |
+| `GET` | `/api/clients` | `200` |
+| `POST` | `/api/clients` | `201` |
+| `PATCH` | `/api/clients/{id}` | `200` |
+| `GET` | `/api/clients/{id}/configuration` | `200` |
+| `GET` | `/api/clients/{id}/stats` | `200` |
+| `DELETE` | `/api/clients/{id}` | `204` |
+| `POST` | `/api/awg-params/generate` | `200` |
+| `POST` | `/api/clients/{id}/regenerate-awg-params` | `200` |
+
+There is no single-client `GET /api/clients/{id}` route. Create and PATCH accept exactly one JSON value, limit the body to 1 MiB, and ignore unknown JSON fields; PATCH objects replace the supplied top-level field rather than merging it, while JSON `null` resets that field. Other handlers do not read request bodies. Wrong methods and unknown paths are handled by Go's `net/http` mux as `405` and `404` respectively. See the [API reference](docs/api.md#http-routing-authentication-and-bodies) for the complete status and error contract.
 
 ```bash
 # Health check (no auth)
@@ -152,7 +170,7 @@ curl -X POST http://localhost:7777/api/clients \
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"client_listen_port":54321,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":60,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":"100000-800000"}}'
+  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"client_listen_port":54321,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":60,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s2":80,"s3":20,"h1":"100000-800000"}}'
 
 # Update client listen port, MTU, DNS, persistent keepalive, and obfuscation params
 curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
@@ -214,6 +232,10 @@ curl -X DELETE http://localhost:7777/api/clients/my-client-uuid \
 
 Routing mode `full` preserves full tunnel, `bypass` subtracts `excluded_ips` from all IPv4 routes, and `split` can subtract exclusions from its `allowed_ips`. Routing and DNS are client-only and do not change interface grouping or the server-side peer `/32`. After a routing, DNS, or per-client H/S regeneration change, fetch the generated configuration and reapply it on the client device. See the [API reference](docs/api.md) for validation, deterministic route subtraction, the 4,096/16,384 routing limits, error statuses, and the regeneration reapplication warning.
 
+Create, update, regeneration, and delete return a generic `500` when device work or `clients.json` persistence fails. The manager commits its in-memory client map only after persistence succeeds and attempts to restore device state when a later step fails. Rollback can itself fail, so a `500` never guarantees that live kernel state is pristine; inspect the server logs and AWG interfaces after device or storage failures. Startup is fail-fast: when persisted clients exist, both the top-level `server_private_key` and `generated_params` must exist; invalid or mismatched client keys, invalid persisted settings, or any client that cannot be restored also prevent the HTTP server from starting. Interfaces created before a failed restoration are cleaned up best-effort, and an HTTP bind failure terminates the process non-zero after cleanup.
+
+Usage is collected on startup and every 60 seconds and persisted in `{AWG_DATA_DIR}/usage.json`; shutdown performs a final collect/save. Every interface-level PATCH and per-client H/S regeneration takes a required complete snapshot before migration so counters from the old interface are accumulated first. A command error, malformed peer row, or active interface returning no peers aborts the update before mutation. The snapshot updates memory immediately but reaches `usage.json` on the next scheduled or shutdown save. Invalid persisted usage data is logged and replaced in memory with an empty stats map rather than crashing the collector.
+
 ## Configuration
 
 Environment variables:
@@ -223,7 +245,7 @@ Environment variables:
 | `AWG_API_TOKEN` | yes | — | Bearer token for API auth |
 | `AWG_ADDRESS` | yes | — | Server VPN address (CIDR), e.g. `10.0.0.1/24` |
 | `AWG_ENDPOINT` | yes | — | Public IP/hostname for client configs |
-| `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned sequentially; per-client `port` accepts 1024-65535, while omitted or zero uses automatic assignment) |
+| `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned sequentially; per-client `port` accepts 1024-65535, while omitted or zero uses automatic assignment). A new client can join a profile with port 0 or its actual port; PATCH rejects any stored port change while that profile is shared. |
 | `AWG_HTTP_PORT` | no | `7777` | HTTP API port |
 | `AWG_MTU` | no | `1420` | Default MTU for client configs (per-client override: `mtu` in `awg_params`, range 1280-1420) |
 | `AWG_DNS` | no | `1.1.1.1` | Default DNS inherited by omitted/default per-client settings; custom mode uses `dns_servers`, while system mode omits the client `DNS` line |
@@ -314,8 +336,9 @@ AmneziaWG sets CPS obfuscation parameters at the **interface level**, not per-pe
 - Each unique set of CPS parameters gets its own `awgN` interface (awg0, awg1, awg2, ...)
 - Clients with identical CPS parameters share an interface
 - Per-client `mtu`, all legacy and mode-based DNS fields, `persistent_keepalive`, all routing fields, and PSK do not affect interface grouping; PSK is also installed on the corresponding server peer
-- Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from base port)
-- Interfaces are created on demand and destroyed when their last peer is removed
+- Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from base port); every explicit port must also be open in the host firewall
+- A new client can join an existing profile with port 0 or the interface's actual port; a different explicit port is rejected with `409` before peer mutation, and PATCH rejects any stored port change while that profile is shared
+- Interfaces are created on demand and removed through coordinated peer/route/interface cleanup when their last peer is deleted; failures return `500` and trigger best-effort restoration
 - All interfaces share the same server private key
 
 ```text
@@ -324,6 +347,6 @@ main.go → config → awg (pool, params, keygen) → clients (manager, storage)
 
 - **Kernel module** — `amneziawg-linux-kernel-module` on host, `awg` CLI for management
 - **Static binary** — `CGO_ENABLED=0`, no external Go dependencies beyond `golang.org/x/crypto`
-- **Persistence** via JSON file with atomic writes
+- **Persistence** via temporary JSON files and rename, coordinated with device changes; rollback and crash durability are not absolute
 - **IP allocation** sequential from .2, freed IPs reusable
 - **Auth** Bearer token on all `/api` endpoints; `/health` is unauthenticated
