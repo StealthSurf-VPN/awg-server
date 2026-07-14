@@ -1,0 +1,207 @@
+name: Deploy awg-server
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Stable release tag to deploy
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable release tag to deploy
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ inputs.tag }}
+    concurrency:
+      group: awg-server-production
+      cancel-in-progress: false
+    steps:
+      - name: Validate provenance and download release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          CONFIGURED_ARCH: ${{ vars.AWG_DEPLOY_ARCH }}
+        run: |
+          set -Eeuo pipefail
+
+          [[ $TAG =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            printf 'tag must use vMAJOR.MINOR.PATCH without leading zeroes\n' >&2
+            exit 1
+          }
+
+          arch=${CONFIGURED_ARCH:-amd64}
+          case "$arch" in
+            amd64|arm64) ;;
+            *)
+              printf 'AWG_DEPLOY_ARCH must be amd64 or arm64\n' >&2
+              exit 1
+              ;;
+          esac
+
+          release_file="$RUNNER_TEMP/deploy-release.json"
+          gh release view "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease \
+            > "$release_file"
+          jq -e --arg tag "$TAG" '
+            .tagName == $tag and (.isDraft | not) and (.isPrerelease | not)
+          ' "$release_file" >/dev/null
+
+          tag_ref="$RUNNER_TEMP/deploy-tag-ref.json"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "/repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
+            > "$tag_ref"
+          jq -e '.object.type == "tag"' "$tag_ref" >/dev/null
+
+          tag_object_sha=$(jq -r .object.sha "$tag_ref")
+          tag_object="$RUNNER_TEMP/deploy-tag-object.json"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "/repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" \
+            > "$tag_object"
+          jq -e --arg tag "$TAG" '
+            .tag == $tag
+            and .object.type == "commit"
+            and ((.message | rtrimstr("\n")) == ("Release " + $tag))
+          ' "$tag_object" >/dev/null
+
+          target_commit=$(jq -r .object.sha "$tag_object")
+          comparison="$RUNNER_TEMP/deploy-main-comparison.json"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "/repos/$GITHUB_REPOSITORY/compare/$target_commit...main" \
+            > "$comparison"
+          jq -e --arg target "$target_commit" '
+            .merge_base_commit.sha == $target
+            and (.status == "ahead" or .status == "identical")
+          ' "$comparison" >/dev/null
+
+          asset="awg-server-linux-$arch"
+          release_dir="$RUNNER_TEMP/release"
+          mkdir -p "$release_dir"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$release_dir" \
+            --pattern "$asset" \
+            --pattern SHA256SUMS \
+            --pattern SHA256SUMS.sig
+
+          checksum_line=$(
+            grep -E "^[0-9a-f]{64}  ${asset}$" "$release_dir/SHA256SUMS" || true
+          )
+          [ "$(printf '%s\n' "$checksum_line" | grep -c .)" -eq 1 ] || {
+            printf 'SHA256SUMS does not contain exactly one checksum for %s\n' "$asset" >&2
+            exit 1
+          }
+          (
+            cd "$release_dir"
+            printf '%s\n' "$checksum_line" | sha256sum --check --strict -
+          )
+          [ -s "$release_dir/SHA256SUMS.sig" ] || {
+            printf 'SHA256SUMS.sig is missing or empty\n' >&2
+            exit 1
+          }
+
+          {
+            printf 'AWG_DEPLOY_ASSET=%s\n' "$asset"
+            printf 'AWG_DEPLOY_RELEASE_DIR=%s\n' "$release_dir"
+            printf 'AWG_DEPLOY_VERSION=%s\n' "${TAG#v}"
+          } >> "$GITHUB_ENV"
+
+      - name: Configure pinned SSH host
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.AWG_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.AWG_DEPLOY_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.AWG_DEPLOY_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.AWG_DEPLOY_KNOWN_HOSTS }}
+          CONFIGURED_PORT: ${{ vars.AWG_DEPLOY_PORT }}
+        run: |
+          set -Eeuo pipefail
+
+          port=${CONFIGURED_PORT:-22}
+          [[ $DEPLOY_HOST =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || {
+            printf 'AWG_DEPLOY_HOST is invalid\n' >&2
+            exit 1
+          }
+          [[ $DEPLOY_USER =~ ^[a-z_][a-z0-9_-]*$ ]] || {
+            printf 'AWG_DEPLOY_USER is invalid\n' >&2
+            exit 1
+          }
+          if [[ ! $port =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+            printf 'AWG_DEPLOY_PORT must be between 1 and 65535\n' >&2
+            exit 1
+          fi
+          [ -n "$SSH_PRIVATE_KEY" ] || {
+            printf 'AWG_DEPLOY_SSH_PRIVATE_KEY is required\n' >&2
+            exit 1
+          }
+          [ -n "$SSH_KNOWN_HOSTS" ] || {
+            printf 'AWG_DEPLOY_KNOWN_HOSTS is required\n' >&2
+            exit 1
+          }
+
+          install -d -m 0700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_deploy"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+
+          {
+            printf 'Host awg-production\n'
+            printf '  HostName %s\n' "$DEPLOY_HOST"
+            printf '  User %s\n' "$DEPLOY_USER"
+            printf '  Port %s\n' "$port"
+            printf '  IdentityFile ~/.ssh/id_deploy\n'
+            printf '  UserKnownHostsFile ~/.ssh/known_hosts\n'
+            printf '  IdentitiesOnly yes\n'
+            printf '  BatchMode yes\n'
+            printf '  StrictHostKeyChecking yes\n'
+            printf '  PasswordAuthentication no\n'
+            printf '  KbdInteractiveAuthentication no\n'
+            printf '  RequestTTY no\n'
+            printf '  ConnectTimeout 15\n'
+            printf '  LogLevel ERROR\n'
+          } > "$HOME/.ssh/config"
+          chmod 0600 "$HOME/.ssh/config" "$HOME/.ssh/id_deploy" "$HOME/.ssh/known_hosts"
+
+      - name: Deploy exact release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          installed_version=$(
+            {
+              printf '%s\n' "$AWG_DEPLOY_VERSION"
+              printf '%s\n' "$AWG_DEPLOY_ASSET"
+              base64 --wrap=0 "$AWG_DEPLOY_RELEASE_DIR/SHA256SUMS.sig"
+              printf '\n'
+              cat "$AWG_DEPLOY_RELEASE_DIR/SHA256SUMS"
+              cat "$AWG_DEPLOY_RELEASE_DIR/$AWG_DEPLOY_ASSET"
+            } | ssh -F "$HOME/.ssh/config" awg-production
+          )
+
+          [ "$installed_version" = "$AWG_DEPLOY_VERSION" ] || {
+            printf 'remote helper reported version %q, expected %q\n' \
+              "$installed_version" "$AWG_DEPLOY_VERSION" >&2
+            exit 1
+          }
+
+          printf 'Deployed awg-server %s\n' "$installed_version"

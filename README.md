@@ -8,11 +8,15 @@ Every newly created client also receives a unique, server-generated WireGuard pr
 
 ## Quick Install (Linux)
 
-One-liner that installs AmneziaWG 2.0, downloads the latest `awg-server` binary, and gets you ready to run:
+This example installs AmneziaWG 2.0 and one exact signed `awg-server` release. Before running it, obtain both the intended stable `MAJOR.MINOR.PATCH` version and the project's Ed25519 release public key through a trusted administrative channel, export that version as `AWG_VERSION`, and install the key at `/etc/awg-server/release-signing-public.pem`. Legacy unsigned releases and mutable `latest` aliases are intentionally rejected.
 
 ```bash
+set -Eeuo pipefail
+: "${AWG_VERSION:?export the trusted release version as AWG_VERSION=MAJOR.MINOR.PATCH}"
+[[ $AWG_VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
 # 1. Install AmneziaWG 2.0 kernel module (DKMS, from source)
-apt update && apt install -y build-essential git dkms linux-headers-$(uname -r)
+apt update && apt install -y build-essential curl git dkms openssl linux-headers-$(uname -r)
 git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git /tmp/amneziawg-module
 cd /tmp/amneziawg-module/src
 make dkms-install
@@ -31,9 +35,34 @@ rm -rf /tmp/amneziawg-tools
 sysctl -w net.ipv4.ip_forward=1
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 
-# 4. Download latest awg-server
-curl -fsSL https://github.com/stealthsurf-vpn/awg-server/releases/latest/download/awg-server-linux-$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') -o /usr/local/bin/awg-server
-chmod +x /usr/local/bin/awg-server
+# 4. Download and verify the exact signed awg-server release
+case "$(uname -m)" in
+  x86_64) ASSET=awg-server-linux-amd64 ;;
+  aarch64|arm64) ASSET=awg-server-linux-arm64 ;;
+  *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+RELEASE_DIR=$(mktemp -d)
+trap 'rm -rf "$RELEASE_DIR"' EXIT
+RELEASE_URL="https://github.com/StealthSurf-VPN/awg-server/releases/download/v$AWG_VERSION"
+curl -fL "$RELEASE_URL/$ASSET" -o "$RELEASE_DIR/$ASSET"
+curl -fL "$RELEASE_URL/SHA256SUMS" -o "$RELEASE_DIR/SHA256SUMS"
+curl -fL "$RELEASE_URL/SHA256SUMS.sig" -o "$RELEASE_DIR/SHA256SUMS.sig"
+KEY_DESCRIPTION=$(openssl pkey -pubin -in /etc/awg-server/release-signing-public.pem -text -noout)
+KEY_TYPE=${KEY_DESCRIPTION%%$'\n'*}
+unset KEY_DESCRIPTION
+test "$KEY_TYPE" = 'ED25519 Public-Key:'
+openssl pkeyutl -verify -rawin -pubin \
+  -inkey /etc/awg-server/release-signing-public.pem \
+  -sigfile "$RELEASE_DIR/SHA256SUMS.sig" \
+  -in "$RELEASE_DIR/SHA256SUMS"
+CHECKSUM_LINE=$(grep -E "^[0-9a-f]{64}  ${ASSET}$" "$RELEASE_DIR/SHA256SUMS")
+test "$(printf '%s\n' "$CHECKSUM_LINE" | grep -c .)" -eq 1
+(cd "$RELEASE_DIR" && printf '%s\n' "$CHECKSUM_LINE" | sha256sum --check --strict -)
+chmod 0755 "$RELEASE_DIR/$ASSET"
+test "$("$RELEASE_DIR/$ASSET" version)" = "awg-server $AWG_VERSION"
+install -o root -g root -m 0755 "$RELEASE_DIR/$ASSET" /usr/local/bin/awg-server
+rm -rf "$RELEASE_DIR"
+trap - EXIT
 
 # 5. Create data directory
 mkdir -p /data
@@ -95,14 +124,14 @@ journalctl -u awg-server -f
 # Check current version
 awg-server version
 
-# Self-update to latest GitHub release
+# Cryptographically verified self-update to the latest stable GitHub release
 awg-server update
 
 # Start the server (default, no arguments)
 awg-server
 ```
 
-After `awg-server update`, restart the service: `systemctl restart awg-server`.
+On Linux and macOS, `awg-server update` is enabled only in official release binaries that embed the Ed25519 release public key. It rejects non-stable versions, downgrades, concurrent update/deploy operations, unexpected assets or URLs, invalid signatures, non-canonical manifests, checksum mismatches, and a binary whose embedded version does not match the release. It locks and rechecks the actual installed binary before any release asset download and immediately before replacement. A source build without `RELEASE_PUBLIC_KEY` fails closed before network access. Windows self-update also fails before network access because a running `.exe` cannot be replaced atomically; install a separately verified signed Windows asset instead. After a successful in-place update, restart the service: `systemctl restart awg-server`.
 
 ## Build
 
@@ -122,7 +151,31 @@ make vet
 make clean
 ```
 
-Requires Go 1.24+. `make build` writes the current-platform binary to `./awg-server`; `make build-all` recreates `dist/` and writes all six release targets there.
+Requires Go 1.24+. `make build` writes the current-platform binary to `./awg-server`; `make build-all` recreates `dist/` and writes all six release targets there. The automated release workflow supplies the canonical base64-encoded Ed25519 public PEM through `RELEASE_PUBLIC_KEY`; ordinary source builds intentionally omit updater trust.
+
+## Tests and Automation
+
+```bash
+# Full deterministic API and package suite
+go test -race -count=1 ./...
+
+# Release marker contract
+bash scripts/release-marker_test.sh
+
+# Release notes contract
+bash scripts/release-notes_test.sh
+
+# Atomic deployment helper and rollback contract (requires Docker)
+bash scripts/deploy-awg-server_test.sh
+
+# Required static checks
+go vet ./...
+go build -trimpath -o /tmp/awg-server .
+```
+
+The API suite runs the real router, handlers, manager, temporary JSON storage, routing/DNS/configuration logic, key generation, and usage collector while replacing only host-level AWG device operations. It covers every registered HTTP operation and does not require root, an AWG kernel module, or external network access.
+
+GitHub Actions runs these checks for pull requests and `main`. A strict `release:vMAJOR.MINOR.PATCH` marker in the immutable commit message that lands on `main` starts publication of all six platform binaries, checksums, and an Ed25519 signature after CI passes and the protected `release-signing` Environment is approved. Build scripts never receive the private signing key: a separate job without a source checkout or `GITHUB_TOKEN` permissions validates the unsigned artifact, requires an exact Ed25519 keypair match, and signs only the checksum manifest. Protected automatic deployment is available but disabled by default. See [CI, release, and deployment](docs/ci-cd.md) for the exact marker contract, signing-key setup, release gates, GitHub settings, target-server setup, manual deployment, downgrade protection, and rollback behavior.
 
 ## Deploy
 
@@ -134,6 +187,8 @@ AWG_ADDRESS=10.0.0.1/24 \
 AWG_ENDPOINT=your.server.ip \
 ./awg-server
 ```
+
+For release-driven deployment through GitHub Actions, install the restricted remote helper and configure the `production` Environment as described in [CI, release, and deployment](docs/ci-cd.md#protected-automatic-deployment).
 
 ## API
 

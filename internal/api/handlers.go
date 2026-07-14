@@ -279,6 +279,8 @@ func (s *Server) handleGetConfiguration(w http.ResponseWriter, r *http.Request) 
 		status := http.StatusInternalServerError
 		if errors.Is(err, clients.ErrClientNotFound) {
 			status = http.StatusNotFound
+		} else {
+			log.Printf("get client configuration error: %v", err)
 		}
 
 		writeError(w, err, status)
@@ -303,6 +305,8 @@ func (s *Server) handleGetClientStats(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, clients.ErrClientNotFound) {
 			status = http.StatusNotFound
+		} else {
+			log.Printf("get client stats error: %v", err)
 		}
 
 		writeError(w, err, status)
@@ -332,6 +336,8 @@ func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, clients.ErrClientNotFound) {
 			status = http.StatusNotFound
+		} else {
+			log.Printf("get client for deletion error: %v", err)
 		}
 
 		writeError(w, err, status)

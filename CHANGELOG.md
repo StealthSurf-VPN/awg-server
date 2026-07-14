@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- Added composable per-client `full`, `bypass`, and `split` routing with deterministic exclusions
+- Added default, custom multi-server, and system DNS modes
+- Added standalone AWG H/S generation and transactional per-client regeneration
+- Added full HTTP API contract tests, race-enabled CI, and shell/workflow validation
+- Added strict marker-driven signed releases and protected opt-in production deployment
+- Hardened self-update with Ed25519 verification, exact manifests, checksum and version validation, and downgrade refusal
+
 ## [1.0.2] - 2026-03-11
 
 - Added atomic peer migration (`MigratePeer`) — safely change CPS profile while keeping the same port when client is the last peer on an interface

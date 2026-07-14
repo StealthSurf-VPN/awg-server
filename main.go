@@ -200,7 +200,7 @@ func runUpdate() {
 
 	fmt.Printf("updating %s -> %s...\n", version, result.Latest)
 
-	if err := u.Apply(result.DownloadURL); err != nil {
+	if err := u.Apply(result); err != nil {
 		log.Fatalf("apply update: %v", err)
 	}
 

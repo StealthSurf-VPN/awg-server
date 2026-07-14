@@ -29,9 +29,17 @@ type ClientUpdate struct {
 
 type MigrationGuard func(func() error) error
 
+type devicePool interface {
+	AddPeer(awg.AWGParams, [32]byte, *[32]byte, string) error
+	RemovePeer(awg.AWGParams, [32]byte, string) error
+	MigratePeer(awg.AWGParams, awg.AWGParams, [32]byte, *[32]byte, string) error
+	PortForParams(awg.AWGParams) (int, error)
+	PublicKey() [32]byte
+}
+
 type Manager struct {
 	mu            sync.RWMutex
-	pool          *awg.Pool
+	pool          devicePool
 	storage       *Storage
 	config        *config.Config
 	defaultParams awg.AWGParams
@@ -74,7 +82,7 @@ func persistenceFailure(operation string, saveErr, rollbackErr error) error {
 	}
 }
 
-func NewManager(pool *awg.Pool, storage *Storage, cfg *config.Config, defaultParams awg.AWGParams, data *StorageData) (*Manager, error) {
+func NewManager(pool devicePool, storage *Storage, cfg *config.Config, defaultParams awg.AWGParams, data *StorageData) (*Manager, error) {
 	m := &Manager{
 		pool:          pool,
 		storage:       storage,

@@ -1,0 +1,249 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+export LC_ALL=C
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+binary=/usr/local/bin/awg-server
+service=awg-server
+health_url=http://127.0.0.1:7777/health
+public_key=/etc/awg-server/release-signing-public.pem
+lock_file=${binary}.update.lock
+incoming=''
+backup=''
+manifest=''
+signature_path=''
+transaction_state=preparing
+
+fail() {
+    printf 'deploy-awg-server: %s\n' "$1" >&2
+    exit 1
+}
+
+wait_for_health() {
+    local attempt
+
+    for ((attempt = 1; attempt <= 10; attempt++)); do
+        if curl --fail --silent --show-error \
+            --connect-timeout 2 --max-time 5 \
+            "$health_url" >/dev/null; then
+            return 0
+        fi
+
+        sleep 1
+    done
+
+    return 1
+}
+
+semver_less() {
+    local left=$1
+    local right=$2
+    local index
+    local left_component
+    local right_component
+    local left_parts
+    local right_parts
+
+    IFS=. read -r -a left_parts <<< "$left"
+    IFS=. read -r -a right_parts <<< "$right"
+
+    for ((index = 0; index < 3; index++)); do
+        left_component=${left_parts[index]}
+        right_component=${right_parts[index]}
+
+        if [ "${#left_component}" -lt "${#right_component}" ]; then
+            return 0
+        fi
+        if [ "${#left_component}" -gt "${#right_component}" ]; then
+            return 1
+        fi
+        if [[ $left_component < $right_component ]]; then
+            return 0
+        fi
+        if [[ $left_component > $right_component ]]; then
+            return 1
+        fi
+    done
+
+    return 1
+}
+
+cleanup() {
+    local status=$?
+    local recovery_path=''
+    local rollback_error=''
+
+    trap - EXIT HUP INT TERM
+    set +e
+
+    if [ "$status" -ne 0 ] && [ "$transaction_state" = installed ] && [ -n "$backup" ]; then
+        recovery_path=$backup
+        if mv -f -- "$backup" "$binary"; then
+            backup=''
+            if ! systemctl restart "$service"; then
+                rollback_error='; restarting the previous binary failed'
+            elif ! wait_for_health; then
+                rollback_error='; the previous binary did not become healthy'
+            fi
+
+            if [ -n "$rollback_error" ]; then
+                printf 'deploy-awg-server: previous binary restored%s\n' "$rollback_error" >&2
+            else
+                printf 'deploy-awg-server: deployment rolled back\n' >&2
+            fi
+        else
+            backup=''
+            printf 'deploy-awg-server: restoring the previous binary failed; recovery binary preserved at %s\n' \
+                "$recovery_path" >&2
+        fi
+    fi
+
+    if [ -n "$incoming" ]; then
+        rm -f -- "$incoming"
+    fi
+    if [ -n "$manifest" ]; then
+        rm -f -- "$manifest"
+    fi
+    if [ -n "$signature_path" ]; then
+        rm -f -- "$signature_path"
+    fi
+    if [ -n "$backup" ]; then
+        rm -f -- "$backup"
+    fi
+
+    exit "$status"
+}
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+[ "$(id -u)" -eq 0 ] || fail 'must run as root'
+[ -x "$binary" ] || fail "$binary is not an existing executable"
+[ -f "$public_key" ] || fail "$public_key is missing"
+[ "$(stat -c %u "$public_key")" -eq 0 ] || fail "$public_key must be owned by root"
+public_key_mode=$(stat -c %a "$public_key")
+if ((8#$public_key_mode & 022)); then
+    fail "$public_key must not be group- or world-writable"
+fi
+
+for required_command in base64 cat chmod cp curl cut dirname flock head id mktemp mv openssl rm sha256sum sleep stat systemctl uname; do
+    command -v "$required_command" >/dev/null \
+        || fail "required command is missing: $required_command"
+done
+
+umask 077
+exec 9>"$lock_file"
+flock -n 9 || fail 'another update or deployment is already in progress'
+
+public_key_description=$(openssl pkey -pubin -in "$public_key" -text -noout 2>/dev/null) \
+    || fail "$public_key is not a valid public key"
+public_key_type=${public_key_description%%$'\n'*}
+unset public_key_description
+[ "$public_key_type" = 'ED25519 Public-Key:' ] \
+    || fail "$public_key must be Ed25519"
+
+expected_version=''
+expected_asset=''
+encoded_signature=''
+IFS= read -r expected_version || fail 'missing expected version header'
+IFS= read -r expected_asset || fail 'missing expected asset header'
+IFS= read -r encoded_signature || fail 'missing signature header'
+
+[[ $expected_version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+    || fail 'expected version must use MAJOR.MINOR.PATCH without leading zeroes'
+
+case "$(uname -m)" in
+    x86_64) host_asset=awg-server-linux-amd64 ;;
+    aarch64|arm64) host_asset=awg-server-linux-arm64 ;;
+    *) fail "unsupported host architecture: $(uname -m)" ;;
+esac
+[ "$expected_asset" = "$host_asset" ] \
+    || fail "asset $expected_asset does not match host asset $host_asset"
+
+binary_dir=$(dirname "$binary")
+incoming=$(mktemp "$binary_dir/.awg-server.incoming.XXXXXX")
+manifest=$(mktemp "$binary_dir/.awg-server.manifest.XXXXXX")
+signature_path=$(mktemp "$binary_dir/.awg-server.signature.XXXXXX")
+
+for ((line_number = 1; line_number <= 6; line_number++)); do
+    manifest_line=''
+    IFS= read -r manifest_line || fail 'signed checksum manifest is truncated'
+    printf '%s\n' "$manifest_line" >> "$manifest"
+done
+head -c 67108865 > "$incoming"
+[ -s "$incoming" ] || fail 'received an empty binary'
+[ "$(stat -c %s "$incoming")" -le 67108864 ] \
+    || fail 'uploaded binary exceeds the 64 MiB limit'
+
+printf '%s' "$encoded_signature" | base64 --decode > "$signature_path" 2>/dev/null \
+    || fail 'signature is not valid base64'
+[ "$(stat -c %s "$signature_path")" -eq 64 ] || fail 'signature must be 64 bytes'
+
+expected_assets=(
+    awg-server-darwin-amd64
+    awg-server-darwin-arm64
+    awg-server-linux-amd64
+    awg-server-linux-arm64
+    awg-server-windows-amd64.exe
+    awg-server-windows-arm64.exe
+)
+selected_digest=''
+line_number=0
+while IFS= read -r manifest_line; do
+    [[ $manifest_line =~ ^([0-9a-f]{64})[[:space:]][[:space:]](.+)$ ]] \
+        || fail 'signed checksum manifest has an invalid line'
+    [ "${BASH_REMATCH[2]}" = "${expected_assets[line_number]}" ] \
+        || fail 'signed checksum manifest has an unexpected asset set or order'
+    if [ "${BASH_REMATCH[2]}" = "$expected_asset" ]; then
+        selected_digest=${BASH_REMATCH[1]}
+    fi
+    line_number=$((line_number + 1))
+done < "$manifest"
+[ "$line_number" -eq "${#expected_assets[@]}" ] \
+    || fail 'signed checksum manifest must contain exactly six assets'
+[ -n "$selected_digest" ] || fail "signed checksum manifest is missing $expected_asset"
+
+openssl pkeyutl -verify -rawin -pubin \
+    -inkey "$public_key" \
+    -sigfile "$signature_path" \
+    -in "$manifest" >/dev/null 2>&1 \
+    || fail 'signed checksum manifest verification failed'
+
+actual_digest=$(sha256sum "$incoming" | cut -d ' ' -f 1)
+[ "$actual_digest" = "$selected_digest" ] \
+    || fail "uploaded binary checksum does not match signed manifest for $expected_asset"
+
+chmod 0755 "$incoming"
+actual_version=$("$incoming" version 2>/dev/null) \
+    || fail 'the signed file is not an executable awg-server binary'
+[ "$actual_version" = "awg-server $expected_version" ] \
+    || fail "uploaded binary reports '$actual_version', expected 'awg-server $expected_version'"
+
+current_output=$("$binary" version 2>/dev/null) \
+    || fail 'the installed awg-server version cannot be read'
+if [[ $current_output =~ ^awg-server[[:space:]]((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
+    current_version=${BASH_REMATCH[1]}
+    if semver_less "$expected_version" "$current_version"; then
+        fail "refusing downgrade from $current_version to $expected_version"
+    fi
+elif [ "$current_output" != 'awg-server dev' ]; then
+    fail "installed binary reports unsupported version '$current_output'"
+fi
+
+backup=$(mktemp "$binary_dir/.awg-server.rollback.XXXXXX")
+cp -p -- "$binary" "$backup"
+transaction_state=installed
+mv -f -- "$incoming" "$binary"
+incoming=''
+
+systemctl restart "$service" || fail 'service restart failed'
+wait_for_health || fail 'health check failed'
+
+transaction_state=committed
+rm -f -- "$backup"
+backup=''
+
+printf '%s\n' "$expected_version"
