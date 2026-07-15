@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+readonly RELEASE_PUBLIC_KEY_BASE64='LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUNvd0JRWURLMlZ3QXlFQW1PRDdZY01LZWE3Wm9XK2ZFSmZ0cEZ3NGNYcTVzdnp6QVBUb2tiY3dTNkE9Ci0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLQo='
+readonly LATEST_MANIFEST_URL='https://github.com/StealthSurf-VPN/awg-server/releases/latest/download/SHA256SUMS'
 readonly -a ENVIRONMENT_KEYS=(
     AWG_API_TOKEN
     AWG_ADDRESS
@@ -24,18 +26,12 @@ readonly -a ENVIRONMENT_KEYS=(
     AWG_MAX_INTERFACES
 )
 readonly -a REQUIRED_KEYS=(
-    AWG_SERVER_VERSION
-    AWG_RELEASE_PUBLIC_KEY_FILE
     AWG_API_TOKEN
-    AWG_ADDRESS
     AWG_ENDPOINT
-)
-readonly -a CONFIG_KEYS=(
-    AWG_SERVER_VERSION
-    AWG_RELEASE_PUBLIC_KEY_FILE
-    "${ENVIRONMENT_KEYS[@]}"
+    AWG_ADDRESS
 )
 
+AWG_SERVER_VERSION=''
 PROCESS_ENV_PRESENT=()
 PROCESS_ENV_VALUES=()
 INSTALL_TEMP_PATHS=()
@@ -54,23 +50,12 @@ cleanup_temp_paths() {
     done
 }
 
-usage() {
-    printf 'Usage: %s [--config FILE]\n' "${0##*/}"
-}
-
-validate_version() {
-    local version=${1:-}
-
-    [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
-        || die 'AWG_SERVER_VERSION must be a stable MAJOR.MINOR.PATCH version'
-}
-
 capture_process_environment() {
     local key
 
     PROCESS_ENV_PRESENT=()
     PROCESS_ENV_VALUES=()
-    for key in "${CONFIG_KEYS[@]}"; do
+    for key in "${ENVIRONMENT_KEYS[@]}"; do
         if [[ ${!key+x} ]]; then
             PROCESS_ENV_PRESENT+=(1)
             PROCESS_ENV_VALUES+=("${!key}")
@@ -107,9 +92,9 @@ load_config_file() {
 restore_process_environment() {
     local index key
 
-    for ((index = 0; index < ${#CONFIG_KEYS[@]}; index++)); do
+    for ((index = 0; index < ${#ENVIRONMENT_KEYS[@]}; index++)); do
         [[ ${PROCESS_ENV_PRESENT[index]:-0} == 1 ]] || continue
-        key=${CONFIG_KEYS[index]}
+        key=${ENVIRONMENT_KEYS[index]}
         printf -v "$key" '%s' "${PROCESS_ENV_VALUES[index]}"
         export "${key?}"
     done
@@ -184,6 +169,20 @@ release_asset_name() {
             return 1
             ;;
     esac
+}
+
+resolve_latest_version() {
+    local headers
+    local location
+    local pattern='^https://github\.com/StealthSurf-VPN/awg-server/releases/download/v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))/SHA256SUMS$'
+
+    headers=$(curl -fsSI --proto '=https' --tlsv1.2 "$LATEST_MANIFEST_URL") \
+        || die 'could not resolve the latest stable release'
+    location=$(printf '%s\n' "$headers" | awk \
+        'tolower($1) == "location:" { sub(/\r$/, "", $2); print $2; exit }')
+    [[ $location =~ $pattern ]] \
+        || die 'latest release redirect is not canonical'
+    printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
 health_response_ok() {
@@ -338,7 +337,11 @@ install_verified_release() {
     release_dir=$(mktemp -d)
     INSTALL_TEMP_PATHS+=("$release_dir")
     verified_key="$release_dir/release-signing-public.pem"
-    install -m 0644 "$AWG_RELEASE_PUBLIC_KEY_FILE" "$verified_key"
+    if ! printf '%s' "$RELEASE_PUBLIC_KEY_BASE64" \
+        | openssl base64 -d -A > "$verified_key"; then
+        die 'could not decode the release public key'
+    fi
+    chmod 0600 "$verified_key"
 
     if ! key_description=$(openssl pkey \
         -pubin -in "$verified_key" -text -noout); then
@@ -350,10 +353,10 @@ install_verified_release() {
         || die 'release public key must be Ed25519'
 
     release_url="https://github.com/StealthSurf-VPN/awg-server/releases/download/v$AWG_SERVER_VERSION"
-    curl -fsSL "$release_url/$asset" -o "$release_dir/$asset"
     curl -fsSL "$release_url/SHA256SUMS" -o "$release_dir/SHA256SUMS"
     curl -fsSL "$release_url/SHA256SUMS.sig" \
         -o "$release_dir/SHA256SUMS.sig"
+    curl -fsSL "$release_url/$asset" -o "$release_dir/$asset"
 
     openssl pkeyutl -verify -rawin -pubin \
         -inkey "$verified_key" \
@@ -381,9 +384,6 @@ install_verified_release() {
     [[ $downloaded_version == "awg-server $AWG_SERVER_VERSION" ]] \
         || die 'downloaded release binary version does not match AWG_SERVER_VERSION'
 
-    install -d -m 0755 /etc/awg-server
-    install -o root -g root -m 0644 \
-        "$verified_key" /etc/awg-server/release-signing-public.pem
     install -o root -g root -m 0755 \
         "$release_dir/$asset" /usr/local/bin/awg-server
 
@@ -486,26 +486,9 @@ start_and_verify_service() {
 
 main() {
     local asset
-    local config_file=''
     local key
 
-    while (($#)); do
-        case $1 in
-            --config)
-                (($# >= 2)) || die '--config requires a file'
-                config_file=$2
-                shift 2
-                ;;
-            -h | --help)
-                usage
-                return
-                ;;
-            *)
-                usage >&2
-                die "unknown argument: $1"
-                ;;
-        esac
-    done
+    (($# == 0)) || die 'arguments are not supported'
 
     require_supported_host
     if ! asset=$(release_asset_name "$(uname -m)"); then
@@ -513,22 +496,16 @@ main() {
     fi
 
     capture_process_environment
-    [[ ! -e /etc/awg-server.env ]] || load_config_file /etc/awg-server.env
-    [[ -z $config_file ]] || load_config_file "$config_file"
-    restore_process_environment
-
-    if [[ -z ${AWG_RELEASE_PUBLIC_KEY_FILE:-} \
-        && -f /etc/awg-server/release-signing-public.pem ]]; then
-        AWG_RELEASE_PUBLIC_KEY_FILE=/etc/awg-server/release-signing-public.pem
+    if [[ -e /etc/awg-server.env ]]; then
+        load_config_file /etc/awg-server.env
     fi
+    restore_process_environment
 
     for key in "${REQUIRED_KEYS[@]}"; do
         require_setting "$key"
     done
-    validate_version "$AWG_SERVER_VERSION"
-    [[ -f $AWG_RELEASE_PUBLIC_KEY_FILE ]] \
-        || die 'AWG_RELEASE_PUBLIC_KEY_FILE must be a regular file'
     select_data_dir /data /var/lib/awg-server
+    AWG_SERVER_VERSION=$(resolve_latest_version)
 
     install_amneziawg
     install_verified_release "$asset"
