@@ -48,6 +48,20 @@ for version in latest v1.2.3 01.2.3 1.2.3-rc.1 1.2; do
     assert_rejected "invalid version $version" validate_version "$version"
 done
 
+assert_equal 'x86_64 release asset' \
+    awg-server-linux-amd64 "$(release_asset_name x86_64)"
+assert_equal 'aarch64 release asset' \
+    awg-server-linux-arm64 "$(release_asset_name aarch64)"
+assert_equal 'arm64 release asset' \
+    awg-server-linux-arm64 "$(release_asset_name arm64)"
+assert_rejected 'unsupported release architecture' release_asset_name riscv64
+
+health_response_ok '{"status":"ok"}' \
+    || fail 'exact health response was rejected'
+for response in '{"status":"degraded"}' '{"status":"ok"} ' ''; do
+    assert_rejected "invalid health response $response" health_response_ok "$response"
+done
+
 existing_config="$temp_dir/existing.env"
 explicit_config="$temp_dir/explicit.env"
 printf '%s\n' \
