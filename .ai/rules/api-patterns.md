@@ -28,9 +28,11 @@
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | `GET` | `/health` | Unauthenticated health check |
+| `POST` | `/api/awg-params/generate` | Generate a stateless H1-H4/S1-S2 fragment |
 | `GET` | `/api/clients` | List clients for backend reconciliation and orphan cleanup |
 | `POST` | `/api/clients` | Create a client, optionally with custom `awg_params` and `routing` |
 | `PATCH` | `/api/clients/{id}` | Independently replace or reset the client's `awg_params` and `routing` |
+| `POST` | `/api/clients/{id}/regenerate-awg-params` | Snapshot usage, regenerate H1-H4/S1-S2, and migrate the peer |
 | `GET` | `/api/clients/{id}/configuration` | Return the generated `.conf` file |
 | `GET` | `/api/clients/{id}/stats` | Return accumulated usage and last handshake |
 | `DELETE` | `/api/clients/{id}` | Remove the client and any now-empty interface |
@@ -39,8 +41,12 @@
 
 - `POST /api/clients` accepts optional top-level `awg_params` and `routing` objects. Omitted or null routing creates the backward-compatible full-tunnel policy.
 - `PATCH /api/clients/{id}` treats `awg_params` and `routing` independently: omission preserves a field, JSON null resets it, and an object replaces its complete stored value.
+- `POST /api/clients` and `PATCH /api/clients/{id}` limit request bodies to 1 MiB; oversized bodies return `400 Bad Request` before mutation.
+- Create and update bodies must contain exactly one JSON document; a second value, trailing garbage, or over-limit trailing data returns the same generic `400 Bad Request` before mutation.
 - A PATCH body containing neither `awg_params` nor `routing` returns `400 Bad Request`; null counts as an explicitly supplied reset.
-- List, create, and update responses return effective routing as `{"mode":"full"}` or a normalized split object, even when full routing is omitted from persistence.
+- List, create, and update responses return effective routing as `{"mode":"full"}`, normalized bypass intent, or normalized split intent, even when full routing is omitted from persistence.
 - Routing-only updates do not migrate peers because routing is not part of `AWGParams` or interface grouping.
+- Legacy `dns` and mode-based `dns_mode`/`dns_servers` are mutually exclusive under case-insensitive JSON field matching. DNS is client-only and never changes interface grouping.
+- Every interface-level PATCH and client H/S regeneration takes a required serialized usage snapshot while the manager write lock is held and keeps collection blocked through migration. Snapshot failure returns generic `500` before pool mutation; any migration failure leaves the stored override unchanged and never returns success.
 
 When the contract changes, update `docs/api.md` and any affected examples in `README.md` in the same patch.

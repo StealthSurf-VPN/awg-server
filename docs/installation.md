@@ -79,6 +79,8 @@ For ARM servers (e.g. Oracle Cloud ARM):
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o awg-server .
 ```
 
+Direct source builds intentionally do not contain the official release verification key, so `awg-server update` fails closed for them. Official Linux and macOS release binaries embed that Ed25519 key and verify the canonical version-bound asset URLs, signed six-asset checksum manifest, selected checksum, upgrade-only on-disk version, interprocess lock, size limit, and downloaded binary version before replacement. Windows self-update fails closed before network access because an active `.exe` cannot be replaced atomically. Bootstrap an existing legacy or source-built installation with a separately verified signed release before relying on Linux/macOS self-update.
+
 ## 4. Deploy
 
 Copy binary to the server:
@@ -140,10 +142,12 @@ AWG_DATA_DIR=/var/lib/awg-server
 AWG_JC=5
 AWG_JMIN=50
 AWG_JMAX=1000
+AWG_S3=0
+AWG_S4=0
 AWG_MAX_INTERFACES=0
 ```
 
-H1-H4 and S1/S2 are auto-generated on first start and persisted. The AWG_* vars above are **defaults** for Jc/Jmin/Jmax only.
+H1-H4 and S1/S2 are generated on first start and persisted. `AWG_JC`, `AWG_JMIN`, `AWG_JMAX`, `AWG_S3`, and `AWG_S4` are server-wide defaults inherited by clients that do not override those fields. `AWG_DNS` and `AWG_MTU` are generated-client defaults; `AWG_LISTEN_PORT` is the base for automatic interface ports. `AWG_MAX_INTERFACES=0` means unlimited. The example overrides `AWG_DATA_DIR`; if omitted, it defaults to `/data`. `AWG_INTERFACE` defaults to automatic outbound-interface detection, and `AWG_I1` through `AWG_I5` default to empty.
 
 Enable and start:
 
@@ -155,9 +159,13 @@ systemctl start awg-server
 systemctl status awg-server
 ```
 
+Startup restores every persisted client before starting the HTTP listener. When persisted clients exist, missing top-level `server_private_key` or `generated_params`, an invalid or mismatched client keypair, invalid AWG/routing settings, or any interface/peer restoration failure is fatal instead of silently generating replacement state or skipping a client. Failure to bind the configured HTTP port also exits non-zero after cleanup, allowing the service manager to restart or report the unit as failed. Inspect `journalctl -u awg-server` if the service does not reach the listening log line; cleanup of interfaces created earlier in a failed restore is best-effort.
+
+Client create/update/regeneration/delete operations return a generic HTTP `500` when device work or `clients.json` persistence fails and attempt to restore the previous device state. Rollback is not guaranteed if a second host command fails or the process crashes, so inspect `awg show`, `ip route`, and the service logs after such an error.
+
 ## 7. Firewall
 
-Open WireGuard UDP port, restrict HTTP API to internal network:
+Open the automatic WireGuard UDP range, open every explicit per-client `awg_params.port`, and restrict the HTTP API to the internal network. The example `51820:51840` only covers 21 automatic or explicitly selected ports; increase it or add individual rules to match the deployment.
 
 ### iptables
 
@@ -173,6 +181,8 @@ iptables -A INPUT -p tcp --dport 7777 -j DROP
 ufw allow 51820:51840/udp  # range for multiple AWG interfaces
 ufw allow from 10.0.0.0/8 to any port 7777
 ```
+
+The unauthenticated `GET /health` endpoint is intended for monitoring. Every `/api` route requires the bearer token; keep TCP port 7777 off the public Internet even though application authentication is enabled.
 
 ## Troubleshooting
 

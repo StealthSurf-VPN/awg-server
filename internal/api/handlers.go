@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stealthsurf-vpn/awg-server/internal/awg"
 	"github.com/stealthsurf-vpn/awg-server/internal/clients"
@@ -76,12 +78,29 @@ func (s *Server) handleListClients(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+func (s *Server) handleGenerateAWGParams(w http.ResponseWriter, r *http.Request) {
+	params, err := awg.GenerateParams()
+	if err != nil {
+		log.Printf("generate awg params error: %v", err)
+		writeError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(params)
+}
+
 func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	var req createClientRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -91,15 +110,18 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.ID) > 256 {
+	if utf8.RuneCountInString(req.ID) > 256 {
 		jsonError(w, "id is too long (max 256 chars)", http.StatusBadRequest)
 		return
 	}
 
-	if err := awg.ValidateOverrides(req.AWGParams); err != nil {
+	normalizedParams, err := awg.NormalizeOverrides(req.AWGParams)
+	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	req.AWGParams = normalizedParams
 
 	normalizedRouting, err := clients.NormalizeRouting(req.Routing)
 	if err != nil {
@@ -114,6 +136,8 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		var status int
 
 		switch {
+		case errors.Is(err, awg.ErrRollbackFailed):
+			status = http.StatusInternalServerError
 		case errors.Is(err, clients.ErrClientExists):
 			status = http.StatusConflict
 		case errors.Is(err, awg.ErrInvalidParams):
@@ -123,6 +147,8 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, clients.ErrInvalidRouting):
 			status = http.StatusBadRequest
 		case errors.Is(err, awg.ErrPortInUse):
+			status = http.StatusConflict
+		case errors.Is(err, awg.ErrProfilePortConflict):
 			status = http.StatusConflict
 		case errors.Is(err, awg.ErrMaxInterfacesReached):
 			status = http.StatusServiceUnavailable
@@ -146,7 +172,12 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 
 	var req updateClientRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -157,10 +188,13 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.AWGParams.Set {
-		if err := awg.ValidateOverrides(req.AWGParams.Value); err != nil {
+		normalizedParams, err := awg.NormalizeOverrides(req.AWGParams.Value)
+		if err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		req.AWGParams.Value = normalizedParams
 	}
 
 	if req.Routing.Set {
@@ -178,31 +212,28 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		AWGParamsSet: req.AWGParams.Set,
 		Routing:      req.Routing.Value,
 		RoutingSet:   req.Routing.Set,
-	})
+	}, s.collector.WithRequiredSnapshot)
 	if err != nil {
 		log.Printf("update client error: %v", err)
+		writeError(w, err, clientUpdateErrorStatus(err))
+		return
+	}
 
-		var status int
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(toResponse(*client))
+}
 
-		switch {
-		case errors.Is(err, clients.ErrClientNotFound):
-			status = http.StatusNotFound
-		case errors.Is(err, awg.ErrInvalidParams):
-			status = http.StatusBadRequest
-		case errors.Is(err, awg.ErrInvalidPort):
-			status = http.StatusBadRequest
-		case errors.Is(err, clients.ErrInvalidRouting):
-			status = http.StatusBadRequest
-		case errors.Is(err, clients.ErrEmptyClientUpdate):
-			status = http.StatusBadRequest
-		case errors.Is(err, awg.ErrPortInUse):
-			status = http.StatusConflict
-		case errors.Is(err, awg.ErrPortShared):
-			status = http.StatusConflict
-		case errors.Is(err, awg.ErrMaxInterfacesReached):
-			status = http.StatusServiceUnavailable
-		default:
-			status = http.StatusInternalServerError
+func (s *Server) handleRegenerateClientAWGParams(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	client, err := s.manager.RegenerateAWGParams(id, s.collector.WithRequiredSnapshot)
+	if err != nil {
+		status := clientUpdateErrorStatus(err)
+
+		if status == http.StatusInternalServerError {
+			log.Printf("client operation failed: operation=regenerate_awg_params client_id=%q status=%d error=%v", id, status, err)
+		} else {
+			log.Printf("client operation failed: operation=regenerate_awg_params client_id=%q status=%d", id, status)
 		}
 
 		writeError(w, err, status)
@@ -213,6 +244,33 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(toResponse(*client))
 }
 
+func clientUpdateErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, awg.ErrRollbackFailed):
+		return http.StatusInternalServerError
+	case errors.Is(err, clients.ErrClientNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, awg.ErrInvalidParams):
+		return http.StatusBadRequest
+	case errors.Is(err, awg.ErrInvalidPort):
+		return http.StatusBadRequest
+	case errors.Is(err, clients.ErrInvalidRouting):
+		return http.StatusBadRequest
+	case errors.Is(err, clients.ErrEmptyClientUpdate):
+		return http.StatusBadRequest
+	case errors.Is(err, awg.ErrPortInUse):
+		return http.StatusConflict
+	case errors.Is(err, awg.ErrPortShared):
+		return http.StatusConflict
+	case errors.Is(err, awg.ErrProfilePortConflict):
+		return http.StatusConflict
+	case errors.Is(err, awg.ErrMaxInterfacesReached):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
 func (s *Server) handleGetConfiguration(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
@@ -221,6 +279,8 @@ func (s *Server) handleGetConfiguration(w http.ResponseWriter, r *http.Request) 
 		status := http.StatusInternalServerError
 		if errors.Is(err, clients.ErrClientNotFound) {
 			status = http.StatusNotFound
+		} else {
+			log.Printf("get client configuration error: %v", err)
 		}
 
 		writeError(w, err, status)
@@ -245,6 +305,8 @@ func (s *Server) handleGetClientStats(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, clients.ErrClientNotFound) {
 			status = http.StatusNotFound
+		} else {
+			log.Printf("get client stats error: %v", err)
 		}
 
 		writeError(w, err, status)
@@ -274,6 +336,8 @@ func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, clients.ErrClientNotFound) {
 			status = http.StatusNotFound
+		} else {
+			log.Printf("get client for deletion error: %v", err)
 		}
 
 		writeError(w, err, status)

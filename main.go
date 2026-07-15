@@ -45,6 +45,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("load storage: %v", err)
 	}
+	if len(data.Clients) > 0 && (data.ServerPrivateKey == "" || data.GeneratedParams == nil) {
+		log.Fatal("validate storage: persisted clients require server_private_key and generated_params")
+	}
 
 	var privateKey [32]byte
 
@@ -129,24 +132,33 @@ func main() {
 	collector := usage.NewCollector(cfg.DataDir, pool.InterfaceNames, awg.ShowDump)
 
 	collectorCtx, collectorCancel := context.WithCancel(context.Background())
+	collectorDone := make(chan struct{})
 
-	go collector.Run(collectorCtx)
+	go func() {
+		defer close(collectorDone)
+		collector.Run(collectorCtx)
+	}()
 
 	srv := api.NewServer(mgr, cfg, collector)
 
+	serverErrCh := make(chan error, 1)
+
 	go func() {
-		if err := srv.Start(); err != nil {
-			log.Printf("HTTP server stopped: %v", err)
-		}
+		serverErrCh <- srv.Start()
 	}()
 
 	sigCh := make(chan os.Signal, 1)
 
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	sig := <-sigCh
+	var serverErr error
 
-	log.Printf("received signal %s, shutting down...", sig)
+	select {
+	case sig := <-sigCh:
+		log.Printf("received signal %s, shutting down...", sig)
+	case serverErr = <-serverErrCh:
+		log.Printf("HTTP server stopped unexpectedly, shutting down: %v", serverErr)
+	}
 
 	collectorCancel()
 
@@ -157,6 +169,8 @@ func main() {
 		log.Printf("HTTP server shutdown error: %v", err)
 	}
 
+	<-collectorDone
+
 	collector.Collect()
 
 	if err := collector.Save(); err != nil {
@@ -164,6 +178,9 @@ func main() {
 	}
 
 	pool.Close()
+	if serverErr != nil {
+		log.Fatalf("HTTP server stopped unexpectedly: %v", serverErr)
+	}
 
 	log.Println("shutdown complete")
 }
@@ -183,7 +200,7 @@ func runUpdate() {
 
 	fmt.Printf("updating %s -> %s...\n", version, result.Latest)
 
-	if err := u.Apply(result.DownloadURL); err != nil {
+	if err := u.Apply(result); err != nil {
 		log.Fatalf("apply update: %v", err)
 	}
 

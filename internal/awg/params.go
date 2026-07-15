@@ -3,9 +3,7 @@ package awg
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"net/netip"
 )
 
 const MinPort = 1024
@@ -17,13 +15,19 @@ const MaxPersistentKeepalive = 65535
 
 var ErrInvalidPort = fmt.Errorf("port must be 0 or between %d and %d", MinPort, MaxPort)
 var ErrInvalidPersistentKeepalive = fmt.Errorf("persistent_keepalive must be between 0 and %d", MaxPersistentKeepalive)
-var ErrInvalidDNS = errors.New("dns must be empty or a valid IPv4 address")
 
 type AWGParams struct {
-	Port                int    `json:"port,omitempty"`
-	ClientListenPort    int    `json:"client_listen_port,omitempty"`
-	MTU                 int    `json:"mtu,omitempty"`
-	DNS                 string `json:"dns,omitempty"`
+	Port             int      `json:"port,omitempty"`
+	ClientListenPort int      `json:"client_listen_port,omitempty"`
+	MTU              int      `json:"mtu,omitempty"`
+	DNS              string   `json:"dns,omitempty"`
+	DNSMode          string   `json:"dns_mode,omitempty"`
+	DNSServers       []string `json:"dns_servers,omitempty"`
+
+	dnsSet        bool
+	dnsModeSet    bool
+	dnsServersSet bool
+
 	PersistentKeepalive *int   `json:"persistent_keepalive,omitempty"`
 	Jc                  int    `json:"jc,omitempty"`
 	Jmin                int    `json:"jmin,omitempty"`
@@ -62,19 +66,6 @@ func ValidateMTU(mtu int) error {
 
 	if mtu < MinMTU || mtu > MaxMTU {
 		return fmt.Errorf("mtu must be between %d and %d", MinMTU, MaxMTU)
-	}
-
-	return nil
-}
-
-func ValidateDNS(dns string) error {
-	if dns == "" {
-		return nil
-	}
-
-	ip, err := netip.ParseAddr(dns)
-	if err != nil || !ip.Is4() {
-		return ErrInvalidDNS
 	}
 
 	return nil
@@ -248,7 +239,7 @@ func GenerateParams() (*GeneratedParams, error) {
 		return nil, fmt.Errorf("generate h4: %w", err)
 	}
 
-	s1, err := randIntRange(15, 150)
+	s1, err := randIntRange(15, 151)
 	if err != nil {
 		return nil, fmt.Errorf("generate s1: %w", err)
 	}
@@ -256,7 +247,7 @@ func GenerateParams() (*GeneratedParams, error) {
 	var s2 int
 
 	for {
-		s2, err = randIntRange(15, 150)
+		s2, err = randIntRange(15, 151)
 		if err != nil {
 			return nil, fmt.Errorf("generate s2: %w", err)
 		}
@@ -270,6 +261,22 @@ func GenerateParams() (*GeneratedParams, error) {
 		H1: h1, H2: h2, H3: h3, H4: h4,
 		S1: s1, S2: s2,
 	}, nil
+}
+
+func ApplyGeneratedParams(params *AWGParams, generated GeneratedParams) *AWGParams {
+	result := cloneAWGParams(params)
+	if result == nil {
+		result = &AWGParams{}
+	}
+
+	result.H1 = generated.H1
+	result.H2 = generated.H2
+	result.H3 = generated.H3
+	result.H4 = generated.H4
+	result.S1 = generated.S1
+	result.S2 = generated.S2
+
+	return result
 }
 
 func generateHRange(tierMin, tierMax uint32) (string, error) {

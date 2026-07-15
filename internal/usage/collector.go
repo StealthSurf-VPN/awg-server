@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"github.com/stealthsurf-vpn/awg-server/internal/awg"
 )
 
+var ErrSnapshotFailed = errors.New("required usage snapshot failed")
+
 type PeerStats struct {
 	TotalRx       int64     `json:"total_rx"`
 	TotalTx       int64     `json:"total_tx"`
@@ -22,11 +25,12 @@ type PeerStats struct {
 }
 
 type Collector struct {
-	mu       sync.RWMutex
-	filePath string
-	stats    map[string]*PeerStats
-	ifacesFn func() []string
-	dumpFn   func(string) ([]awg.PeerDump, error)
+	collectMu sync.Mutex
+	mu        sync.RWMutex
+	filePath  string
+	stats     map[string]*PeerStats
+	ifacesFn  func() []string
+	dumpFn    func(string) ([]awg.PeerDump, error)
 }
 
 func NewCollector(dataDir string, ifacesFn func() []string, dumpFn func(string) ([]awg.PeerDump, error)) *Collector {
@@ -69,6 +73,25 @@ func (c *Collector) Run(ctx context.Context) {
 }
 
 func (c *Collector) Collect() {
+	c.collectMu.Lock()
+	defer c.collectMu.Unlock()
+
+	c.collect(false)
+}
+
+func (c *Collector) WithRequiredSnapshot(action func() error) error {
+	c.collectMu.Lock()
+	defer c.collectMu.Unlock()
+
+	if err := c.collect(true); err != nil {
+		log.Printf("warning: required usage snapshot failed: %v", err)
+		return ErrSnapshotFailed
+	}
+
+	return action()
+}
+
+func (c *Collector) collect(requireComplete bool) error {
 	ifaces := c.ifacesFn()
 
 	var allPeers []awg.PeerDump
@@ -76,7 +99,19 @@ func (c *Collector) Collect() {
 	for _, ifName := range ifaces {
 		peers, err := c.dumpFn(ifName)
 		if err != nil {
+			if requireComplete {
+				return fmt.Errorf("dump interface %s: %w", ifName, err)
+			}
+
 			log.Printf("warning: failed to dump interface %s: %v", ifName, err)
+			continue
+		}
+		if len(peers) == 0 {
+			if requireComplete {
+				return fmt.Errorf("dump interface %s: no peers returned", ifName)
+			}
+
+			log.Printf("warning: interface %s returned no peers", ifName)
 			continue
 		}
 
@@ -122,6 +157,8 @@ func (c *Collector) Collect() {
 			stats.LastHandshake = p.LastHandshake
 		}
 	}
+
+	return nil
 }
 
 func (c *Collector) GetStats(publicKey string) (PeerStats, bool) {
@@ -175,9 +212,25 @@ func (c *Collector) load() error {
 		return fmt.Errorf("read usage file: %w", err)
 	}
 
-	if err := json.Unmarshal(data, &c.stats); err != nil {
+	var loaded map[string]*PeerStats
+
+	if err := json.Unmarshal(data, &loaded); err != nil {
 		return fmt.Errorf("parse usage file: %w", err)
 	}
+	if loaded == nil {
+		return errors.New("parse usage file: expected a JSON object")
+	}
+
+	for _, stats := range loaded {
+		if stats == nil {
+			return errors.New("parse usage file: null peer stats entry")
+		}
+		if stats.TotalRx < 0 || stats.TotalTx < 0 || stats.LastRawRx < 0 || stats.LastRawTx < 0 {
+			return errors.New("parse usage file: negative traffic counter")
+		}
+	}
+
+	c.stats = loaded
 
 	return nil
 }

@@ -13,6 +13,8 @@ The StealthSurf NestJS backend uses this API to create, update, inspect, and del
 - Build: `go build -o awg-server .`
 - Build with a version: `make build VERSION=1.0.0`
 - Test: `go test ./...`
+- Race-test the complete API/package suite: `go test -race -count=1 ./...`
+- Test release automation: `bash scripts/release-marker_test.sh && bash scripts/release-notes_test.sh && bash scripts/release-previous-tag_test.sh`
 - Static analysis: `go vet ./...`
 - Format changed Go files: `gofmt -w <files>`
 - Build all release targets: `make build-all VERSION=1.0.0`
@@ -87,4 +89,5 @@ More than one rule file can apply to the same task. When a rule conflicts with t
 - API contract: `docs/api.md`
 - Environment variables and persistence shape: `docs/configuration.md`
 - Host installation and deployment: `docs/installation.md`
+- CI and automated release: `docs/ci-cd.md`
 - Shared-instruction layout and migration guide: `.ai/README.md`

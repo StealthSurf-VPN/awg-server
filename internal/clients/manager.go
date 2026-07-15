@@ -13,9 +13,12 @@ import (
 	"github.com/stealthsurf-vpn/awg-server/internal/config"
 )
 
+const maxRegenerationAttempts = 8
+
 var ErrClientExists = errors.New("client already exists")
 var ErrClientNotFound = errors.New("client not found")
 var ErrEmptyClientUpdate = errors.New("at least one of awg_params or routing is required")
+var ErrGeneratedParamsUnchanged = errors.New("failed to generate distinct awg params")
 
 type ClientUpdate struct {
 	AWGParams    *awg.AWGParams
@@ -24,9 +27,19 @@ type ClientUpdate struct {
 	RoutingSet   bool
 }
 
+type MigrationGuard func(func() error) error
+
+type devicePool interface {
+	AddPeer(awg.AWGParams, [32]byte, *[32]byte, string) error
+	RemovePeer(awg.AWGParams, [32]byte, string) error
+	MigratePeer(awg.AWGParams, awg.AWGParams, [32]byte, *[32]byte, string) error
+	PortForParams(awg.AWGParams) (int, error)
+	PublicKey() [32]byte
+}
+
 type Manager struct {
 	mu            sync.RWMutex
-	pool          *awg.Pool
+	pool          devicePool
 	storage       *Storage
 	config        *config.Config
 	defaultParams awg.AWGParams
@@ -35,7 +48,41 @@ type Manager struct {
 	data          *StorageData
 }
 
-func NewManager(pool *awg.Pool, storage *Storage, cfg *config.Config, defaultParams awg.AWGParams, data *StorageData) (*Manager, error) {
+func (m *Manager) prospectiveData() StorageData {
+	data := *m.data
+	data.Clients = append([]ClientData(nil), m.data.Clients...)
+
+	return data
+}
+
+type persistenceError struct {
+	operation   string
+	saveErr     error
+	rollbackErr error
+}
+
+func (e *persistenceError) Error() string {
+	message := e.operation + ": " + e.saveErr.Error()
+	if e.rollbackErr != nil {
+		message += "; rollback device state: " + e.rollbackErr.Error()
+	}
+
+	return message
+}
+
+func (e *persistenceError) Unwrap() error {
+	return e.saveErr
+}
+
+func persistenceFailure(operation string, saveErr, rollbackErr error) error {
+	return &persistenceError{
+		operation:   operation,
+		saveErr:     saveErr,
+		rollbackErr: rollbackErr,
+	}
+}
+
+func NewManager(pool devicePool, storage *Storage, cfg *config.Config, defaultParams awg.AWGParams, data *StorageData) (*Manager, error) {
 	m := &Manager{
 		pool:          pool,
 		storage:       storage,
@@ -46,26 +93,35 @@ func NewManager(pool *awg.Pool, storage *Storage, cfg *config.Config, defaultPar
 		data:          data,
 	}
 
-	var restored []ClientData
-
 	for _, c := range data.Clients {
 		pubKey, err := awg.Base64ToKey(c.PublicKey)
 		if err != nil {
-			log.Printf("skip client %s: invalid public key: %v", c.ID, err)
-			continue
+			return nil, fmt.Errorf("restore client %q: decode public key: %w", c.ID, err)
+		}
+
+		privateKey, err := awg.Base64ToKey(c.PrivateKey)
+		if err != nil {
+			return nil, fmt.Errorf("restore client %q: decode private key: %w", c.ID, err)
+		}
+		if awg.PublicKeyFromPrivate(privateKey) != pubKey {
+			return nil, fmt.Errorf("restore client %q: private and public keys do not match", c.ID)
 		}
 
 		presharedKey, err := decodePresharedKey(c.PresharedKey)
 		if err != nil {
-			log.Printf("skip client %s: invalid preshared key: %v", c.ID, err)
-			continue
+			return nil, fmt.Errorf("restore client %q: %w", c.ID, err)
 		}
 
-		params := m.effectiveParams(c.AWGParams)
+		params, err := m.validatedParams(c.AWGParams)
+		if err != nil {
+			return nil, fmt.Errorf("restore client %q: validate awg params: %w", c.ID, err)
+		}
+		if _, err := NormalizeRouting(c.Routing); err != nil {
+			return nil, fmt.Errorf("restore client %q: validate routing: %w", c.ID, err)
+		}
 
 		if err := pool.AddPeer(params, pubKey, presharedKey, c.Address); err != nil {
-			log.Printf("skip client %s: failed to add peer: %v", c.ID, err)
-			continue
+			return nil, fmt.Errorf("restore client %q: add peer: %w", c.ID, err)
 		}
 
 		cp := c
@@ -73,12 +129,8 @@ func NewManager(pool *awg.Pool, storage *Storage, cfg *config.Config, defaultPar
 
 		m.usedIPs[c.Address] = true
 
-		restored = append(restored, c)
-
 		log.Printf("restored client %s (%s)", c.ID, c.Address)
 	}
-
-	data.Clients = restored
 
 	log.Printf("loaded %d clients from storage", len(m.clients))
 
@@ -88,6 +140,13 @@ func NewManager(pool *awg.Pool, storage *Storage, cfg *config.Config, defaultPar
 func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Routing) (*ClientData, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	normalizedParams, err := awg.NormalizeOverrides(params)
+	if err != nil {
+		return nil, err
+	}
+
+	params = normalizedParams
 
 	normalizedRouting, err := NormalizeRouting(routing)
 	if err != nil {
@@ -120,10 +179,6 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Rout
 		return nil, fmt.Errorf("allocate IP: %w", err)
 	}
 
-	if err := m.pool.AddPeer(effective, pubKey, &presharedKey, ip); err != nil {
-		return nil, fmt.Errorf("add peer to device: %w", err)
-	}
-
 	client := &ClientData{
 		ID:           name,
 		PrivateKey:   awg.KeyToBase64(privKey),
@@ -135,15 +190,22 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Rout
 		Routing:      normalizedRouting,
 	}
 
-	m.clients[client.ID] = client
+	prospective := m.prospectiveData()
+	prospective.Clients = append(prospective.Clients, *client)
 
-	m.usedIPs[ip] = true
-
-	m.data.Clients = append(m.data.Clients, *client)
-
-	if err := m.storage.Save(m.data); err != nil {
-		log.Printf("warning: failed to save storage: %v", err)
+	if err := m.pool.AddPeer(effective, pubKey, &presharedKey, ip); err != nil {
+		return nil, fmt.Errorf("add peer to device: %w", err)
 	}
+
+	if err := m.storage.Save(&prospective); err != nil {
+		rollbackErr := m.pool.RemovePeer(effective, pubKey, ip)
+
+		return nil, persistenceFailure("save created client", err, rollbackErr)
+	}
+
+	m.clients[client.ID] = client
+	m.usedIPs[ip] = true
+	*m.data = prospective
 
 	cp := *client
 	return &cp, nil
@@ -172,7 +234,7 @@ func resolveClientUpdate(client *ClientData, update ClientUpdate) (*awg.AWGParam
 	return params, routing, nil
 }
 
-func (m *Manager) UpdateClient(id string, update ClientUpdate) (*ClientData, error) {
+func (m *Manager) UpdateClient(id string, update ClientUpdate, migrationGuard MigrationGuard) (*ClientData, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -186,49 +248,154 @@ func (m *Manager) UpdateClient(id string, update ClientUpdate) (*ClientData, err
 		return nil, err
 	}
 
-	if update.AWGParamsSet {
-		oldParams := m.effectiveParams(client.AWGParams)
+	return m.applyClientUpdateLocked(client, params, routing, update.AWGParamsSet, migrationGuard)
+}
 
-		newParams, err := m.validatedParams(params)
+func (m *Manager) RegenerateAWGParams(id string, migrationGuard MigrationGuard) (*ClientData, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	client, ok := m.clients[id]
+	if !ok {
+		return nil, ErrClientNotFound
+	}
+
+	if migrationGuard == nil {
+		return nil, errors.New("migration guard is required")
+	}
+
+	oldKey := m.effectiveParams(client.AWGParams).Key()
+
+	for attempt := 0; attempt < maxRegenerationAttempts; attempt++ {
+		generated, err := awg.GenerateParams()
+		if err != nil {
+			return nil, fmt.Errorf("generate awg params: %w", err)
+		}
+
+		candidate := awg.ApplyGeneratedParams(client.AWGParams, *generated)
+
+		normalized, err := awg.NormalizeOverrides(candidate)
 		if err != nil {
 			return nil, err
 		}
 
-		needsMigration := oldParams.Key() != newParams.Key() || oldParams.Port != newParams.Port
-
-		if needsMigration {
-			pubKey, err := awg.Base64ToKey(client.PublicKey)
-			if err != nil {
-				return nil, fmt.Errorf("decode public key: %w", err)
-			}
-
-			presharedKey, err := decodePresharedKey(client.PresharedKey)
-			if err != nil {
-				return nil, err
-			}
-
-			if err := m.pool.MigratePeer(oldParams, newParams, pubKey, presharedKey, client.Address); err != nil {
-				return nil, fmt.Errorf("migrate peer: %w", err)
-			}
+		effective, err := m.validatedParams(normalized)
+		if err != nil {
+			return nil, err
 		}
+
+		if effective.Key() == oldKey {
+			continue
+		}
+
+		return m.applyClientUpdateLocked(client, normalized, client.Routing, true, migrationGuard)
 	}
 
-	client.AWGParams = params
-	client.Routing = routing
+	return nil, ErrGeneratedParamsUnchanged
+}
 
-	for i, c := range m.data.Clients {
-		if c.ID == id {
-			m.data.Clients[i] = *client
+func (m *Manager) applyClientUpdateLocked(client *ClientData, params *awg.AWGParams, routing *Routing, awgParamsSet bool, migrationGuard MigrationGuard) (*ClientData, error) {
+	oldParams := m.effectiveParams(client.AWGParams)
+	newParams := oldParams
+	migrationRequired := false
+
+	if awgParamsSet {
+		normalized, err := awg.NormalizeOverrides(params)
+		if err != nil {
+			return nil, err
+		}
+
+		params = normalized
+
+		newParams, err = m.validatedParams(params)
+		if err != nil {
+			return nil, err
+		}
+
+		migrationRequired = oldParams.Key() != newParams.Key() || oldParams.Port != newParams.Port
+	}
+
+	nextClient := *client
+	nextClient.AWGParams = params
+	nextClient.Routing = routing
+
+	prospective := m.prospectiveData()
+	storedClientFound := false
+
+	for i, stored := range prospective.Clients {
+		if stored.ID == client.ID {
+			prospective.Clients[i] = nextClient
+			storedClientFound = true
 			break
 		}
 	}
 
-	if err := m.storage.Save(m.data); err != nil {
-		log.Printf("warning: failed to save storage: %v", err)
+	if !storedClientFound {
+		return nil, fmt.Errorf("prepare client update: client %q missing from storage", client.ID)
 	}
 
-	cp := *client
-	return &cp, nil
+	commit := func() {
+		m.clients[client.ID] = &nextClient
+		*m.data = prospective
+	}
+
+	if !migrationRequired {
+		if err := m.storage.Save(&prospective); err != nil {
+			return nil, persistenceFailure("save client update", err, nil)
+		}
+
+		commit()
+
+		result := nextClient
+		return &result, nil
+	}
+
+	if migrationGuard == nil {
+		return nil, errors.New("migration guard is required")
+	}
+
+	publicKey, err := awg.Base64ToKey(client.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("decode public key: %w", err)
+	}
+
+	presharedKey, err := decodePresharedKey(client.PresharedKey)
+	if err != nil {
+		return nil, err
+	}
+
+	transaction := func() error {
+		oldPort, err := m.pool.PortForParams(oldParams)
+		if err != nil {
+			return fmt.Errorf("get current port before migration: %w", err)
+		}
+
+		rollbackParams := oldParams
+		rollbackParams.Port = oldPort
+
+		if err := m.pool.MigratePeer(oldParams, newParams, publicKey, presharedKey, client.Address); err != nil {
+			return fmt.Errorf("migrate peer: %w", err)
+		}
+
+		if err := m.storage.Save(&prospective); err != nil {
+			rollbackErr := m.pool.MigratePeer(newParams, rollbackParams, publicKey, presharedKey, client.Address)
+
+			return persistenceFailure("save client update", err, rollbackErr)
+		}
+
+		commit()
+
+		return nil
+	}
+
+	err = migrationGuard(transaction)
+
+	if err != nil {
+		return nil, err
+	}
+
+	result := nextClient
+	return &result, nil
 }
 
 func (m *Manager) ListClients() []ClientData {
@@ -271,29 +438,52 @@ func (m *Manager) DeleteClient(id string) error {
 		return fmt.Errorf("decode public key: %w", err)
 	}
 
+	presharedKey, err := decodePresharedKey(client.PresharedKey)
+	if err != nil {
+		return err
+	}
+
 	params := m.effectiveParams(client.AWGParams)
+	currentPort, err := m.pool.PortForParams(params)
+	if err != nil {
+		return fmt.Errorf("get current port before deletion: %w", err)
+	}
+
+	rollbackParams := params
+	rollbackParams.Port = currentPort
+
+	prospective := m.prospectiveData()
+	newClients := make([]ClientData, 0, len(prospective.Clients))
+	storedClientFound := false
+
+	for _, stored := range prospective.Clients {
+		if stored.ID == id {
+			storedClientFound = true
+			continue
+		}
+
+		newClients = append(newClients, stored)
+	}
+
+	if !storedClientFound {
+		return fmt.Errorf("prepare client deletion: client %q missing from storage", id)
+	}
+
+	prospective.Clients = newClients
 
 	if err := m.pool.RemovePeer(params, pubKey, client.Address); err != nil {
 		return fmt.Errorf("remove peer from device: %w", err)
 	}
 
+	if err := m.storage.Save(&prospective); err != nil {
+		rollbackErr := m.pool.AddPeer(rollbackParams, pubKey, presharedKey, client.Address)
+
+		return persistenceFailure("save deleted client", err, rollbackErr)
+	}
+
 	delete(m.usedIPs, client.Address)
-
 	delete(m.clients, id)
-
-	newClients := make([]ClientData, 0, len(m.data.Clients)-1)
-
-	for _, c := range m.data.Clients {
-		if c.ID != id {
-			newClients = append(newClients, c)
-		}
-	}
-
-	m.data.Clients = newClients
-
-	if err := m.storage.Save(m.data); err != nil {
-		log.Printf("warning: failed to save storage: %v", err)
-	}
+	*m.data = prospective
 
 	return nil
 }
@@ -316,10 +506,10 @@ func (m *Manager) GetClientConfig(id string) (string, error) {
 		return "", fmt.Errorf("get port for params: %w", err)
 	}
 
-	return renderClientConfig(client, params, serverPubKey, m.config.Endpoint, port), nil
+	return renderClientConfig(client, params, serverPubKey, m.config.Endpoint, port)
 }
 
-func renderClientConfig(client *ClientData, params awg.AWGParams, serverPubKey [32]byte, endpoint string, port int) string {
+func renderClientConfig(client *ClientData, params awg.AWGParams, serverPubKey [32]byte, endpoint string, port int) (string, error) {
 	cfg := fmt.Sprintf(`[Interface]
 PrivateKey = %s`, client.PrivateKey)
 
@@ -328,10 +518,11 @@ PrivateKey = %s`, client.PrivateKey)
 ListenPort = %d`, params.ClientListenPort)
 	}
 
-	cfg += fmt.Sprintf(`
-Address = %s/32
-DNS = %s
-MTU = %d`, client.Address, params.DNS, params.MTU)
+	cfg += fmt.Sprintf("\nAddress = %s/32", client.Address)
+	if dns, includeDNS := awg.ResolveDNS(client.AWGParams, params.DNS); includeDNS {
+		cfg += fmt.Sprintf("\nDNS = %s", dns)
+	}
+	cfg += fmt.Sprintf("\nMTU = %d", params.MTU)
 
 	cfg += params.ConfigLines()
 
@@ -345,14 +536,17 @@ PublicKey = %s`, awg.KeyToBase64(serverPubKey))
 PresharedKey = %s`, client.PresharedKey)
 	}
 
-	allowedIPs := routingAllowedIPs(client.Routing)
+	allowedIPs, err := routingAllowedIPs(client.Routing)
+	if err != nil {
+		return "", fmt.Errorf("render routing allowed IPs: %w", err)
+	}
 
 	cfg += fmt.Sprintf(`
 Endpoint = %s:%d
 AllowedIPs = %s
 PersistentKeepalive = %d`, endpoint, port, allowedIPs, params.PersistentKeepaliveValue())
 
-	return cfg
+	return cfg, nil
 }
 
 func decodePresharedKey(encoded string) (*[32]byte, error) {

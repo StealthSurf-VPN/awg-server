@@ -53,8 +53,8 @@ func ValidateOverrides(params *AWGParams) error {
 		return validationFrom("mtu", err)
 	}
 
-	if err := ValidateDNS(params.DNS); err != nil {
-		return validationFrom("dns", err)
+	if err := validateDNSSettings(params); err != nil {
+		return err
 	}
 
 	if err := ValidatePersistentKeepalive(params.PersistentKeepalive); err != nil {

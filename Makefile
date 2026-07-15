@@ -10,12 +10,16 @@ PLATFORMS := \
 	windows/arm64
 
 VERSION ?= dev
+RELEASE_PUBLIC_KEY ?=
 LDFLAGS := -s -w -X main.version=$(VERSION)
+ifneq ($(RELEASE_PUBLIC_KEY),)
+LDFLAGS += -X github.com/stealthsurf-vpn/awg-server/internal/update.releasePublicKey=$(RELEASE_PUBLIC_KEY)
+endif
 
 .PHONY: build build-all clean vet
 
 build:
-	go build -ldflags="$(LDFLAGS)" -o $(BINARY_NAME) .
+	go build -trimpath -ldflags="$(LDFLAGS)" -o $(BINARY_NAME) .
 
 build-all: clean
 	@mkdir -p $(DIST_DIR)
@@ -24,7 +28,7 @@ build-all: clean
 		$(eval ARCH := $(word 2,$(subst /, ,$(platform)))) \
 		$(eval EXT := $(if $(filter windows,$(OS)),.exe,)) \
 		echo "Building $(OS)/$(ARCH)..." && \
-		CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build \
+		CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build -trimpath \
 			-ldflags="$(LDFLAGS)" \
 			-o $(DIST_DIR)/$(BINARY_NAME)-$(OS)-$(ARCH)$(EXT) . && \
 	) true

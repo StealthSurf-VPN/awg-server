@@ -8,11 +8,15 @@ Every newly created client also receives a unique, server-generated WireGuard pr
 
 ## Quick Install (Linux)
 
-One-liner that installs AmneziaWG 2.0, downloads the latest `awg-server` binary, and gets you ready to run:
+This example installs AmneziaWG 2.0 and one exact signed `awg-server` release. Before running it, obtain both the intended stable `MAJOR.MINOR.PATCH` version and the project's Ed25519 release public key through a trusted administrative channel, export that version as `AWG_VERSION`, and install the key at `/etc/awg-server/release-signing-public.pem`. Legacy unsigned releases and mutable `latest` aliases are intentionally rejected.
 
 ```bash
+set -Eeuo pipefail
+: "${AWG_VERSION:?export the trusted release version as AWG_VERSION=MAJOR.MINOR.PATCH}"
+[[ $AWG_VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
 # 1. Install AmneziaWG 2.0 kernel module (DKMS, from source)
-apt update && apt install -y build-essential git dkms linux-headers-$(uname -r)
+apt update && apt install -y build-essential curl git dkms openssl linux-headers-$(uname -r)
 git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git /tmp/amneziawg-module
 cd /tmp/amneziawg-module/src
 make dkms-install
@@ -31,9 +35,34 @@ rm -rf /tmp/amneziawg-tools
 sysctl -w net.ipv4.ip_forward=1
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 
-# 4. Download latest awg-server
-curl -fsSL https://github.com/stealthsurf-vpn/awg-server/releases/latest/download/awg-server-linux-$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') -o /usr/local/bin/awg-server
-chmod +x /usr/local/bin/awg-server
+# 4. Download and verify the exact signed awg-server release
+case "$(uname -m)" in
+  x86_64) ASSET=awg-server-linux-amd64 ;;
+  aarch64|arm64) ASSET=awg-server-linux-arm64 ;;
+  *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+RELEASE_DIR=$(mktemp -d)
+trap 'rm -rf "$RELEASE_DIR"' EXIT
+RELEASE_URL="https://github.com/StealthSurf-VPN/awg-server/releases/download/v$AWG_VERSION"
+curl -fL "$RELEASE_URL/$ASSET" -o "$RELEASE_DIR/$ASSET"
+curl -fL "$RELEASE_URL/SHA256SUMS" -o "$RELEASE_DIR/SHA256SUMS"
+curl -fL "$RELEASE_URL/SHA256SUMS.sig" -o "$RELEASE_DIR/SHA256SUMS.sig"
+KEY_DESCRIPTION=$(openssl pkey -pubin -in /etc/awg-server/release-signing-public.pem -text -noout)
+KEY_TYPE=${KEY_DESCRIPTION%%$'\n'*}
+unset KEY_DESCRIPTION
+test "$KEY_TYPE" = 'ED25519 Public-Key:'
+openssl pkeyutl -verify -rawin -pubin \
+  -inkey /etc/awg-server/release-signing-public.pem \
+  -sigfile "$RELEASE_DIR/SHA256SUMS.sig" \
+  -in "$RELEASE_DIR/SHA256SUMS"
+CHECKSUM_LINE=$(grep -E "^[0-9a-f]{64}  ${ASSET}$" "$RELEASE_DIR/SHA256SUMS")
+test "$(printf '%s\n' "$CHECKSUM_LINE" | grep -c .)" -eq 1
+(cd "$RELEASE_DIR" && printf '%s\n' "$CHECKSUM_LINE" | sha256sum --check --strict -)
+chmod 0755 "$RELEASE_DIR/$ASSET"
+test "$("$RELEASE_DIR/$ASSET" version)" = "awg-server $AWG_VERSION"
+install -o root -g root -m 0755 "$RELEASE_DIR/$ASSET" /usr/local/bin/awg-server
+rm -rf "$RELEASE_DIR"
+trap - EXIT
 
 # 5. Create data directory
 mkdir -p /data
@@ -58,6 +87,8 @@ Environment=AWG_ENDPOINT=your.server.ip
 # Environment=AWG_JC=5
 # Environment=AWG_JMIN=50
 # Environment=AWG_JMAX=1000
+# Environment=AWG_S3=0
+# Environment=AWG_S4=0
 # Environment=AWG_LISTEN_PORT=51820
 # Environment=AWG_HTTP_PORT=7777
 # Environment=AWG_DNS=1.1.1.1
@@ -93,32 +124,58 @@ journalctl -u awg-server -f
 # Check current version
 awg-server version
 
-# Self-update to latest GitHub release
+# Cryptographically verified self-update to the latest stable GitHub release
 awg-server update
 
 # Start the server (default, no arguments)
 awg-server
 ```
 
-After `awg-server update`, restart the service: `systemctl restart awg-server`.
+On Linux and macOS, `awg-server update` is enabled only in official release binaries that embed the Ed25519 release public key. It rejects non-stable versions, downgrades, concurrent updates, unexpected assets or URLs, invalid signatures, non-canonical manifests, checksum mismatches, and a binary whose embedded version does not match the release. It locks and rechecks the actual installed binary before any release asset download and immediately before replacement. A source build without `RELEASE_PUBLIC_KEY` fails closed before network access. Windows self-update also fails before network access because a running `.exe` cannot be replaced atomically; install a separately verified signed Windows asset instead. After a successful in-place update, restart the service: `systemctl restart awg-server`.
 
 ## Build
 
 ```bash
 # Build for current platform (with version)
 make build VERSION=1.0.0
+# -> ./awg-server
 
 # Build for all platforms (linux, darwin, windows × amd64, arm64)
-make build-all
+make build-all VERSION=1.0.0
+# -> dist/awg-server-<os>-<arch>[.exe]
 
 # Static analysis
 make vet
 
-# Clean build artifacts
+# Remove dist/ release artifacts (does not remove ./awg-server)
 make clean
 ```
 
-Requires Go 1.24+. Binaries are output to `dist/`.
+Requires Go 1.24+. `make build` writes the current-platform binary to `./awg-server`; `make build-all` recreates `dist/` and writes all six release targets there. The automated release workflow supplies the canonical base64-encoded Ed25519 public PEM through `RELEASE_PUBLIC_KEY`; ordinary source builds intentionally omit updater trust.
+
+## Tests and Automation
+
+```bash
+# Full deterministic API and package suite
+go test -race -count=1 ./...
+
+# Release marker contract
+bash scripts/release-marker_test.sh
+
+# Release notes contract
+bash scripts/release-notes_test.sh
+
+# Previous stable release selection
+bash scripts/release-previous-tag_test.sh
+
+# Required static checks
+go vet ./...
+go build -trimpath -o /tmp/awg-server .
+```
+
+The API suite runs the real router, handlers, manager, temporary JSON storage, routing/DNS/configuration logic, key generation, and usage collector while replacing only host-level AWG device operations. It covers every registered HTTP operation and does not require root, an AWG kernel module, or external network access.
+
+GitHub Actions runs these checks for pull requests and `main`. A strict `release:vMAJOR.MINOR.PATCH` marker in the immutable commit message that lands on `main` starts publication of all six platform binaries, checksums, and an Ed25519 signature after CI passes and the protected `release-signing` Environment is approved. The release description contains the matching changelog section followed by a clickable `Full Changelog` range from the previous stable release. Build scripts never receive the private signing key: a separate job without a source checkout or `GITHUB_TOKEN` permissions validates the unsigned artifact, requires an exact Ed25519 keypair match, and signs only the checksum manifest. The workflow publishes GitHub Releases only and never deploys binaries to servers. See [CI and release automation](docs/ci-cd.md) for the exact marker contract, release-note format, signing-key setup, release gates, GitHub settings, and manual fallback.
 
 ## Deploy
 
@@ -133,7 +190,21 @@ AWG_ENDPOINT=your.server.ip \
 
 ## API
 
-All endpoints require `Authorization: Bearer <AWG_API_TOKEN>`.
+All `/api` endpoints require `Authorization: Bearer <AWG_API_TOKEN>`.
+
+| Method | Path | Success |
+| ------ | ---- | ------- |
+| `GET` | `/health` | `200` (no authentication) |
+| `GET` | `/api/clients` | `200` |
+| `POST` | `/api/clients` | `201` |
+| `PATCH` | `/api/clients/{id}` | `200` |
+| `GET` | `/api/clients/{id}/configuration` | `200` |
+| `GET` | `/api/clients/{id}/stats` | `200` |
+| `DELETE` | `/api/clients/{id}` | `204` |
+| `POST` | `/api/awg-params/generate` | `200` |
+| `POST` | `/api/clients/{id}/regenerate-awg-params` | `200` |
+
+There is no single-client `GET /api/clients/{id}` route. Create and PATCH accept exactly one JSON value, limit the body to 1 MiB, and ignore unknown JSON fields; PATCH objects replace the supplied top-level field rather than merging it, while JSON `null` resets that field. Other handlers do not read request bodies. Wrong methods and unknown paths are handled by Go's `net/http` mux as `405` and `404` respectively. See the [API reference](docs/api.md#http-routing-authentication-and-bodies) for the complete status and error contract.
 
 ```bash
 # Health check (no auth)
@@ -152,7 +223,7 @@ curl -X POST http://localhost:7777/api/clients \
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"client_listen_port":54321,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":60,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s3":20,"h1":"100000-800000"}}'
+  -d '{"id":"my-client-uuid","awg_params":{"port":51825,"client_listen_port":54321,"mtu":1280,"dns":"9.9.9.9","persistent_keepalive":60,"jc":5,"jmin":50,"jmax":1000,"s1":40,"s2":80,"s3":20,"h1":"100000-800000"}}'
 
 # Update client listen port, MTU, DNS, persistent keepalive, and obfuscation params
 curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
@@ -165,6 +236,38 @@ curl -X PATCH http://localhost:7777/api/clients/my-client-uuid \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"routing":{"mode":"split","allowed_ips":["10.0.0.0/8","172.16.0.0/12"]}}'
+
+# Create a client with custom DNS servers
+curl -X POST http://localhost:7777/api/clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"demo-custom-dns","awg_params":{"dns_mode":"custom","dns_servers":["1.1.1.1","1.0.0.1"]}}'
+
+# Create a client that keeps the device's system DNS resolver
+curl -X POST http://localhost:7777/api/clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"demo-system-dns","awg_params":{"dns_mode":"system"}}'
+
+# Create a bypass client that routes everything except the excluded IPv4 CIDRs
+curl -X POST http://localhost:7777/api/clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"demo-bypass","routing":{"mode":"bypass","excluded_ips":["10.0.0.0/8","192.168.0.0/16"]}}'
+
+# Create a split client and subtract exclusions from its included IPv4 set
+curl -X POST http://localhost:7777/api/clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"demo-split","routing":{"mode":"split","allowed_ips":["10.0.0.0/8"],"excluded_ips":["10.20.0.0/16"]}}'
+
+# Generate a standalone H1-H4/S1-S2 fragment without changing server state
+curl -X POST http://localhost:7777/api/awg-params/generate \
+  -H "Authorization: Bearer $TOKEN"
+
+# Regenerate and apply H1-H4/S1-S2 for one client (no request body)
+curl -X POST http://localhost:7777/api/clients/demo-custom-dns/regenerate-awg-params \
+  -H "Authorization: Bearer $TOKEN"
 
 # Get client config (.conf)
 curl http://localhost:7777/api/clients/my-client-uuid/configuration \
@@ -180,7 +283,11 @@ curl -X DELETE http://localhost:7777/api/clients/my-client-uuid \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Routing mode `full` preserves the current full-tunnel behavior. Mode `split` accepts one or more IPv4 CIDRs and renders only those normalized prefixes in the generated client `AllowedIPs`. Routing is client-only: it does not change interface grouping or the server-side peer `/32`, and the updated configuration must be downloaded and reapplied on the client device.
+Routing mode `full` preserves full tunnel, `bypass` subtracts `excluded_ips` from all IPv4 routes, and `split` can subtract exclusions from its `allowed_ips`. Routing and DNS are client-only and do not change interface grouping or the server-side peer `/32`. After a routing, DNS, or per-client H/S regeneration change, fetch the generated configuration and reapply it on the client device. See the [API reference](docs/api.md) for validation, deterministic route subtraction, the 4,096/16,384 routing limits, error statuses, and the regeneration reapplication warning.
+
+Create, update, regeneration, and delete return a generic `500` when device work or `clients.json` persistence fails. The manager commits its in-memory client map only after persistence succeeds and attempts to restore device state when a later step fails. Rollback can itself fail, so a `500` never guarantees that live kernel state is pristine; inspect the server logs and AWG interfaces after device or storage failures. Startup is fail-fast: when persisted clients exist, both the top-level `server_private_key` and `generated_params` must exist; invalid or mismatched client keys, invalid persisted settings, or any client that cannot be restored also prevent the HTTP server from starting. Interfaces created before a failed restoration are cleaned up best-effort, and an HTTP bind failure terminates the process non-zero after cleanup.
+
+Usage is collected on startup and every 60 seconds and persisted in `{AWG_DATA_DIR}/usage.json`; shutdown performs a final collect/save. Every interface-level PATCH and per-client H/S regeneration takes a required complete snapshot before migration so counters from the old interface are accumulated first. A command error, malformed peer row, or active interface returning no peers aborts the update before mutation. The snapshot updates memory immediately but reaches `usage.json` on the next scheduled or shutdown save. Invalid persisted usage data is logged and replaced in memory with an empty stats map rather than crashing the collector.
 
 ## Configuration
 
@@ -191,10 +298,10 @@ Environment variables:
 | `AWG_API_TOKEN` | yes | — | Bearer token for API auth |
 | `AWG_ADDRESS` | yes | — | Server VPN address (CIDR), e.g. `10.0.0.1/24` |
 | `AWG_ENDPOINT` | yes | — | Public IP/hostname for client configs |
-| `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned sequentially; per-client `port` accepts 1024-65535, while omitted or zero uses automatic assignment) |
+| `AWG_LISTEN_PORT` | no | `51820` | Base WireGuard UDP port (auto-assigned sequentially; per-client `port` accepts 1024-65535, while omitted or zero uses automatic assignment). A new client can join a profile with port 0 or its actual port; PATCH rejects any stored port change while that profile is shared. |
 | `AWG_HTTP_PORT` | no | `7777` | HTTP API port |
 | `AWG_MTU` | no | `1420` | Default MTU for client configs (per-client override: `mtu` in `awg_params`, range 1280-1420) |
-| `AWG_DNS` | no | `1.1.1.1` | Default DNS for client configs (per-client override: one IPv4 in `awg_params.dns`) |
+| `AWG_DNS` | no | `1.1.1.1` | Default DNS inherited by omitted/default per-client settings; custom mode uses `dns_servers`, while system mode omits the client `DNS` line |
 | `AWG_DATA_DIR` | no | `/data` | Persistence directory |
 | `AWG_INTERFACE` | no | auto-detect | Override outbound network interface for NAT |
 | `AWG_MAX_INTERFACES` | no | `0` | Max AWG interfaces (0 = unlimited) |
@@ -224,7 +331,7 @@ These are reused across restarts. No env vars needed.
 
 Advanced clients can override `persistent_keepalive` through `awg_params`. Omit the field to use 25 seconds, set it to 0 to disable keepalive, or provide an interval from 1 through 65535. The new value takes effect after the generated configuration is downloaded and reapplied on the client device.
 
-Clients can override DNS with one IPv4 address in `awg_params.dns`. Omit it or send an empty string to inherit `AWG_DNS`. DoH URLs, hostnames, CIDRs, IPv6 addresses, and lists are rejected; DoH requires a separate client-side resolver or server-side DNS-to-DoH proxy. The new DNS value takes effect after the generated configuration is downloaded and reapplied on the client device.
+Clients can keep the legacy single-IPv4 `awg_params.dns` override or use `dns_mode`: `default` inherits `AWG_DNS`, `custom` renders the unique IPv4 values from `dns_servers`, and `system` omits the complete client `DNS` line. The legacy field cannot be combined with mode-based fields. See the [DNS contract](docs/api.md#dns-settings) for accepted shapes and validation. A DNS change takes effect after the generated configuration is downloaded and reapplied on the client device.
 
 Clients can set a local UDP port with `awg_params.client_listen_port` in the range 1024-65535. Omit it or set it to 0 to let the client choose automatically. This renders `ListenPort` in the client `[Interface]` and does not change the server `Endpoint` port.
 
@@ -281,9 +388,10 @@ AmneziaWG sets CPS obfuscation parameters at the **interface level**, not per-pe
 
 - Each unique set of CPS parameters gets its own `awgN` interface (awg0, awg1, awg2, ...)
 - Clients with identical CPS parameters share an interface
-- Per-client `mtu`, `dns`, `persistent_keepalive`, routing, and PSK do not affect interface grouping; PSK is also installed on the corresponding server peer
-- Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from base port)
-- Interfaces are created on demand and destroyed when their last peer is removed
+- Per-client `mtu`, all legacy and mode-based DNS fields, `persistent_keepalive`, all routing fields, and PSK do not affect interface grouping; PSK is also installed on the corresponding server peer
+- Each interface listens on its own UDP port (explicit `port` from `awg_params`, or auto-assigned sequentially from base port); every explicit port must also be open in the host firewall
+- A new client can join an existing profile with port 0 or the interface's actual port; a different explicit port is rejected with `409` before peer mutation, and PATCH rejects any stored port change while that profile is shared
+- Interfaces are created on demand and removed through coordinated peer/route/interface cleanup when their last peer is deleted; failures return `500` and trigger best-effort restoration
 - All interfaces share the same server private key
 
 ```text
@@ -292,6 +400,6 @@ main.go → config → awg (pool, params, keygen) → clients (manager, storage)
 
 - **Kernel module** — `amneziawg-linux-kernel-module` on host, `awg` CLI for management
 - **Static binary** — `CGO_ENABLED=0`, no external Go dependencies beyond `golang.org/x/crypto`
-- **Persistence** via JSON file with atomic writes
+- **Persistence** via temporary JSON files and rename, coordinated with device changes; rollback and crash durability are not absolute
 - **IP allocation** sequential from .2, freed IPs reusable
-- **Auth** Bearer token on all endpoints
+- **Auth** Bearer token on all `/api` endpoints; `/health` is unauthenticated
