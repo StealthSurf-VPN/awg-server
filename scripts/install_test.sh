@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+installer="$script_dir/install.sh"
+
+fail() {
+    printf 'install test failed: %s\n' "$1" >&2
+    exit 1
+}
+
+[[ -f $installer ]] || fail 'scripts/install.sh is missing'
+# shellcheck source=install.sh
+source "$installer"
+
+temp_dir=$(mktemp -d)
+trap 'rm -rf "$temp_dir"' EXIT
+
+assert_equal() {
+    local name=$1
+    local expected=$2
+    local actual=$3
+
+    [[ $actual == "$expected" ]] \
+        || fail "$name: expected '$expected', got '$actual'"
+}
+
+assert_rejected() {
+    local name=$1
+    shift
+
+    if ("$@") >"$temp_dir/stdout" 2>"$temp_dir/stderr"; then
+        fail "$name returned success"
+    fi
+}
+
+clear_config() {
+    local key
+
+    for key in "${CONFIG_KEYS[@]}"; do
+        unset "$key"
+    done
+}
+
+validate_version 0.0.0 || fail 'zero stable version was rejected'
+validate_version 12.34.56 || fail 'stable version was rejected'
+for version in latest v1.2.3 01.2.3 1.2.3-rc.1 1.2; do
+    assert_rejected "invalid version $version" validate_version "$version"
+done
+
+existing_config="$temp_dir/existing.env"
+explicit_config="$temp_dir/explicit.env"
+printf '%s\n' \
+    'AWG_API_TOKEN=existing-token' \
+    'AWG_ADDRESS=10.0.0.1/24' \
+    'AWG_ENDPOINT=existing.example.com' >"$existing_config"
+printf '%s\n' \
+    'AWG_API_TOKEN=explicit-token' \
+    'AWG_ADDRESS=10.1.0.1/24' >"$explicit_config"
+chmod 0600 "$existing_config" "$explicit_config"
+
+(
+    clear_config
+    AWG_API_TOKEN=process-token
+    capture_process_environment
+    load_config_file "$existing_config"
+    load_config_file "$explicit_config"
+    restore_process_environment
+
+    assert_equal 'process environment precedence' process-token "$AWG_API_TOKEN"
+    assert_equal 'explicit config precedence' 10.1.0.1/24 "$AWG_ADDRESS"
+    assert_equal 'existing config fallback' existing.example.com "$AWG_ENDPOINT"
+)
+
+if (
+    clear_config
+    require_setting AWG_API_TOKEN </dev/null
+) >"$temp_dir/stdout" 2>"$temp_dir/stderr"; then
+    fail 'missing non-interactive setting returned success'
+fi
+grep -Fq 'AWG_API_TOKEN is required' "$temp_dir/stderr" \
+    || fail 'missing non-interactive setting did not explain the failure'
+
+insecure_config="$temp_dir/insecure.env"
+printf '%s\n' 'AWG_API_TOKEN=insecure-token' >"$insecure_config"
+chmod 0622 "$insecure_config"
+assert_rejected 'group/world-writable config' load_config_file "$insecure_config"
+assert_rejected 'non-regular config' load_config_file "$temp_dir"
+
+rendered_config="$temp_dir/rendered.env"
+(
+    clear_config
+    AWG_API_TOKEN='token with spaces and $shell syntax'
+    AWG_ADDRESS=10.2.0.1/24
+    AWG_ENDPOINT=vpn.example.com
+    AWG_I1='<b 0xc0><r 32><t>'
+    render_environment >"$rendered_config"
+)
+grep -q '^AWG_API_TOKEN=' "$rendered_config" \
+    || fail 'rendered environment omitted AWG_API_TOKEN'
+grep -q '^AWG_I1=' "$rendered_config" \
+    || fail 'rendered environment omitted AWG_I1'
+if grep -q '^AWG_SERVER_VERSION=' "$rendered_config"; then
+    fail 'rendered service environment included AWG_SERVER_VERSION'
+fi
+(
+    clear_config
+    # shellcheck source=/dev/null
+    source "$rendered_config"
+    assert_equal 'rendered token round trip' 'token with spaces and $shell syntax' "$AWG_API_TOKEN"
+    assert_equal 'rendered address round trip' 10.2.0.1/24 "$AWG_ADDRESS"
+    assert_equal 'rendered CPS round trip' '<b 0xc0><r 32><t>' "$AWG_I1"
+)
+
+legacy_dir="$temp_dir/data"
+default_dir="$temp_dir/var/lib/awg-server"
+mkdir -p "$legacy_dir" "$default_dir"
+(
+    unset AWG_DATA_DIR
+    select_data_dir "$legacy_dir" "$default_dir"
+    assert_equal 'legacy data directory' "$legacy_dir" "$AWG_DATA_DIR"
+)
+(
+    unset AWG_DATA_DIR
+    select_data_dir "$temp_dir/missing-data" "$default_dir"
+    assert_equal 'new data directory' "$default_dir" "$AWG_DATA_DIR"
+)
+(
+    AWG_DATA_DIR="$temp_dir/custom"
+    select_data_dir "$legacy_dir" "$default_dir"
+    assert_equal 'configured data directory' "$temp_dir/custom" "$AWG_DATA_DIR"
+)
+
+printf 'install tests passed\n'
