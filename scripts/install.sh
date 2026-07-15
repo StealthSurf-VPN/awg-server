@@ -356,7 +356,6 @@ install_verified_release() {
     curl -fsSL "$release_url/SHA256SUMS" -o "$release_dir/SHA256SUMS"
     curl -fsSL "$release_url/SHA256SUMS.sig" \
         -o "$release_dir/SHA256SUMS.sig"
-    curl -fsSL "$release_url/$asset" -o "$release_dir/$asset"
 
     openssl pkeyutl -verify -rawin -pubin \
         -inkey "$verified_key" \
@@ -374,6 +373,7 @@ install_verified_release() {
     [[ $checksum_count -eq 1 ]] \
         || die "release manifest must contain exactly one checksum for $asset"
 
+    curl -fsSL "$release_url/$asset" -o "$release_dir/$asset"
     (cd "$release_dir" \
         && printf '%s\n' "$checksum_line" | sha256sum --check --strict -) \
         || die 'release asset checksum verification failed'
