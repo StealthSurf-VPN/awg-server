@@ -278,7 +278,9 @@ require_supported_host() {
     [[ $ID == ubuntu && $VERSION_ID == 22.04 ]] \
         || die 'Ubuntu 22.04 is required'
 
-    if systemd-detect-virt --quiet --container; then
+    if [[ -e /.dockerenv || -e /run/.containerenv ]] \
+        || { command -v systemd-detect-virt >/dev/null 2>&1 \
+            && systemd-detect-virt --quiet --container; }; then
         die 'containers are not supported; use a host or VM'
     fi
 }
