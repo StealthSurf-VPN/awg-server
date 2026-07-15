@@ -5,6 +5,8 @@ export LC_ALL=C
 
 version=${1:-}
 changelog=${2:-CHANGELOG.md}
+previous_tag=${3:-}
+repository=${4:-}
 
 fail() {
     printf 'release-notes: %s\n' "$1" >&2
@@ -14,6 +16,14 @@ fail() {
 [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
     || fail 'version must use MAJOR.MINOR.PATCH without leading zeroes'
 [ -r "$changelog" ] || fail "cannot read $changelog"
+if [ -n "$previous_tag" ]; then
+    [[ $previous_tag =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+        || fail 'previous tag must use vMAJOR.MINOR.PATCH without leading zeroes'
+    [[ $repository =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+        || fail 'repository must use OWNER/REPOSITORY'
+elif [ -n "$repository" ]; then
+    fail 'repository requires a previous tag'
+fi
 
 escaped_version=${version//./\\.}
 set +e
@@ -56,3 +66,8 @@ printf '%s\n' "$notes" | grep -q '[^[:space:]]' \
     || fail "the dated $version section is empty"
 
 printf '%s\n' "$notes"
+
+if [ -n "$previous_tag" ]; then
+    printf '\n**Full Changelog**: [%s...v%s](https://github.com/%s/compare/%s...v%s)\n' \
+        "$previous_tag" "$version" "$repository" "$previous_tag" "$version"
+fi

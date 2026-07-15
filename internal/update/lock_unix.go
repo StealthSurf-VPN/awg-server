@@ -23,7 +23,7 @@ func acquireUpdateLock(execPath string) (*updateLock, error) {
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		file.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, errors.New("another update or deployment is already in progress")
+			return nil, errors.New("another update is already in progress")
 		}
 		return nil, fmt.Errorf("acquire update lock: %w", err)
 	}

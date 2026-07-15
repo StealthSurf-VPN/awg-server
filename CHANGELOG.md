@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-07-15
+
 - Added composable per-client `full`, `bypass`, and `split` routing with deterministic exclusions
 - Added default, custom multi-server, and system DNS modes
 - Added standalone AWG H/S generation and transactional per-client regeneration
 - Added full HTTP API contract tests, race-enabled CI, and shell/workflow validation
-- Added strict marker-driven signed releases and protected opt-in production deployment
+- Added strict marker-driven signed GitHub Releases with changelog and compare-link release notes
 - Hardened self-update with Ed25519 verification, exact manifests, checksum and version validation, and downgrade refusal
 
 ## [1.0.2] - 2026-03-11

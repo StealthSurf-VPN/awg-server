@@ -346,8 +346,8 @@ func TestUpdaterApplyHonorsInterprocessLockBeforeDownload(t *testing.T) {
 	})}
 
 	err = u.Apply(validResult("1.1.0", releaseAssetName(runtime.GOOS, runtime.GOARCH)))
-	if err == nil || !strings.Contains(err.Error(), "already in progress") {
-		t.Fatalf("Apply error = %v, want interprocess lock rejection", err)
+	if err == nil || err.Error() != "another update is already in progress" {
+		t.Fatalf("Apply error = %v, want update-only interprocess lock rejection", err)
 	}
 	if requestCount != 0 {
 		t.Fatalf("locked update made %d requests, want 0", requestCount)

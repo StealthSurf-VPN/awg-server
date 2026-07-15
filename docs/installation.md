@@ -89,8 +89,6 @@ Copy binary to the server:
 scp awg-server root@your-server:/usr/local/bin/
 ```
 
-The repository also provides an opt-in GitHub Actions deployment that requires the trust key to be Ed25519, verifies the signed release manifest against that root-owned key, rejects downgrades, uses a restricted forced SSH command, performs an atomic replacement, checks the local health endpoint, and rolls back on restart, health, or handled-signal failure. Complete target prerequisites, signing-key setup, self-update trust, and secret requirements are documented in [CI, release, and deployment](ci-cd.md). Keep deployment disabled until the signing trust, `production` Environment, and restricted server account are configured.
-
 ## 5. Enable IP Forwarding
 
 ```bash

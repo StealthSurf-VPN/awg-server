@@ -2,7 +2,7 @@
 
 GitHub Actions is the canonical release path. A successful push to `main` can publish an updater-compatible GitHub Release when the immutable HEAD commit message contains a strict release marker.
 
-Release, tag, push, and deployment operations have external side effects. Do not perform them from a local agent session unless the user explicitly requests those side effects.
+Release, tag, and push operations have external side effects. Do not perform them from a local agent session unless the user explicitly requests those side effects.
 
 ## Automated Release Request
 
@@ -22,12 +22,14 @@ Rules:
 - Release detection runs only after push/merge to `main` and after `Verify` passes.
 - The requested tag must be newer than every published stable release.
 - `CHANGELOG.md` must contain exactly one non-empty `## [X.Y.Z] - YYYY-MM-DD` section.
+- Release notes must contain that exact section followed by a clickable `Full Changelog` range from the previous stable release when one exists.
 
 Test marker behavior locally:
 
 ```bash
 bash scripts/release-marker_test.sh
 bash scripts/release-notes_test.sh
+bash scripts/release-previous-tag_test.sh
 ```
 
 ## Automated Gates
@@ -37,14 +39,13 @@ bash scripts/release-notes_test.sh
 1. Run formatting, module, shell automation, API/package race tests, vet, build, and diff checks.
 2. Read only the immutable HEAD commit message from the exact `main` commit.
 3. Parse the strict marker with `scripts/release-marker.sh`.
-4. Extract only the exact dated changelog section with `scripts/release-notes.sh`.
+4. Resolve the previous published stable release and extract the exact dated changelog section plus its `Full Changelog` compare range with `scripts/release-notes.sh`.
 5. Validate `AWG_RELEASE_SIGNING_PUBLIC_KEY` as a canonical base64 Ed25519 public PEM and run `make build-all VERSION=X.Y.Z RELEASE_PUBLIC_KEY=...` in a read-only-token job.
 6. Verify the exact six updater asset names, embedded version, independently expected updater key and its presence in every real artifact, and `SHA256SUMS`, then upload an unsigned artifact.
 7. After required approval of the `release-signing` Environment, use a separate job with no source checkout or `GITHUB_TOKEN` permissions to revalidate the exact artifact, checksums, and embedded public key, require its Environment secret `AWG_RELEASE_SIGNING_PRIVATE_KEY` and the configured public key to be one matching Ed25519 pair, sign only `SHA256SUMS`, and verify the signature.
 8. Transfer the signed bundle to a separate publish job that alone receives `contents: write`.
 9. Create or validate an annotated `vX.Y.Z` tag pointing to the release commit.
-10. Publish a non-draft, non-prerelease release and verify every published byte against the bundle.
-11. If explicitly enabled, call the protected reusable production deployment.
+10. Publish a non-draft, non-prerelease release and verify its complete description and every published byte against the bundle.
 
 Expected release assets:
 
@@ -59,44 +60,13 @@ SHA256SUMS
 SHA256SUMS.sig
 ```
 
-The workflow uses an annotated tag so recovery and deployment can verify a tag object's exact name, message, type, and target commit. Legacy lightweight tags are not eligible. A recovery accepts only the expected annotated tag and either no release or the latest stable release whose complete asset set is byte-identical to the newly verified bundle.
+The workflow uses an annotated tag so recovery can verify a tag object's exact name, message, type, and target commit. Legacy lightweight tags are not eligible. A recovery accepts only the expected annotated tag and either no release or the latest stable release whose complete description and asset set match the newly verified bundle.
 
 The `release-signing` Environment must be restricted to `main` and require a reviewer who inspects the exact workflow diff before granting access to the private key. Same-repository YAML still controls the approved signing step; fully unattended cryptographic isolation requires a separately administered signer or KMS and is outside this repository.
 
-## Automatic Deployment
+The workflow stops after GitHub Release publication and verification. It must not contain server SSH credentials, a production Environment, or a deployment job. Operators install releases separately or use the signed self-updater.
 
-Automatic deployment is disabled unless the repository variable is set:
-
-```text
-AWG_AUTO_DEPLOY_ENABLED=true
-```
-
-The reusable `.github/workflows/deploy.yml` job uses the `production` Environment, requires an annotated tag reachable from `main`, downloads the exact Linux architecture asset plus signed manifest, requires pinned SSH host keys, and streams the signed envelope to the forced remote helper.
-
-The helper at `scripts/deploy-awg-server`:
-
-- must be installed root-owned as `/usr/local/sbin/deploy-awg-server`;
-- accepts input only through the forced SSH command;
-- verifies `SHA256SUMS.sig` against the root-owned `/etc/awg-server/release-signing-public.pem` before executing the upload;
-- rejects the trust key unless OpenSSL identifies it as Ed25519;
-- validates the exact manifest, checksum, architecture, requested version, and embedded version before mutation;
-- shares `/usr/local/bin/awg-server.update.lock` with the CLI updater and refuses concurrent mutation;
-- refuses a downgrade from an installed stable version;
-- atomically replaces `/usr/local/bin/awg-server`;
-- restarts `awg-server.service`;
-- checks `http://127.0.0.1:7777/health`;
-- restores the previous binary after a failed restart, health check, or handled termination signal;
-- retains and reports the recovery copy if restoration itself fails.
-
-Run its isolated Docker contract before changing it:
-
-```bash
-bash scripts/deploy-awg-server_test.sh
-```
-
-Environment setup, secret names, the restricted SSH account, sudo policy, manual deployment, and non-default path/port changes are documented in `docs/ci-cd.md`.
-
-Official Linux and macOS release binaries embed the same public key and use it for `awg-server update`. Self-update is strictly upgrade-only and validates the canonical version-bound asset URLs, shared interprocess lock, actual on-disk version, Ed25519 signature, canonical six-asset manifest, checksum, 64 MiB limit, and downloaded binary version before replacement. Ordinary source builds and Windows self-update fail closed before network access. Key rotation requires the reviewed bridge process documented in `docs/ci-cd.md`; never replace only one key value.
+Official Linux and macOS release binaries embed the same public key and use it for `awg-server update`. Self-update is strictly upgrade-only and validates the canonical version-bound asset URLs, interprocess update lock, actual on-disk version, Ed25519 signature, canonical six-asset manifest, checksum, 64 MiB limit, and downloaded binary version before replacement. Ordinary source builds and Windows self-update fail closed before network access. Key rotation requires the reviewed bridge process documented in `docs/ci-cd.md`; never replace only one key value.
 
 ## Manual Release Fallback
 
@@ -116,6 +86,10 @@ Build and verify:
 set -Eeuo pipefail
 umask 077
 VERSION=X.Y.Z
+PREVIOUS_TAG=vA.B.C
+bash scripts/release-notes.sh \
+  "$VERSION" CHANGELOG.md "$PREVIOUS_TAG" StealthSurf-VPN/awg-server \
+  > /tmp/release-notes.md
 test -n "${AWG_RELEASE_SIGNING_PRIVATE_KEY_FILE:-}"
 RELEASE_SIGNING_PUBLIC_KEY=$(mktemp)
 trap 'rm -f "$RELEASE_SIGNING_PUBLIC_KEY"' EXIT
@@ -173,7 +147,7 @@ rm -f "$RELEASE_SIGNING_PUBLIC_KEY"
 trap - EXIT
 ```
 
-Create and push an annotated tag, then publish all binaries, `SHA256SUMS`, and `SHA256SUMS.sig`. Use `scripts/release-notes.sh` for the matching release notes. Never create a lightweight tag, omit an asset or signature, publish a version older than the current latest release, or publish from an unclean tree.
+Set `PREVIOUS_TAG` to the latest published stable tag. Create and push an annotated tag, then publish `/tmp/release-notes.md`, all binaries, `SHA256SUMS`, and `SHA256SUMS.sig`. Never create a lightweight tag, omit an asset or signature, publish a version older than the current latest release, or publish from an unclean tree.
 
 ## Common Failures
 
@@ -183,6 +157,5 @@ Create and push an annotated tag, then publish all binaries, `SHA256SUMS`, and `
 - A lightweight or mismatched existing tag fails publication.
 - Missing or extra release assets fail both package and post-publication verification.
 - A missing, non-Ed25519, or mismatched signing secret/public variable fails build or signing before publication.
-- `AWG_AUTO_DEPLOY_ENABLED=true` before the `production` Environment is configured causes deployment to fail after release publication.
-- An unpinned or changed SSH host key fails before any remote mutation.
-- An untrusted signature, wrong architecture/checksum/version, or downgrade fails inside the remote helper before replacement.
+- A stale previous stable tag fails publication before tag creation.
+- A published description that differs from the prepared changelog and compare range fails post-publication verification.

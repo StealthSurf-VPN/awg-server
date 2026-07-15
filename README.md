@@ -131,7 +131,7 @@ awg-server update
 awg-server
 ```
 
-On Linux and macOS, `awg-server update` is enabled only in official release binaries that embed the Ed25519 release public key. It rejects non-stable versions, downgrades, concurrent update/deploy operations, unexpected assets or URLs, invalid signatures, non-canonical manifests, checksum mismatches, and a binary whose embedded version does not match the release. It locks and rechecks the actual installed binary before any release asset download and immediately before replacement. A source build without `RELEASE_PUBLIC_KEY` fails closed before network access. Windows self-update also fails before network access because a running `.exe` cannot be replaced atomically; install a separately verified signed Windows asset instead. After a successful in-place update, restart the service: `systemctl restart awg-server`.
+On Linux and macOS, `awg-server update` is enabled only in official release binaries that embed the Ed25519 release public key. It rejects non-stable versions, downgrades, concurrent updates, unexpected assets or URLs, invalid signatures, non-canonical manifests, checksum mismatches, and a binary whose embedded version does not match the release. It locks and rechecks the actual installed binary before any release asset download and immediately before replacement. A source build without `RELEASE_PUBLIC_KEY` fails closed before network access. Windows self-update also fails before network access because a running `.exe` cannot be replaced atomically; install a separately verified signed Windows asset instead. After a successful in-place update, restart the service: `systemctl restart awg-server`.
 
 ## Build
 
@@ -165,8 +165,8 @@ bash scripts/release-marker_test.sh
 # Release notes contract
 bash scripts/release-notes_test.sh
 
-# Atomic deployment helper and rollback contract (requires Docker)
-bash scripts/deploy-awg-server_test.sh
+# Previous stable release selection
+bash scripts/release-previous-tag_test.sh
 
 # Required static checks
 go vet ./...
@@ -175,7 +175,7 @@ go build -trimpath -o /tmp/awg-server .
 
 The API suite runs the real router, handlers, manager, temporary JSON storage, routing/DNS/configuration logic, key generation, and usage collector while replacing only host-level AWG device operations. It covers every registered HTTP operation and does not require root, an AWG kernel module, or external network access.
 
-GitHub Actions runs these checks for pull requests and `main`. A strict `release:vMAJOR.MINOR.PATCH` marker in the immutable commit message that lands on `main` starts publication of all six platform binaries, checksums, and an Ed25519 signature after CI passes and the protected `release-signing` Environment is approved. Build scripts never receive the private signing key: a separate job without a source checkout or `GITHUB_TOKEN` permissions validates the unsigned artifact, requires an exact Ed25519 keypair match, and signs only the checksum manifest. Protected automatic deployment is available but disabled by default. See [CI, release, and deployment](docs/ci-cd.md) for the exact marker contract, signing-key setup, release gates, GitHub settings, target-server setup, manual deployment, downgrade protection, and rollback behavior.
+GitHub Actions runs these checks for pull requests and `main`. A strict `release:vMAJOR.MINOR.PATCH` marker in the immutable commit message that lands on `main` starts publication of all six platform binaries, checksums, and an Ed25519 signature after CI passes and the protected `release-signing` Environment is approved. The release description contains the matching changelog section followed by a clickable `Full Changelog` range from the previous stable release. Build scripts never receive the private signing key: a separate job without a source checkout or `GITHUB_TOKEN` permissions validates the unsigned artifact, requires an exact Ed25519 keypair match, and signs only the checksum manifest. The workflow publishes GitHub Releases only and never deploys binaries to servers. See [CI and release automation](docs/ci-cd.md) for the exact marker contract, release-note format, signing-key setup, release gates, GitHub settings, and manual fallback.
 
 ## Deploy
 
@@ -187,8 +187,6 @@ AWG_ADDRESS=10.0.0.1/24 \
 AWG_ENDPOINT=your.server.ip \
 ./awg-server
 ```
-
-For release-driven deployment through GitHub Actions, install the restricted remote helper and configure the `production` Environment as described in [CI, release, and deployment](docs/ci-cd.md#protected-automatic-deployment).
 
 ## API
 
