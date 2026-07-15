@@ -8,136 +8,54 @@ Every newly created client also receives a unique, server-generated WireGuard pr
 
 ## Quick Install (Ubuntu 22.04)
 
-This example targets an Ubuntu 22.04 host or VM. It installs AmneziaWG 2.0 from the official Amnezia PPA and one exact signed `awg-server` release. Containers are not supported for production because they share the host kernel and cannot provide an independent AmneziaWG module. AmneziaVPN clients must be version 4.8.12.9 or newer; generate new client configurations instead of reusing AmneziaWG 1.0 configurations.
+The recommended installer targets an Ubuntu 22.04 host or VM, installs AmneziaWG 2.0, and installs one exact signed `awg-server` release. Obtain the project's Ed25519 release public key through a trusted administrative channel before running it. The installer never downloads its trust key.
 
-Before running it, obtain both the intended stable `MAJOR.MINOR.PATCH` server version and the project's Ed25519 release public key through a trusted administrative channel, export that version as `AWG_SERVER_VERSION`, and install the key at `/etc/awg-server/release-signing-public.pem`. Legacy unsigned releases and mutable `latest` aliases are intentionally rejected.
-
-```bash
-set -Eeuo pipefail
-: "${AWG_SERVER_VERSION:?export the trusted release version as AWG_SERVER_VERSION=MAJOR.MINOR.PATCH}"
-[[ $AWG_SERVER_VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-
-# 1. Install the official AmneziaWG 2.0 kernel module and awg CLI
-apt-get update
-apt-get install -y \
-  build-essential ca-certificates curl dkms gnupg2 iproute2 iptables \
-  libelf-dev openssl \
-  python3-launchpadlib software-properties-common \
-  "linux-headers-$(uname -r)"
-
-# XanMod kernels installed by the StealthSurf host bootstrap are built with
-# LLVM 19. Install the matching toolchain before DKMS builds AmneziaWG.
-if [[ $(uname -r) == *xanmod* ]]; then
-  install -d -m 0755 /etc/apt/keyrings
-  curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
-    | gpg --batch --yes --dearmor -o /etc/apt/keyrings/llvm-snapshot.gpg
-  echo 'deb [signed-by=/etc/apt/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main' \
-    > /etc/apt/sources.list.d/llvm-19.list
-  apt-get update
-  apt-get install -y clang-19 lld-19 llvm-19
-  for tool in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
-    update-alternatives --install "/usr/bin/$tool" "$tool" "/usr/bin/$tool-19" 190
-    update-alternatives --set "$tool" "/usr/bin/$tool-19"
-  done
-  export PATH=/usr/lib/llvm-19/bin:$PATH
-fi
-
-add-apt-repository -y ppa:amnezia/ppa
-apt-get update
-apt-get install -y amneziawg
-modprobe amneziawg
-modinfo amneziawg >/dev/null
-awg --version
-
-# 2. Enable IP forwarding
-sysctl -w net.ipv4.ip_forward=1
-echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-
-# 3. Download and verify the exact signed awg-server release
-case "$(uname -m)" in
-  x86_64) ASSET=awg-server-linux-amd64 ;;
-  aarch64|arm64) ASSET=awg-server-linux-arm64 ;;
-  *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
-esac
-RELEASE_DIR=$(mktemp -d)
-trap 'rm -rf "$RELEASE_DIR"' EXIT
-RELEASE_URL="https://github.com/StealthSurf-VPN/awg-server/releases/download/v$AWG_SERVER_VERSION"
-curl -fL "$RELEASE_URL/$ASSET" -o "$RELEASE_DIR/$ASSET"
-curl -fL "$RELEASE_URL/SHA256SUMS" -o "$RELEASE_DIR/SHA256SUMS"
-curl -fL "$RELEASE_URL/SHA256SUMS.sig" -o "$RELEASE_DIR/SHA256SUMS.sig"
-KEY_DESCRIPTION=$(openssl pkey -pubin -in /etc/awg-server/release-signing-public.pem -text -noout)
-KEY_TYPE=${KEY_DESCRIPTION%%$'\n'*}
-unset KEY_DESCRIPTION
-test "$KEY_TYPE" = 'ED25519 Public-Key:'
-openssl pkeyutl -verify -rawin -pubin \
-  -inkey /etc/awg-server/release-signing-public.pem \
-  -sigfile "$RELEASE_DIR/SHA256SUMS.sig" \
-  -in "$RELEASE_DIR/SHA256SUMS"
-CHECKSUM_LINE=$(grep -E "^[0-9a-f]{64}  ${ASSET}$" "$RELEASE_DIR/SHA256SUMS")
-test "$(printf '%s\n' "$CHECKSUM_LINE" | grep -c .)" -eq 1
-(cd "$RELEASE_DIR" && printf '%s\n' "$CHECKSUM_LINE" | sha256sum --check --strict -)
-chmod 0755 "$RELEASE_DIR/$ASSET"
-test "$("$RELEASE_DIR/$ASSET" version)" = "awg-server $AWG_SERVER_VERSION"
-install -o root -g root -m 0755 "$RELEASE_DIR/$ASSET" /usr/local/bin/awg-server
-rm -rf "$RELEASE_DIR"
-trap - EXIT
-
-# 4. Create data directory
-mkdir -p /data
-
-# 5. Create systemd service
-cat > /etc/systemd/system/awg-server.service <<EOF
-[Unit]
-Description=AmneziaWG Server
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStartPre=/sbin/modprobe amneziawg
-ExecStart=/usr/local/bin/awg-server
-Restart=always
-RestartSec=5
-
-Environment=AWG_API_TOKEN=your-secret-token
-Environment=AWG_ADDRESS=10.0.0.1/24
-Environment=AWG_ENDPOINT=your.server.ip
-
-# Optional application defaults:
-# Environment=AWG_JC=5
-# Environment=AWG_JMIN=50
-# Environment=AWG_JMAX=1000
-# Environment=AWG_S3=0
-# Environment=AWG_S4=0
-# Environment=AWG_LISTEN_PORT=51820
-# Environment=AWG_HTTP_PORT=7777
-# Environment=AWG_DNS=1.1.1.1
-# Environment=AWG_MTU=1420
-# Environment=AWG_MAX_INTERFACES=0
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 6. Start and enable on boot
-systemctl daemon-reload
-systemctl enable --now awg-server
-```
-
-Check status:
+Download the installer from the same exact `vMAJOR.MINOR.PATCH` tag you intend to install. In interactive mode it prompts for missing required values; the API token prompt is hidden:
 
 ```bash
-systemctl status awg-server
-journalctl -u awg-server -f
+TAG=v1.2.3
+curl -fsSL \
+  "https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/${TAG}/scripts/install.sh" \
+  -o /tmp/awg-server-install.sh
+sudo env \
+  AWG_SERVER_VERSION="${TAG#v}" \
+  AWG_RELEASE_PUBLIC_KEY_FILE=/root/awg-server-release-signing-public.pem \
+  bash /tmp/awg-server-install.sh
 ```
 
-## Prerequisites
+The trusted key must already exist on the host at the supplied path. On a rerun, the installer can reuse `/etc/awg-server/release-signing-public.pem`, where it stores the verified key after the first successful release installation.
+
+For unattended installation, put secrets in a trusted root-owned mode-`0600` configuration file instead of command arguments or shell history:
+
+```bash
+sudo install -o root -g root -m 0600 /dev/null /root/awg-server-install.env
+sudoedit /root/awg-server-install.env
+```
+
+```bash
+AWG_SERVER_VERSION=1.2.3
+AWG_RELEASE_PUBLIC_KEY_FILE=/root/awg-server-release-signing-public.pem
+AWG_API_TOKEN='replace-in-editor'
+AWG_ADDRESS=10.0.0.1/24
+AWG_ENDPOINT=vpn.example.com
+```
+
+```bash
+TAG=v1.2.3
+curl -fsSL \
+  "https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/${TAG}/scripts/install.sh" \
+  -o /tmp/awg-server-install.sh
+sudo bash /tmp/awg-server-install.sh --config /root/awg-server-install.env
+```
+
+Keep `AWG_SERVER_VERSION` equal to the installer tag without the leading `v`. Reruns preserve the selected data directory and its JSON state. The installer does not modify firewall rules; allow the required AWG UDP ports and restrict the HTTP API port to the internal network. See the [installation guide](docs/installation.md) for all inputs, precedence, verification gates, manual installation, and troubleshooting.
+
+## Requirements
 
 - Ubuntu 22.04 on a host or VM, not inside Docker/LXC
-- [`amneziawg`](https://launchpad.net/~amnezia/+archive/ubuntu/ppa) installed from the official Amnezia PPA; it provides both the DKMS module and `awg` CLI
+- The trusted Ed25519 release public key and an exact stable release version
 - AmneziaVPN 4.8.12.9 or newer, or another AmneziaWG 2.0-compatible client
-- `iptables`, `iproute2` (usually already present)
-- `net.ipv4.ip_forward=1` sysctl enabled
+- For manual installation only, [`amneziawg`](https://launchpad.net/~amnezia/+archive/ubuntu/ppa), `iptables`, `iproute2`, and IP forwarding; the installer configures these host requirements
 
 ## CLI Commands
 
@@ -180,6 +98,9 @@ Requires Go 1.24+. `make build` writes the current-platform binary to `./awg-ser
 # Go package tests
 go test -race -count=1 ./...
 
+# Host installer contract
+bash scripts/install_test.sh
+
 # Release marker contract
 bash scripts/release-marker_test.sh
 
@@ -201,9 +122,10 @@ GitHub Actions runs these checks for pull requests and `main`. A strict `release
 Copy `awg-server` binary to the VPN server and run:
 
 ```bash
-AWG_API_TOKEN=your-secret-token \
-AWG_ADDRESS=10.0.0.1/24 \
-AWG_ENDPOINT=your.server.ip \
+read -r -s -p 'AWG_API_TOKEN: ' AWG_API_TOKEN
+export AWG_API_TOKEN
+export AWG_ADDRESS=10.0.0.1/24
+export AWG_ENDPOINT=vpn.example.com
 ./awg-server
 ```
 
