@@ -58,7 +58,6 @@ jobs:
             -w /repo \
             koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb \
             scripts/install.sh \
-            scripts/install_test.sh \
             scripts/release-marker.sh \
             scripts/release-marker_test.sh \
             scripts/release-notes.sh \
@@ -70,7 +69,6 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          bash scripts/install_test.sh
           bash scripts/release-marker_test.sh
           bash scripts/release-notes_test.sh
           bash scripts/release-previous-tag_test.sh

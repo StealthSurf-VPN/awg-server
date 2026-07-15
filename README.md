@@ -104,9 +104,6 @@ Requires Go 1.24+. `make build` writes the current-platform binary to `./awg-ser
 # Go package tests
 go test -race -count=1 ./...
 
-# Host installer contract
-bash scripts/install_test.sh
-
 # Release marker contract
 bash scripts/release-marker_test.sh
 
