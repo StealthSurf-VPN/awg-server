@@ -10,7 +10,7 @@ fail() {
 }
 
 [[ -f $installer ]] || fail 'scripts/install.sh is missing'
-# shellcheck source=install.sh
+# shellcheck source=scripts/install.sh
 source "$installer"
 
 temp_dir=$(mktemp -d)
@@ -102,6 +102,8 @@ printf '%s\n' \
     'AWG_RELEASE_PUBLIC_KEY_FILE=/explicit/release-signing-public.pem' >"$explicit_config"
 chmod 0600 "$existing_config" "$explicit_config"
 
+# Config precedence cases intentionally isolate their environment changes.
+# shellcheck disable=SC2030,SC2031
 (
     clear_config
     AWG_API_TOKEN=process-token
@@ -117,6 +119,8 @@ chmod 0600 "$existing_config" "$explicit_config"
     assert_equal 'explicit config precedence' 10.1.0.1/24 "$AWG_ADDRESS"
     assert_equal 'existing config fallback' existing.example.com "$AWG_ENDPOINT"
 )
+# Config precedence cases intentionally isolate their environment changes.
+# shellcheck disable=SC2030,SC2031
 (
     clear_config
     unset AWG_RELEASE_PUBLIC_KEY_FILE
@@ -154,6 +158,8 @@ done
 [[ $release_key_required == true ]] \
     || fail 'AWG_RELEASE_PUBLIC_KEY_FILE is not a required installer setting'
 
+# The read stub is invoked indirectly by prompt_setting from install.sh.
+# shellcheck disable=SC2031,SC2317
 if ! (
     clear_config
     read() {
@@ -187,8 +193,14 @@ assert_rejected 'group/world-writable config' load_config_file "$insecure_config
 assert_rejected 'non-regular config' load_config_file "$temp_dir"
 
 rendered_config="$temp_dir/rendered.env"
+# Shell metacharacters are literal serializer input.
+# shellcheck disable=SC2016
 environment_value='value with spaces $dollar \backslash "quote" `backtick`'
+# Expected output intentionally contains literal shell escapes.
+# shellcheck disable=SC2016
 expected_environment_line='AWG_API_TOKEN="value with spaces \$dollar \\backslash \"quote\" \`backtick\`"'
+# Rendering is intentionally isolated from the remaining config tests.
+# shellcheck disable=SC2030
 (
     clear_config
     AWG_API_TOKEN=$environment_value
@@ -211,6 +223,8 @@ fi
 if grep -q '^AWG_RELEASE_PUBLIC_KEY_FILE=' "$rendered_config"; then
     fail 'rendered service environment included AWG_RELEASE_PUBLIC_KEY_FILE'
 fi
+# Sourcing the rendered fixture is intentionally isolated from its creation.
+# shellcheck disable=SC2031
 (
     clear_config
     # shellcheck source=/dev/null

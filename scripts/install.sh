@@ -111,7 +111,7 @@ restore_process_environment() {
         [[ ${PROCESS_ENV_PRESENT[index]:-0} == 1 ]] || continue
         key=${CONFIG_KEYS[index]}
         printf -v "$key" '%s' "${PROCESS_ENV_VALUES[index]}"
-        export "$key"
+        export "${key?}"
     done
 }
 
@@ -163,8 +163,8 @@ render_environment() {
 }
 
 select_data_dir() {
-    local legacy_dir=${1:-/data}
-    local default_dir=${2:-/var/lib/awg-server}
+    local legacy_dir=$1
+    local default_dir=$2
 
     [[ -n ${AWG_DATA_DIR:-} ]] && return
     if [[ -d $legacy_dir ]]; then
@@ -464,7 +464,7 @@ main() {
     validate_version "$AWG_SERVER_VERSION"
     [[ -f $AWG_RELEASE_PUBLIC_KEY_FILE ]] \
         || die 'AWG_RELEASE_PUBLIC_KEY_FILE must be a regular file'
-    select_data_dir
+    select_data_dir /data /var/lib/awg-server
 
     install_amneziawg
     install_verified_release "$asset"
