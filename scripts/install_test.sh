@@ -53,23 +53,39 @@ explicit_config="$temp_dir/explicit.env"
 printf '%s\n' \
     'AWG_API_TOKEN=existing-token' \
     'AWG_ADDRESS=10.0.0.1/24' \
-    'AWG_ENDPOINT=existing.example.com' >"$existing_config"
+    'AWG_ENDPOINT=existing.example.com' \
+    'AWG_RELEASE_PUBLIC_KEY_FILE=/existing/release-signing-public.pem' >"$existing_config"
 printf '%s\n' \
     'AWG_API_TOKEN=explicit-token' \
-    'AWG_ADDRESS=10.1.0.1/24' >"$explicit_config"
+    'AWG_ADDRESS=10.1.0.1/24' \
+    'AWG_RELEASE_PUBLIC_KEY_FILE=/explicit/release-signing-public.pem' >"$explicit_config"
 chmod 0600 "$existing_config" "$explicit_config"
 
 (
     clear_config
     AWG_API_TOKEN=process-token
+    AWG_RELEASE_PUBLIC_KEY_FILE=/process/release-signing-public.pem
     capture_process_environment
     load_config_file "$existing_config"
     load_config_file "$explicit_config"
     restore_process_environment
 
     assert_equal 'process environment precedence' process-token "$AWG_API_TOKEN"
+    assert_equal 'release key process environment precedence' \
+        /process/release-signing-public.pem "$AWG_RELEASE_PUBLIC_KEY_FILE"
     assert_equal 'explicit config precedence' 10.1.0.1/24 "$AWG_ADDRESS"
     assert_equal 'existing config fallback' existing.example.com "$AWG_ENDPOINT"
+)
+(
+    clear_config
+    unset AWG_RELEASE_PUBLIC_KEY_FILE
+    capture_process_environment
+    load_config_file "$existing_config"
+    load_config_file "$explicit_config"
+    restore_process_environment
+
+    assert_equal 'release key explicit config precedence' \
+        /explicit/release-signing-public.pem "$AWG_RELEASE_PUBLIC_KEY_FILE"
 )
 
 if (
@@ -80,6 +96,48 @@ if (
 fi
 grep -Fq 'AWG_API_TOKEN is required' "$temp_dir/stderr" \
     || fail 'missing non-interactive setting did not explain the failure'
+
+if (
+    unset AWG_RELEASE_PUBLIC_KEY_FILE
+    require_setting AWG_RELEASE_PUBLIC_KEY_FILE </dev/null
+) >"$temp_dir/stdout" 2>"$temp_dir/stderr"; then
+    fail 'missing non-interactive release key setting returned success'
+fi
+grep -Fq 'AWG_RELEASE_PUBLIC_KEY_FILE is required' "$temp_dir/stderr" \
+    || fail 'missing release key setting did not explain the failure'
+
+release_key_required=false
+for key in "${REQUIRED_KEYS[@]}"; do
+    [[ $key != AWG_RELEASE_PUBLIC_KEY_FILE ]] || release_key_required=true
+done
+[[ $release_key_required == true ]] \
+    || fail 'AWG_RELEASE_PUBLIC_KEY_FILE is not a required installer setting'
+
+if ! (
+    clear_config
+    read() {
+        local arg destination
+        local secret_flag=false
+
+        for arg in "$@"; do
+            case $arg in
+                -*s*) secret_flag=true ;;
+            esac
+        done
+        [[ $secret_flag == true ]] || return 64
+
+        destination=${!#}
+        printf -v "$destination" '%s' interactive-secret
+    }
+
+    prompt_setting AWG_API_TOKEN 'API token'
+    assert_equal 'interactive secret assignment' interactive-secret "$AWG_API_TOKEN"
+) >"$temp_dir/stdout" 2>"$temp_dir/stderr"; then
+    fail 'interactive AWG_API_TOKEN did not use secret read mode'
+fi
+if grep -Fq interactive-secret "$temp_dir/stdout" "$temp_dir/stderr"; then
+    fail 'interactive AWG_API_TOKEN was written to output'
+fi
 
 insecure_config="$temp_dir/insecure.env"
 printf '%s\n' 'AWG_API_TOKEN=insecure-token' >"$insecure_config"
@@ -93,6 +151,7 @@ rendered_config="$temp_dir/rendered.env"
     AWG_API_TOKEN='token with spaces and $shell syntax'
     AWG_ADDRESS=10.2.0.1/24
     AWG_ENDPOINT=vpn.example.com
+    AWG_RELEASE_PUBLIC_KEY_FILE=/etc/awg-server/release-signing-public.pem
     AWG_I1='<b 0xc0><r 32><t>'
     render_environment >"$rendered_config"
 )
@@ -102,6 +161,9 @@ grep -q '^AWG_I1=' "$rendered_config" \
     || fail 'rendered environment omitted AWG_I1'
 if grep -q '^AWG_SERVER_VERSION=' "$rendered_config"; then
     fail 'rendered service environment included AWG_SERVER_VERSION'
+fi
+if grep -q '^AWG_RELEASE_PUBLIC_KEY_FILE=' "$rendered_config"; then
+    fail 'rendered service environment included AWG_RELEASE_PUBLIC_KEY_FILE'
 fi
 (
     clear_config

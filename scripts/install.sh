@@ -25,11 +25,16 @@ readonly -a ENVIRONMENT_KEYS=(
 )
 readonly -a REQUIRED_KEYS=(
     AWG_SERVER_VERSION
+    AWG_RELEASE_PUBLIC_KEY_FILE
     AWG_API_TOKEN
     AWG_ADDRESS
     AWG_ENDPOINT
 )
-readonly -a CONFIG_KEYS=(AWG_SERVER_VERSION "${ENVIRONMENT_KEYS[@]}")
+readonly -a CONFIG_KEYS=(
+    AWG_SERVER_VERSION
+    AWG_RELEASE_PUBLIC_KEY_FILE
+    "${ENVIRONMENT_KEYS[@]}"
+)
 
 PROCESS_ENV_PRESENT=()
 PROCESS_ENV_VALUES=()
@@ -100,17 +105,29 @@ restore_process_environment() {
     done
 }
 
-require_setting() {
+prompt_setting() {
     local key=${1:-}
     local prompt=${2:-$key}
     local value
 
+    if [[ $key == AWG_API_TOKEN ]]; then
+        read -r -s -p "$prompt: " value
+        printf '\n' >&2
+    else
+        read -r -p "$prompt: " value
+    fi
+    [[ -n $value ]] || die "$key is required"
+    printf -v "$key" '%s' "$value"
+}
+
+require_setting() {
+    local key=${1:-}
+    local prompt=${2:-$key}
+
     [[ -n ${!key:-} ]] && return
     [[ -t 0 ]] || die "$key is required in non-interactive mode"
 
-    read -r -p "$prompt: " value
-    [[ -n $value ]] || die "$key is required"
-    printf -v "$key" '%s' "$value"
+    prompt_setting "$key" "$prompt"
 }
 
 render_environment() {
