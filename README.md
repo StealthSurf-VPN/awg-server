@@ -177,7 +177,7 @@ Requires Go 1.24+. `make build` writes the current-platform binary to `./awg-ser
 ## Tests and Automation
 
 ```bash
-# Full deterministic API and package suite
+# Go package tests
 go test -race -count=1 ./...
 
 # Release marker contract
@@ -193,8 +193,6 @@ bash scripts/release-previous-tag_test.sh
 go vet ./...
 go build -trimpath -o /tmp/awg-server .
 ```
-
-The API suite runs the real router, handlers, manager, temporary JSON storage, routing/DNS/configuration logic, key generation, and usage collector while replacing only host-level AWG device operations. It covers every registered HTTP operation and does not require root, an AWG kernel module, or external network access.
 
 GitHub Actions runs these checks for pull requests and `main`. A strict `release:vMAJOR.MINOR.PATCH` marker in the immutable commit message that lands on `main` starts publication of all six platform binaries, checksums, and an Ed25519 signature after CI passes and the protected `release-signing` Environment is approved. The release description contains the matching changelog section followed by a clickable `Full Changelog` range from the previous stable release. Build scripts never receive the private signing key: a separate job without a source checkout or `GITHUB_TOKEN` permissions validates the unsigned artifact, requires an exact Ed25519 keypair match, and signs only the checksum manifest. The workflow publishes GitHub Releases only and never deploys binaries to servers. See [CI and release automation](docs/ci-cd.md) for the exact marker contract, release-note format, signing-key setup, release gates, GitHub settings, and manual fallback.
 

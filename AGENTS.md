@@ -13,7 +13,7 @@ The StealthSurf NestJS backend uses this API to create, update, inspect, and del
 - Build: `go build -o awg-server .`
 - Build with a version: `make build VERSION=1.0.0`
 - Test: `go test ./...`
-- Race-test the complete API/package suite: `go test -race -count=1 ./...`
+- Race-test Go packages: `go test -race -count=1 ./...`
 - Test release automation: `bash scripts/release-marker_test.sh && bash scripts/release-notes_test.sh && bash scripts/release-previous-tag_test.sh`
 - Static analysis: `go vet ./...`
 - Format changed Go files: `gofmt -w <files>`

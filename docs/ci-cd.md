@@ -13,22 +13,6 @@
 - a clean `go build` outside the checkout;
 - `git diff --check` and tracked working-tree verification.
 
-`internal/api/server_test.go` exercises the real `ServeMux`, handlers, client manager, temporary JSON storage, routing and DNS normalization, configuration rendering, key generation, and usage collector. Only the host device boundary is replaced. The test covers every registered API operation:
-
-| Method | Path |
-| --- | --- |
-| `GET` | `/health` |
-| `POST` | `/api/awg-params/generate` |
-| `GET` | `/api/clients` |
-| `POST` | `/api/clients` |
-| `PATCH` | `/api/clients/{id}` |
-| `POST` | `/api/clients/{id}/regenerate-awg-params` |
-| `GET` | `/api/clients/{id}/configuration` |
-| `GET` | `/api/clients/{id}/stats` |
-| `DELETE` | `/api/clients/{id}` |
-
-The API suite also checks authentication for every protected operation, validation failures, missing clients, wrong methods, duplicate clients, interface limits, migration conflicts, generic internal errors, snapshot-before-migration behavior, exact routing and DNS output, PSK isolation, usage cleanup, and device cleanup.
-
 Run the same deterministic checks locally:
 
 ```bash
@@ -40,8 +24,6 @@ go vet ./...
 go build -trimpath -o /tmp/awg-server .
 git diff --check
 ```
-
-The Go API tests intentionally do not execute `awg`, `ip`, or `iptables`. A real VPN handshake requires a Linux host with the matching AmneziaWG kernel/userspace implementation, network capabilities, and `/dev/net/tun`; it is a separate integration gate and must not be represented as kernel coverage on a generic GitHub-hosted runner.
 
 ## Automated Releases
 
