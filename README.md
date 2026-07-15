@@ -48,7 +48,7 @@ curl -fsSL \
 sudo bash /tmp/awg-server-install.sh --config /root/awg-server-install.env
 ```
 
-Keep `AWG_SERVER_VERSION` equal to the installer tag without the leading `v`. Reruns preserve the selected data directory and its JSON state. The installer does not modify firewall rules; allow the required AWG UDP ports and restrict the HTTP API port to the internal network. See the [installation guide](docs/installation.md) for all inputs, precedence, verification gates, manual installation, and troubleshooting.
+Keep `AWG_SERVER_VERSION` equal to the installer tag without the leading `v`. Reruns preserve the selected data directory and its JSON state. The installer does not configure inbound firewall policy or open or close ports. The running `awg-server` manages its own NAT/MASQUERADE rule as interfaces are restored or created; allow the required AWG UDP ports and restrict the HTTP API port to the internal network. See the [installation guide](docs/installation.md) for all inputs, precedence, verification gates, manual installation, and troubleshooting.
 
 ## Requirements
 

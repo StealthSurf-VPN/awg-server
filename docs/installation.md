@@ -77,7 +77,7 @@ Supported settings use this exact precedence, from highest to lowest:
 3. An existing `/etc/awg-server.env`
 4. Interactive prompts for any still-missing required setting
 
-Process-environment presence wins even when its value is empty. An empty required value therefore reaches the prompt in a TTY or fails in non-interactive mode instead of falling back to a lower-precedence source. If `AWG_RELEASE_PUBLIC_KEY_FILE` remains unset after the first three sources, an existing `/etc/awg-server/release-signing-public.pem` is used before prompting. After that fallback, any required setting still missing fails when stdin is not a TTY.
+Process-environment presence wins over the two config files even when its value is empty, so an empty required value remains missing after the precedence merge instead of revealing a lower-precedence value. For `AWG_RELEASE_PUBLIC_KEY_FILE` only, the installer then uses `/etc/awg-server/release-signing-public.pem` when that path is a regular file. If that canonical-key fallback does not apply, the empty value is prompted for in a TTY or fails in non-interactive mode, like every other missing required setting.
 
 The two installer-only settings are not written to the systemd environment file:
 
@@ -136,7 +136,7 @@ curl -fsS http://127.0.0.1:7777/health
 
 Use the configured `AWG_HTTP_PORT` instead of `7777` when overridden. Rerunning the installer reinstalls the requested exact version and restarts the unit without deleting the selected data directory.
 
-The installer does not add, remove, or validate firewall rules. The operator must expose every required AWG UDP port and restrict the HTTP API port to the internal network as described in [Firewall](#firewall).
+The installer does not configure inbound firewall policy or open or close ports. After the service starts, `awg-server` manages its own NAT/MASQUERADE rule as AWG interfaces are restored or created. The operator must expose every required AWG UDP port and restrict the HTTP API port to the internal network as described in [Firewall](#firewall).
 
 ## Manual alternative
 

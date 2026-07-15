@@ -473,7 +473,7 @@ main() {
 
     printf 'awg-server %s is installed and healthy\n' "$AWG_SERVER_VERSION"
     printf '%s\n' \
-        "WARNING: firewall rules were not changed; expose required AWG UDP ports and restrict TCP ${AWG_HTTP_PORT:-7777} to the internal network." \
+        "WARNING: inbound firewall policy was not configured and no ports were opened or closed; awg-server manages its own NAT/MASQUERADE rule as interfaces are restored or created. Expose required AWG UDP ports and restrict TCP ${AWG_HTTP_PORT:-7777} to the internal network." \
         >&2
 }
 
