@@ -19,7 +19,7 @@ chmod 0600 "$installer"
 trap 'rm -f -- "$installer"' EXIT
 curl -fsSL \
   "https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/${TAG}/scripts/install.sh" \
-  -o "$installer"
+  -o "$installer" &&
 sudo env \
   AWG_SERVER_VERSION="${TAG#v}" \
   AWG_RELEASE_PUBLIC_KEY_FILE=/root/awg-server-release-signing-public.pem \
@@ -50,7 +50,7 @@ chmod 0600 "$installer"
 trap 'rm -f -- "$installer"' EXIT
 curl -fsSL \
   "https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/${TAG}/scripts/install.sh" \
-  -o "$installer"
+  -o "$installer" &&
 sudo bash "$installer" --config /root/awg-server-install.env
 ```
 
