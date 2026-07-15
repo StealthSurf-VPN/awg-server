@@ -14,13 +14,16 @@ Download the installer from the same exact `vMAJOR.MINOR.PATCH` tag you intend t
 
 ```bash
 TAG=v1.2.3
+installer=$(mktemp)
+chmod 0600 "$installer"
+trap 'rm -f -- "$installer"' EXIT
 curl -fsSL \
   "https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/${TAG}/scripts/install.sh" \
-  -o /tmp/awg-server-install.sh
+  -o "$installer"
 sudo env \
   AWG_SERVER_VERSION="${TAG#v}" \
   AWG_RELEASE_PUBLIC_KEY_FILE=/root/awg-server-release-signing-public.pem \
-  bash /tmp/awg-server-install.sh
+  bash "$installer"
 ```
 
 The trusted key must already exist on the host at the supplied path. On a rerun, the installer can reuse `/etc/awg-server/release-signing-public.pem`, where it stores the verified key after the first successful release installation.
@@ -42,10 +45,13 @@ AWG_ENDPOINT=vpn.example.com
 
 ```bash
 TAG=v1.2.3
+installer=$(mktemp)
+chmod 0600 "$installer"
+trap 'rm -f -- "$installer"' EXIT
 curl -fsSL \
   "https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/${TAG}/scripts/install.sh" \
-  -o /tmp/awg-server-install.sh
-sudo bash /tmp/awg-server-install.sh --config /root/awg-server-install.env
+  -o "$installer"
+sudo bash "$installer" --config /root/awg-server-install.env
 ```
 
 Keep `AWG_SERVER_VERSION` equal to the installer tag without the leading `v`. Reruns preserve the selected data directory and its JSON state. The installer does not configure inbound firewall policy or open or close ports. The running `awg-server` manages its own NAT/MASQUERADE rule as interfaces are restored or created; allow the required AWG UDP ports and restrict the HTTP API port to the internal network. See the [installation guide](docs/installation.md) for all inputs, precedence, verification gates, manual installation, and troubleshooting.

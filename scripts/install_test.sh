@@ -69,6 +69,68 @@ assert_rejected 'unchanged service invocation' \
 assert_rejected 'empty current service invocation' \
     invocation_changed invocation-old ''
 
+# Deadline stubs are invoked indirectly by installer helpers.
+# shellcheck disable=SC2317
+(
+    current_time_milliseconds() {
+        printf '1000\n'
+    }
+
+    assert_equal 'remaining deadline budget' 1500 \
+        "$(remaining_milliseconds 2500)"
+    assert_rejected 'expired deadline' remaining_milliseconds 1000
+
+    timeout() {
+        assert_equal 'deadline timeout foreground mode' --foreground "$1"
+        assert_equal 'deadline timeout signal' --signal=KILL "$2"
+        assert_equal 'deadline timeout duration' 1.500s "$3"
+        shift 3
+        "$@"
+    }
+
+    assert_equal 'deadline-capped command output' ok \
+        "$(run_before_deadline 2500 printf ok)"
+)
+
+# Command stubs are invoked indirectly by service_healthy_before_deadline.
+# shellcheck disable=SC2317
+(
+    run_before_deadline() {
+        shift
+        if [[ $1 == systemctl && $2 == show ]]; then
+            printf 'invocation-new\n'
+            return 0
+        fi
+        if [[ $1 == curl ]]; then
+            printf '{"status":"ok"}\n'
+            return 22
+        fi
+        return 0
+    }
+
+    assert_rejected 'failed curl with healthy-looking body' \
+        service_healthy_before_deadline 5000 invocation-old 7777
+)
+
+# The final clock check must reject a response that completed after deadline.
+# shellcheck disable=SC2317
+(
+    run_before_deadline() {
+        shift
+        if [[ $1 == systemctl && $2 == show ]]; then
+            printf 'invocation-new\n'
+        elif [[ $1 == curl ]]; then
+            printf '{"status":"ok"}\n'
+        fi
+    }
+    remaining_milliseconds() {
+        return 1
+    }
+
+    assert_rejected 'health response completed after deadline' \
+        service_healthy_before_deadline 5000 invocation-old 7777
+)
+
 caller_exit_trap=$(trap -p EXIT)
 registered_temp_path="$temp_dir/registered-temp"
 mkdir "$registered_temp_path"
@@ -101,6 +163,37 @@ printf '%s\n' \
     'AWG_ADDRESS=10.1.0.1/24' \
     'AWG_RELEASE_PUBLIC_KEY_FILE=/explicit/release-signing-public.pem' >"$explicit_config"
 chmod 0600 "$existing_config" "$explicit_config"
+
+fail_fast_config="$temp_dir/fail-fast.env"
+fail_fast_marker="$temp_dir/fail-fast-marker"
+# The fixture intentionally expands FAIL_FAST_MARKER when sourced.
+# shellcheck disable=SC2016
+printf '%s\n' \
+    'false' \
+    'AWG_ENDPOINT=must-not-be-assigned.example.com' \
+    ': > "$FAIL_FAST_MARKER"' >"$fail_fast_config"
+chmod 0600 "$fail_fast_config"
+export FAIL_FAST_MARKER="$fail_fast_marker"
+if bash -s -- "$installer" "$fail_fast_config" \
+    >"$temp_dir/stdout" 2>"$temp_dir/stderr" <<'BASH'
+set -Eeuo pipefail
+source "$1"
+load_config_file "$2"
+BASH
+then
+    fail 'config command failure was ignored'
+fi
+[[ ! -e $fail_fast_marker ]] \
+    || fail 'config continued after a failed command'
+unset FAIL_FAST_MARKER
+
+(
+    trap ':' ERR
+    caller_err_trap=$(trap -p ERR)
+    load_config_file "$existing_config"
+    assert_equal 'caller ERR trap preservation' \
+        "$caller_err_trap" "$(trap -p ERR)"
+)
 
 # Config precedence cases intentionally isolate their environment changes.
 # shellcheck disable=SC2030,SC2031
@@ -186,6 +279,29 @@ if grep -Fq interactive-secret "$temp_dir/stdout" "$temp_dir/stderr"; then
     fail 'interactive AWG_API_TOKEN was written to output'
 fi
 
+# The read stub supplies an empty interactive answer for the address prompt.
+# shellcheck disable=SC2031,SC2317
+if ! (
+    clear_config
+    read() {
+        local destination=${!#}
+
+        printf -v "$destination" '%s' ''
+    }
+
+    prompt_setting AWG_ADDRESS 'VPN address'
+    assert_equal 'interactive address default' 10.0.0.1/24 "$AWG_ADDRESS"
+) >"$temp_dir/stdout" 2>"$temp_dir/stderr"; then
+    fail 'empty interactive AWG_ADDRESS did not use its default'
+fi
+
+if (
+    unset AWG_ADDRESS
+    require_setting AWG_ADDRESS </dev/null
+) >"$temp_dir/stdout" 2>"$temp_dir/stderr"; then
+    fail 'missing non-interactive AWG_ADDRESS used the interactive default'
+fi
+
 insecure_config="$temp_dir/insecure.env"
 printf '%s\n' 'AWG_API_TOKEN=insecure-token' >"$insecure_config"
 chmod 0622 "$insecure_config"
@@ -251,6 +367,12 @@ done
 legacy_dir="$temp_dir/data"
 default_dir="$temp_dir/var/lib/awg-server"
 mkdir -p "$legacy_dir" "$default_dir"
+(
+    unset AWG_DATA_DIR
+    select_data_dir "$legacy_dir" "$default_dir"
+    assert_equal 'empty legacy data directory' "$default_dir" "$AWG_DATA_DIR"
+)
+touch "$legacy_dir/clients.json"
 (
     unset AWG_DATA_DIR
     select_data_dir "$legacy_dir" "$default_dir"

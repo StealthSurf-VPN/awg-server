@@ -101,7 +101,7 @@ load_config_file() {
         || die "$config_file must not be group or world writable"
 
     # shellcheck disable=SC1090
-    source "$config_file" || die "could not load $config_file"
+    source "$config_file"
 }
 
 restore_process_environment() {
@@ -126,6 +126,7 @@ prompt_setting() {
     else
         read -r -p "$prompt: " value
     fi
+    [[ -n $value || $key != AWG_ADDRESS ]] || value=10.0.0.1/24
     [[ -n $value ]] || die "$key is required"
     printf -v "$key" '%s' "$value"
 }
@@ -167,7 +168,7 @@ select_data_dir() {
     local default_dir=$2
 
     [[ -n ${AWG_DATA_DIR:-} ]] && return
-    if [[ -d $legacy_dir ]]; then
+    if [[ -f $legacy_dir/clients.json ]]; then
         AWG_DATA_DIR=$legacy_dir
     else
         AWG_DATA_DIR=$default_dir
@@ -194,6 +195,76 @@ invocation_changed() {
     local current=${2:-}
 
     [[ -n $current && $current != "$previous" ]]
+}
+
+current_time_milliseconds() {
+    local fraction
+    local now=${EPOCHREALTIME:-}
+    local seconds
+
+    if [[ -z $now ]]; then
+        seconds=$(date +%s)
+        printf '%d\n' "$((seconds * 1000))"
+        return
+    fi
+
+    seconds=${now%.*}
+    fraction=${now#*.}
+    printf '%d\n' "$((10#$seconds * 1000 + 10#${fraction:0:3}))"
+}
+
+deadline_after_seconds() {
+    local now
+    local seconds=$1
+
+    now=$(current_time_milliseconds)
+    printf '%d\n' "$((now + seconds * 1000))"
+}
+
+remaining_milliseconds() {
+    local deadline=$1
+    local now
+    local remaining
+
+    now=$(current_time_milliseconds)
+    remaining=$((deadline - now))
+    ((remaining > 0)) || return 1
+    printf '%d\n' "$remaining"
+}
+
+run_before_deadline() {
+    local deadline=$1
+    local duration
+    local remaining
+
+    shift
+    remaining=$(remaining_milliseconds "$deadline") || return 124
+    printf -v duration '%d.%03ds' \
+        "$((remaining / 1000))" "$((remaining % 1000))"
+    timeout --foreground --signal=KILL "$duration" "$@"
+}
+
+service_healthy_before_deadline() {
+    local deadline=$1
+    local previous_invocation=$2
+    local health_port=$3
+    local current_invocation
+    local response
+
+    if ! current_invocation=$(run_before_deadline "$deadline" systemctl show \
+        --property=InvocationID --value awg-server.service 2>/dev/null); then
+        return 1
+    fi
+    invocation_changed "$previous_invocation" "$current_invocation" \
+        || return 1
+    run_before_deadline "$deadline" \
+        systemctl is-active --quiet awg-server.service || return 1
+    if ! response=$(run_before_deadline "$deadline" curl -fsS --noproxy '*' \
+        --max-time 1 "http://127.0.0.1:$health_port/health" 2>/dev/null); then
+        return 1
+    fi
+    health_response_ok "$response" || return 1
+    remaining_milliseconds "$deadline" >/dev/null
 }
 
 require_supported_host() {
@@ -372,12 +443,10 @@ service_gate_failed() {
 }
 
 start_and_verify_service() {
-    local current_invocation
     local deadline
     local health_port=${AWG_HTTP_PORT:-7777}
     local installed_version
     local previous_invocation
-    local response
 
     if ! installed_version=$(/usr/local/bin/awg-server version); then
         service_gate_failed 'installed binary did not report its version'
@@ -386,34 +455,29 @@ start_and_verify_service() {
         || service_gate_failed \
             'installed binary version does not match AWG_SERVER_VERSION'
 
-    systemctl daemon-reload \
+    deadline=$(deadline_after_seconds 30)
+    run_before_deadline "$deadline" systemctl daemon-reload \
         || service_gate_failed 'systemd daemon-reload failed'
-    systemctl enable awg-server.service \
+    run_before_deadline "$deadline" systemctl enable awg-server.service \
         || service_gate_failed 'could not enable awg-server.service'
-    if ! previous_invocation=$(systemctl show \
+    if ! previous_invocation=$(run_before_deadline "$deadline" systemctl show \
         --property=InvocationID --value awg-server.service); then
         service_gate_failed 'could not read the current service invocation'
     fi
 
-    deadline=$((SECONDS + 30))
-    systemctl restart --no-block awg-server.service \
+    run_before_deadline "$deadline" \
+        systemctl restart --no-block awg-server.service \
         || service_gate_failed 'could not start awg-server.service'
-    systemctl is-enabled --quiet awg-server.service \
+    run_before_deadline "$deadline" \
+        systemctl is-enabled --quiet awg-server.service \
         || service_gate_failed 'awg-server.service is not enabled'
 
-    while ((SECONDS < deadline)); do
-        current_invocation=$(systemctl show \
-            --property=InvocationID --value awg-server.service \
-            2>/dev/null || true)
-        if invocation_changed "$previous_invocation" "$current_invocation" \
-            && systemctl is-active --quiet awg-server.service; then
-            response=$(curl -fsS --noproxy '*' --max-time 1 \
-                "http://127.0.0.1:$health_port/health" 2>/dev/null || true)
-            if health_response_ok "$response"; then
-                return
-            fi
+    while remaining_milliseconds "$deadline" >/dev/null; do
+        if service_healthy_before_deadline \
+            "$deadline" "$previous_invocation" "$health_port"; then
+            return
         fi
-        sleep 1
+        run_before_deadline "$deadline" sleep 1 || break
     done
 
     service_gate_failed \
