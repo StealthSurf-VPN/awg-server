@@ -62,6 +62,33 @@ for response in '{"status":"degraded"}' '{"status":"ok"} ' ''; do
     assert_rejected "invalid health response $response" health_response_ok "$response"
 done
 
+invocation_changed invocation-old invocation-new \
+    || fail 'changed service invocation was rejected'
+assert_rejected 'unchanged service invocation' \
+    invocation_changed invocation-same invocation-same
+assert_rejected 'empty current service invocation' \
+    invocation_changed invocation-old ''
+
+caller_exit_trap=$(trap -p EXIT)
+registered_temp_path="$temp_dir/registered-temp"
+mkdir "$registered_temp_path"
+INSTALL_TEMP_PATHS=("$registered_temp_path")
+cleanup_temp_paths || fail 'registered temporary paths were not cleaned'
+[[ ! -e $registered_temp_path ]] \
+    || fail 'registered temporary path still exists after cleanup'
+assert_equal 'caller EXIT trap preservation' \
+    "$caller_exit_trap" "$(trap -p EXIT)"
+INSTALL_TEMP_PATHS=()
+if ! (
+    INSTALL_TEMP_PATHS=()
+    cleanup_temp_paths
+); then
+    fail 'empty temporary-path registry was rejected'
+fi
+if grep -Eq 'trap[[:space:]]+-[[:space:]]+EXIT' "$installer"; then
+    fail 'installer helpers clear the caller EXIT trap'
+fi
+
 existing_config="$temp_dir/existing.env"
 explicit_config="$temp_dir/explicit.env"
 printf '%s\n' \
@@ -160,9 +187,11 @@ assert_rejected 'group/world-writable config' load_config_file "$insecure_config
 assert_rejected 'non-regular config' load_config_file "$temp_dir"
 
 rendered_config="$temp_dir/rendered.env"
+environment_value='value with spaces $dollar \backslash "quote" `backtick`'
+expected_environment_line='AWG_API_TOKEN="value with spaces \$dollar \\backslash \"quote\" \`backtick\`"'
 (
     clear_config
-    AWG_API_TOKEN='token with spaces and $shell syntax'
+    AWG_API_TOKEN=$environment_value
     AWG_ADDRESS=10.2.0.1/24
     AWG_ENDPOINT=vpn.example.com
     AWG_RELEASE_PUBLIC_KEY_FILE=/etc/awg-server/release-signing-public.pem
@@ -173,6 +202,9 @@ grep -q '^AWG_API_TOKEN=' "$rendered_config" \
     || fail 'rendered environment omitted AWG_API_TOKEN'
 grep -q '^AWG_I1=' "$rendered_config" \
     || fail 'rendered environment omitted AWG_I1'
+assert_equal 'systemd-compatible environment representation' \
+    "$expected_environment_line" \
+    "$(grep '^AWG_API_TOKEN=' "$rendered_config")"
 if grep -q '^AWG_SERVER_VERSION=' "$rendered_config"; then
     fail 'rendered service environment included AWG_SERVER_VERSION'
 fi
@@ -183,10 +215,24 @@ fi
     clear_config
     # shellcheck source=/dev/null
     source "$rendered_config"
-    assert_equal 'rendered token round trip' 'token with spaces and $shell syntax' "$AWG_API_TOKEN"
+    assert_equal 'rendered token round trip' "$environment_value" "$AWG_API_TOKEN"
     assert_equal 'rendered address round trip' 10.2.0.1/24 "$AWG_ADDRESS"
     assert_equal 'rendered CPS round trip' '<b 0xc0><r 32><t>' "$AWG_I1"
 )
+
+for separator in $'\n' $'\r'; do
+    if (
+        clear_config
+        AWG_API_TOKEN="before${separator}after"
+        render_environment
+    ) >"$temp_dir/stdout" 2>"$temp_dir/stderr"; then
+        fail 'CR/LF environment value returned success'
+    fi
+    [[ ! -s $temp_dir/stdout ]] \
+        || fail 'CR/LF environment value produced partial output'
+    grep -Fq 'must not contain carriage returns or newlines' "$temp_dir/stderr" \
+        || fail 'CR/LF environment rejection did not explain the failure'
+done
 
 legacy_dir="$temp_dir/data"
 default_dir="$temp_dir/var/lib/awg-server"

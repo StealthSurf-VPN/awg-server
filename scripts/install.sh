@@ -38,10 +38,20 @@ readonly -a CONFIG_KEYS=(
 
 PROCESS_ENV_PRESENT=()
 PROCESS_ENV_VALUES=()
+INSTALL_TEMP_PATHS=()
 
 die() {
     printf 'install failed: %s\n' "$1" >&2
     exit 1
+}
+
+cleanup_temp_paths() {
+    local path
+
+    ((${#INSTALL_TEMP_PATHS[@]} > 0)) || return 0
+    for path in "${INSTALL_TEMP_PATHS[@]}"; do
+        rm -rf -- "$path" || true
+    done
 }
 
 usage() {
@@ -131,12 +141,24 @@ require_setting() {
 }
 
 render_environment() {
-    local key
+    local key value
 
     for key in "${ENVIRONMENT_KEYS[@]}"; do
         [[ ${!key+x} ]] || continue
-        printf '%s=' "$key"
-        printf '%q\n' "${!key}"
+        value=${!key}
+        if [[ $value == *$'\r'* || $value == *$'\n'* ]]; then
+            die "$key must not contain carriage returns or newlines"
+        fi
+    done
+
+    for key in "${ENVIRONMENT_KEYS[@]}"; do
+        [[ ${!key+x} ]] || continue
+        value=${!key}
+        value=${value//\\/\\\\}
+        value=${value//\"/\\\"}
+        value=${value//\$/\\\$}
+        value=${value//\`/\\\`}
+        printf '%s="%s"\n' "$key" "$value"
     done
 }
 
@@ -165,6 +187,13 @@ release_asset_name() {
 
 health_response_ok() {
     [[ ${1:-} == '{"status":"ok"}' ]]
+}
+
+invocation_changed() {
+    local previous=${1:-}
+    local current=${2:-}
+
+    [[ -n $current && $current != "$previous" ]]
 }
 
 require_supported_host() {
@@ -236,7 +265,7 @@ install_verified_release() {
     local verified_key
 
     release_dir=$(mktemp -d)
-    trap 'rm -rf -- "$release_dir"' EXIT
+    INSTALL_TEMP_PATHS+=("$release_dir")
     verified_key="$release_dir/release-signing-public.pem"
     install -m 0644 "$AWG_RELEASE_PUBLIC_KEY_FILE" "$verified_key"
 
@@ -288,7 +317,6 @@ install_verified_release() {
         "$release_dir/$asset" /usr/local/bin/awg-server
 
     rm -rf -- "$release_dir"
-    trap - EXIT
 }
 
 write_host_configuration() {
@@ -299,24 +327,22 @@ write_host_configuration() {
     mkdir -p -- "$AWG_DATA_DIR"
 
     environment_tmp=$(mktemp /etc/awg-server.env.XXXXXX)
-    trap 'rm -f -- "$environment_tmp"' EXIT
+    INSTALL_TEMP_PATHS+=("$environment_tmp")
     render_environment > "$environment_tmp"
     chown root:root "$environment_tmp"
     chmod 0600 "$environment_tmp"
     mv -f -- "$environment_tmp" /etc/awg-server.env
-    trap - EXIT
 
     sysctl_tmp=$(mktemp /etc/sysctl.d/99-awg-server.conf.XXXXXX)
-    trap 'rm -f -- "$sysctl_tmp"' EXIT
+    INSTALL_TEMP_PATHS+=("$sysctl_tmp")
     printf '%s\n' 'net.ipv4.ip_forward=1' > "$sysctl_tmp"
     chown root:root "$sysctl_tmp"
     chmod 0644 "$sysctl_tmp"
     mv -f -- "$sysctl_tmp" /etc/sysctl.d/99-awg-server.conf
-    trap - EXIT
     sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
     unit_tmp=$(mktemp /etc/systemd/system/awg-server.service.XXXXXX)
-    trap 'rm -f -- "$unit_tmp"' EXIT
+    INSTALL_TEMP_PATHS+=("$unit_tmp")
     cat > "$unit_tmp" <<'UNIT'
 [Unit]
 Description=AmneziaWG Server
@@ -337,7 +363,6 @@ UNIT
     chown root:root "$unit_tmp"
     chmod 0644 "$unit_tmp"
     mv -f -- "$unit_tmp" /etc/systemd/system/awg-server.service
-    trap - EXIT
 }
 
 service_gate_failed() {
@@ -347,9 +372,11 @@ service_gate_failed() {
 }
 
 start_and_verify_service() {
+    local current_invocation
     local deadline
     local health_port=${AWG_HTTP_PORT:-7777}
     local installed_version
+    local previous_invocation
     local response
 
     if ! installed_version=$(/usr/local/bin/awg-server version); then
@@ -363,14 +390,23 @@ start_and_verify_service() {
         || service_gate_failed 'systemd daemon-reload failed'
     systemctl enable awg-server.service \
         || service_gate_failed 'could not enable awg-server.service'
-    systemctl restart awg-server.service \
+    if ! previous_invocation=$(systemctl show \
+        --property=InvocationID --value awg-server.service); then
+        service_gate_failed 'could not read the current service invocation'
+    fi
+
+    deadline=$((SECONDS + 30))
+    systemctl restart --no-block awg-server.service \
         || service_gate_failed 'could not start awg-server.service'
     systemctl is-enabled --quiet awg-server.service \
         || service_gate_failed 'awg-server.service is not enabled'
 
-    deadline=$((SECONDS + 30))
     while ((SECONDS < deadline)); do
-        if systemctl is-active --quiet awg-server.service; then
+        current_invocation=$(systemctl show \
+            --property=InvocationID --value awg-server.service \
+            2>/dev/null || true)
+        if invocation_changed "$previous_invocation" "$current_invocation" \
+            && systemctl is-active --quiet awg-server.service; then
             response=$(curl -fsS --noproxy '*' --max-time 1 \
                 "http://127.0.0.1:$health_port/health" 2>/dev/null || true)
             if health_response_ok "$response"; then
@@ -442,5 +478,6 @@ main() {
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    trap cleanup_temp_paths EXIT
     main "$@"
 fi
