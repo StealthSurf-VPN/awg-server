@@ -6,11 +6,13 @@ Install the latest stable `awg-server` release on Ubuntu 22.04 with one copy-pas
 
 ## User flow
 
-The documented command downloads the installer to a root-owned `mktemp` file and executes it only after `curl` succeeds:
+The documented command streams the installer directly from the repository into Bash:
 
 ```bash
-sudo bash -c 'f=$(mktemp) || exit; trap "rm -f -- \"$f\"" EXIT; curl -fsSL https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/main/scripts/install.sh -o "$f" && bash "$f"'
+bash <(curl -fsSL https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/main/scripts/install.sh)
 ```
+
+It is run from a root shell. `curl -f` rejects HTTP error responses, and `scripts/install.sh` keeps host mutations behind its final `main` invocation so an incomplete stream that does not reach the complete entrypoint cannot start installation.
 
 The installer asks only for:
 
@@ -35,4 +37,3 @@ AmneziaWG package installation, XanMod handling, forwarding, atomic environment/
 ## Verification
 
 There is no dedicated installer test script. The change is checked with Bash syntax validation, pinned ShellCheck, pinned Actionlint, release automation checks, `go vet ./...`, the required Go build, and diff review.
-
