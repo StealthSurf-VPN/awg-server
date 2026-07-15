@@ -8,58 +8,20 @@ Every newly created client also receives a unique, server-generated WireGuard pr
 
 ## Quick Install (Ubuntu 22.04)
 
-The recommended installer targets an Ubuntu 22.04 host or VM, installs AmneziaWG 2.0, and installs one exact signed `awg-server` release. Obtain the project's Ed25519 release public key through a trusted administrative channel before running it. The installer never downloads its trust key.
-
-Download the installer from the same exact `vMAJOR.MINOR.PATCH` tag you intend to install. In interactive mode it prompts for missing required values; the API token prompt is hidden:
+Run this from a root shell:
 
 ```bash
-TAG=v1.2.3
-installer=$(mktemp)
-chmod 0600 "$installer"
-trap 'rm -f -- "$installer"' EXIT
-curl -fsSL \
-  "https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/${TAG}/scripts/install.sh" \
-  -o "$installer" &&
-sudo env \
-  AWG_SERVER_VERSION="${TAG#v}" \
-  AWG_RELEASE_PUBLIC_KEY_FILE=/root/awg-server-release-signing-public.pem \
-  bash "$installer"
+bash <(curl -fsSL https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/main/scripts/install.sh)
 ```
 
-The trusted key must already exist on the host at the supplied path. On a rerun, the installer can reuse `/etc/awg-server/release-signing-public.pem`, where it stores the verified key after the first successful release installation.
+The installer selects the latest stable release, verifies its signed checksum manifest with the embedded Ed25519 public key, installs AmneziaWG 2.0 and `awg-server`, configures systemd, and requires a healthy service. It prompts for the API token without echo, the public endpoint, and the VPN address; press Enter for the address default `10.0.0.1/24`.
 
-For unattended installation, put secrets in a trusted root-owned mode-`0600` configuration file instead of command arguments or shell history:
-
-```bash
-sudo install -o root -g root -m 0600 /dev/null /root/awg-server-install.env
-sudoedit /root/awg-server-install.env
-```
-
-```bash
-AWG_SERVER_VERSION=1.2.3
-AWG_RELEASE_PUBLIC_KEY_FILE=/root/awg-server-release-signing-public.pem
-AWG_API_TOKEN='replace-in-editor'
-AWG_ADDRESS=10.0.0.1/24
-AWG_ENDPOINT=vpn.example.com
-```
-
-```bash
-TAG=v1.2.3
-installer=$(mktemp)
-chmod 0600 "$installer"
-trap 'rm -f -- "$installer"' EXIT
-curl -fsSL \
-  "https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/${TAG}/scripts/install.sh" \
-  -o "$installer" &&
-sudo bash "$installer" --config /root/awg-server-install.env
-```
-
-Keep `AWG_SERVER_VERSION` equal to the installer tag without the leading `v`. Reruns preserve the selected data directory and its JSON state. The installer does not configure inbound firewall policy or open or close ports. The running `awg-server` manages its own NAT/MASQUERADE rule as interfaces are restored or created; allow the required AWG UDP ports and restrict the HTTP API port to the internal network. See the [installation guide](docs/installation.md) for all inputs, precedence, verification gates, manual installation, and troubleshooting.
+Reruns reuse `/etc/awg-server.env` and preserve the selected data directory. The installer does not configure inbound firewall policy; allow the required AWG UDP ports and restrict the HTTP API port to the internal network. See the [installation guide](docs/installation.md) for environment overrides, verification gates, manual installation, and troubleshooting.
 
 ## Requirements
 
 - Ubuntu 22.04 on a host or VM, not inside Docker/LXC
-- The trusted Ed25519 release public key and an exact stable release version
+- A root shell and `curl`
 - AmneziaVPN 4.8.12.9 or newer, or another AmneziaWG 2.0-compatible client
 - For manual installation only, [`amneziawg`](https://launchpad.net/~amnezia/+archive/ubuntu/ppa), `iptables`, `iproute2`, and IP forwarding; the installer configures these host requirements
 

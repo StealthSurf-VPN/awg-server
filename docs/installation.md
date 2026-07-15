@@ -8,91 +8,36 @@ AmneziaVPN clients must be version 4.8.12.9 or newer. AmneziaWG 1.0 configuratio
 
 ## Prerequisites
 
-- Root access
+- A root shell
 - Ubuntu 22.04 LTS with headers for the running kernel
-- A trusted copy of the project's Ed25519 release public key
-- `curl` to download the installer from an exact release tag
+- `curl`
 - Go 1.24+ only when building `awg-server` from source
 
-## Recommended: verified installer
+## Recommended: one-line installer
 
-The installer supports Ubuntu 22.04 on `x86_64` and `aarch64`/`arm64` hosts or VMs. It must run as root and rejects containers. It installs `iptables`, `iproute2`, the AmneziaWG packages, and other host dependencies itself.
-
-Choose an exact stable tag, such as `v1.2.3`. Do not download the installer from `main`, `latest`, or another mutable URL. The trusted Ed25519 public key must already be present on the host; the installer deliberately does not download its own trust anchor.
-
-### Interactive installation
-
-Download the script from the exact tag and run it as root. This example supplies the version and trusted-key path, then lets the installer prompt for the missing API token, VPN address, and public endpoint. The token is read without echoing it:
+Run this command from a root shell:
 
 ```bash
-TAG=v1.2.3
-installer=$(mktemp)
-chmod 0600 "$installer"
-trap 'rm -f -- "$installer"' EXIT
-curl -fsSL \
-  "https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/${TAG}/scripts/install.sh" \
-  -o "$installer" &&
-sudo env \
-  AWG_SERVER_VERSION="${TAG#v}" \
-  AWG_RELEASE_PUBLIC_KEY_FILE=/root/awg-server-release-signing-public.pem \
-  bash "$installer"
+bash <(curl -fsSL https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/main/scripts/install.sh)
 ```
 
-The key can instead be stored at `/etc/awg-server/release-signing-public.pem`. When no key path is supplied, an existing file at that canonical path is used before the installer prompts for a path.
+The installer supports `x86_64` and `aarch64`/`arm64` hosts or VMs and rejects containers. It installs the host dependencies and AmneziaWG package, resolves the latest stable `awg-server` release, and verifies the signed checksum manifest with its embedded Ed25519 public key before installing the selected binary.
 
-### Non-interactive installation
+The bootstrap script itself is trusted from the repository's `main` branch over GitHub HTTPS; the embedded key verifies the downloaded release artifacts.
 
-The configuration file is sourced by Bash as root. Create it from a trusted source, keep it root-owned and mode `0600`, and edit the token in the file instead of placing it in command arguments or shell history:
-
-```bash
-sudo install -o root -g root -m 0600 /dev/null /root/awg-server-install.env
-sudoedit /root/awg-server-install.env
-```
-
-Example file contents:
-
-```bash
-AWG_SERVER_VERSION=1.2.3
-AWG_RELEASE_PUBLIC_KEY_FILE=/root/awg-server-release-signing-public.pem
-AWG_API_TOKEN='replace-in-editor'
-AWG_ADDRESS=10.0.0.1/24
-AWG_ENDPOINT=vpn.example.com
-```
-
-Download the installer from the matching exact tag and pass the file explicitly:
-
-```bash
-TAG=v1.2.3
-installer=$(mktemp)
-chmod 0600 "$installer"
-trap 'rm -f -- "$installer"' EXIT
-curl -fsSL \
-  "https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/${TAG}/scripts/install.sh" \
-  -o "$installer" &&
-sudo bash "$installer" --config /root/awg-server-install.env
-```
-
-The installer accepts only `--config FILE` (plus `-h`/`--help`) as command-line options. The file must be a regular file owned by the effective user and must not be group- or world-writable; mode `0600` is recommended because it contains the bearer token.
+It prompts for `AWG_API_TOKEN` without echo, `AWG_ENDPOINT`, and `AWG_ADDRESS`. Press Enter at the address prompt to use `10.0.0.1/24`.
 
 ### Inputs and precedence
 
 Supported settings use this exact precedence, from highest to lowest:
 
 1. Variables present in the installer's process environment
-2. The file supplied with `--config`
-3. An existing `/etc/awg-server.env`
-4. Interactive prompts for any still-missing required setting
+2. An existing `/etc/awg-server.env`
+3. Interactive prompts for any still-missing required setting
 
-Process-environment presence wins over the two config files even when its value is empty, so an empty required value remains missing after the precedence merge instead of revealing a lower-precedence value. For `AWG_RELEASE_PUBLIC_KEY_FILE` only, the installer then uses `/etc/awg-server/release-signing-public.pem` when that path is a regular file. If that canonical-key fallback does not apply, the empty value is prompted for in a TTY or fails in non-interactive mode, like every other missing required setting.
+Process-environment presence wins even when its value is empty, so an empty required value is prompted for in a TTY or fails in non-interactive mode instead of revealing the persisted value.
 
-The two installer-only settings are not written to the systemd environment file:
-
-| Variable | Required | Description |
-| -------- | -------- | ----------- |
-| `AWG_SERVER_VERSION` | Yes | Exact stable `MAJOR.MINOR.PATCH` version without a leading `v`. Prereleases, `latest`, and malformed versions are rejected. |
-| `AWG_RELEASE_PUBLIC_KEY_FILE` | Yes, unless the canonical key exists | Path to a trusted Ed25519 public PEM used to verify the signed release manifest. |
-
-The following 20 settings are the complete service environment accepted by the installer. Required values have no default; omitted optional values use the shown server defaults.
+The following settings are the complete service environment accepted by the installer. Unless noted, required values have no default; omitted optional values use the shown server defaults.
 
 | Variable | Required/default | Description |
 | -------- | ---------------- | ----------- |
@@ -119,16 +64,16 @@ The following 20 settings are the complete service environment accepted by the i
 
 See the [configuration reference](configuration.md) for validation and per-client override semantics. H1-H4, S1, S2, the server private key, and client PSKs are generated by the server and are not installer inputs.
 
-When `AWG_DATA_DIR` is not set, the installer chooses `/data` only when the legacy `/data/clients.json` file exists; an empty `/data` directory does not qualify. Otherwise it chooses `/var/lib/awg-server`. It writes the selected path to `/etc/awg-server.env`. A rerun first loads that file, keeps the selected data directory and its JSON files, and reuses the canonical release key when no higher-precedence value replaces either setting. Selecting a different data directory does not migrate old data.
+When `AWG_DATA_DIR` is not set, the installer chooses `/data` only when the legacy `/data/clients.json` file exists; an empty `/data` directory does not qualify. Otherwise it chooses `/var/lib/awg-server`. It writes the selected path to `/etc/awg-server.env`. A rerun loads that file and keeps the selected data directory and its JSON files. Selecting a different data directory does not migrate old data.
 
 ### Installation and health gates
 
 The installer:
 
 1. Installs the official AmneziaWG package from the Amnezia PPA, including the XanMod LLVM 19 prerequisites when needed.
-2. Downloads the architecture-specific binary, `SHA256SUMS`, and `SHA256SUMS.sig` only from `releases/download/v$AWG_SERVER_VERSION`.
-3. Requires an Ed25519 public key, verifies the manifest signature, requires exactly one checksum for the selected asset, verifies that checksum, and checks the binary's reported version before installation.
-4. Installs the binary at `/usr/local/bin/awg-server`, the key at `/etc/awg-server/release-signing-public.pem`, the root-only environment at `/etc/awg-server.env`, the forwarding sysctl at `/etc/sysctl.d/99-awg-server.conf`, and the unit at `/etc/systemd/system/awg-server.service`.
+2. Resolves GitHub's latest stable release and downloads its architecture-specific binary, `SHA256SUMS`, and `SHA256SUMS.sig` from one exact version-bound release URL.
+3. Verifies the manifest with the embedded Ed25519 public key, requires exactly one checksum for the selected asset, verifies that checksum, and checks the binary's reported version before installation.
+4. Installs the binary at `/usr/local/bin/awg-server`, the root-only environment at `/etc/awg-server.env`, the forwarding sysctl at `/etc/sysctl.d/99-awg-server.conf`, and the unit at `/etc/systemd/system/awg-server.service`.
 5. Enables and restarts `awg-server.service`, waits for a new active systemd invocation, and requires the exact `{"status":"ok"}` response from `http://127.0.0.1:$AWG_HTTP_PORT/health` within 30 seconds.
 
 The command exits non-zero if any gate fails. A service-gate failure prints the full unit status and the last 50 journal lines. After a successful run, these checks should also pass:
@@ -140,7 +85,7 @@ systemctl is-active --quiet awg-server.service
 curl -fsS http://127.0.0.1:7777/health
 ```
 
-Use the configured `AWG_HTTP_PORT` instead of `7777` when overridden. Rerunning the installer reinstalls the requested exact version and restarts the unit without deleting the selected data directory.
+Use the configured `AWG_HTTP_PORT` instead of `7777` when overridden. Rerunning the installer installs the current latest stable release and restarts the unit without deleting the selected data directory.
 
 The installer does not configure inbound firewall policy or open or close ports. After the service starts, `awg-server` manages its own NAT/MASQUERADE rule as AWG interfaces are restored or created. The operator must expose every required AWG UDP port and restrict the HTTP API port to the internal network as described in [Firewall](#firewall).
 
