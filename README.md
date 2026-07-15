@@ -6,36 +6,54 @@ Supports **per-client obfuscation profiles** — each unique set of CPS paramete
 
 Every newly created client also receives a unique, server-generated WireGuard preshared key (PSK). The PSK is installed on the AWG peer and included only in that client's generated configuration.
 
-## Quick Install (Linux)
+## Quick Install (Ubuntu 22.04)
 
-This example installs AmneziaWG 2.0 and one exact signed `awg-server` release. Before running it, obtain both the intended stable `MAJOR.MINOR.PATCH` version and the project's Ed25519 release public key through a trusted administrative channel, export that version as `AWG_VERSION`, and install the key at `/etc/awg-server/release-signing-public.pem`. Legacy unsigned releases and mutable `latest` aliases are intentionally rejected.
+This example targets an Ubuntu 22.04 host or VM. It installs AmneziaWG 2.0 from the official Amnezia PPA and one exact signed `awg-server` release. Containers are not supported for production because they share the host kernel and cannot provide an independent AmneziaWG module. AmneziaVPN clients must be version 4.8.12.9 or newer; generate new client configurations instead of reusing AmneziaWG 1.0 configurations.
+
+Before running it, obtain both the intended stable `MAJOR.MINOR.PATCH` server version and the project's Ed25519 release public key through a trusted administrative channel, export that version as `AWG_SERVER_VERSION`, and install the key at `/etc/awg-server/release-signing-public.pem`. Legacy unsigned releases and mutable `latest` aliases are intentionally rejected.
 
 ```bash
 set -Eeuo pipefail
-: "${AWG_VERSION:?export the trusted release version as AWG_VERSION=MAJOR.MINOR.PATCH}"
-[[ $AWG_VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+: "${AWG_SERVER_VERSION:?export the trusted release version as AWG_SERVER_VERSION=MAJOR.MINOR.PATCH}"
+[[ $AWG_SERVER_VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 
-# 1. Install AmneziaWG 2.0 kernel module (DKMS, from source)
-apt update && apt install -y build-essential curl git dkms openssl linux-headers-$(uname -r)
-git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git /tmp/amneziawg-module
-cd /tmp/amneziawg-module/src
-make dkms-install
-dkms add -m amneziawg -v 1.0.0
-dkms build -m amneziawg -v 1.0.0
-dkms install -m amneziawg -v 1.0.0
+# 1. Install the official AmneziaWG 2.0 kernel module and awg CLI
+apt-get update
+apt-get install -y \
+  build-essential ca-certificates curl dkms gnupg2 iproute2 iptables \
+  libelf-dev openssl \
+  python3-launchpadlib software-properties-common \
+  "linux-headers-$(uname -r)"
+
+# XanMod kernels installed by the StealthSurf host bootstrap are built with
+# LLVM 19. Install the matching toolchain before DKMS builds AmneziaWG.
+if [[ $(uname -r) == *xanmod* ]]; then
+  install -d -m 0755 /etc/apt/keyrings
+  curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+    | gpg --batch --yes --dearmor -o /etc/apt/keyrings/llvm-snapshot.gpg
+  echo 'deb [signed-by=/etc/apt/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main' \
+    > /etc/apt/sources.list.d/llvm-19.list
+  apt-get update
+  apt-get install -y clang-19 lld-19 llvm-19
+  for tool in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+    update-alternatives --install "/usr/bin/$tool" "$tool" "/usr/bin/$tool-19" 190
+    update-alternatives --set "$tool" "/usr/bin/$tool-19"
+  done
+  export PATH=/usr/lib/llvm-19/bin:$PATH
+fi
+
+add-apt-repository -y ppa:amnezia/ppa
+apt-get update
+apt-get install -y amneziawg
 modprobe amneziawg
-cd ~ && rm -rf /tmp/amneziawg-module
+modinfo amneziawg >/dev/null
+awg --version
 
-# 2. Install AmneziaWG 2.0 tools (awg CLI)
-git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/amneziawg-tools
-make -C /tmp/amneziawg-tools/src && make -C /tmp/amneziawg-tools/src install
-rm -rf /tmp/amneziawg-tools
-
-# 3. Enable IP forwarding
+# 2. Enable IP forwarding
 sysctl -w net.ipv4.ip_forward=1
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 
-# 4. Download and verify the exact signed awg-server release
+# 3. Download and verify the exact signed awg-server release
 case "$(uname -m)" in
   x86_64) ASSET=awg-server-linux-amd64 ;;
   aarch64|arm64) ASSET=awg-server-linux-arm64 ;;
@@ -43,7 +61,7 @@ case "$(uname -m)" in
 esac
 RELEASE_DIR=$(mktemp -d)
 trap 'rm -rf "$RELEASE_DIR"' EXIT
-RELEASE_URL="https://github.com/StealthSurf-VPN/awg-server/releases/download/v$AWG_VERSION"
+RELEASE_URL="https://github.com/StealthSurf-VPN/awg-server/releases/download/v$AWG_SERVER_VERSION"
 curl -fL "$RELEASE_URL/$ASSET" -o "$RELEASE_DIR/$ASSET"
 curl -fL "$RELEASE_URL/SHA256SUMS" -o "$RELEASE_DIR/SHA256SUMS"
 curl -fL "$RELEASE_URL/SHA256SUMS.sig" -o "$RELEASE_DIR/SHA256SUMS.sig"
@@ -59,22 +77,24 @@ CHECKSUM_LINE=$(grep -E "^[0-9a-f]{64}  ${ASSET}$" "$RELEASE_DIR/SHA256SUMS")
 test "$(printf '%s\n' "$CHECKSUM_LINE" | grep -c .)" -eq 1
 (cd "$RELEASE_DIR" && printf '%s\n' "$CHECKSUM_LINE" | sha256sum --check --strict -)
 chmod 0755 "$RELEASE_DIR/$ASSET"
-test "$("$RELEASE_DIR/$ASSET" version)" = "awg-server $AWG_VERSION"
+test "$("$RELEASE_DIR/$ASSET" version)" = "awg-server $AWG_SERVER_VERSION"
 install -o root -g root -m 0755 "$RELEASE_DIR/$ASSET" /usr/local/bin/awg-server
 rm -rf "$RELEASE_DIR"
 trap - EXIT
 
-# 5. Create data directory
+# 4. Create data directory
 mkdir -p /data
 
-# 6. Create systemd service
+# 5. Create systemd service
 cat > /etc/systemd/system/awg-server.service <<EOF
 [Unit]
 Description=AmneziaWG Server
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
+ExecStartPre=/sbin/modprobe amneziawg
 ExecStart=/usr/local/bin/awg-server
 Restart=always
 RestartSec=5
@@ -83,7 +103,7 @@ Environment=AWG_API_TOKEN=your-secret-token
 Environment=AWG_ADDRESS=10.0.0.1/24
 Environment=AWG_ENDPOINT=your.server.ip
 
-# Optional (shown values are defaults):
+# Optional application defaults:
 # Environment=AWG_JC=5
 # Environment=AWG_JMIN=50
 # Environment=AWG_JMAX=1000
@@ -99,7 +119,7 @@ Environment=AWG_ENDPOINT=your.server.ip
 WantedBy=multi-user.target
 EOF
 
-# 7. Start and enable on boot
+# 6. Start and enable on boot
 systemctl daemon-reload
 systemctl enable --now awg-server
 ```
@@ -113,8 +133,9 @@ journalctl -u awg-server -f
 
 ## Prerequisites
 
-- [amneziawg-linux-kernel-module](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) installed on host
-- [amneziawg-tools](https://github.com/amnezia-vpn/amneziawg-tools) (`awg` CLI) installed on host
+- Ubuntu 22.04 on a host or VM, not inside Docker/LXC
+- [`amneziawg`](https://launchpad.net/~amnezia/+archive/ubuntu/ppa) installed from the official Amnezia PPA; it provides both the DKMS module and `awg` CLI
+- AmneziaVPN 4.8.12.9 or newer, or another AmneziaWG 2.0-compatible client
 - `iptables`, `iproute2` (usually already present)
 - `net.ipv4.ip_forward=1` sysctl enabled
 
