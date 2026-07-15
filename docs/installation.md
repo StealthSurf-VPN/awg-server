@@ -1,73 +1,70 @@
 # Installation Guide
 
+## Target Platform
+
+This guide targets Ubuntu 22.04 LTS running directly on a host or VM. AmneziaWG 2.0 requires Linux 4.14 or newer; Ubuntu 22.04 exceeds that requirement. Docker and LXC containers share the host kernel, so they cannot provide an independent kernel-module installation and are not supported for production deployment.
+
+AmneziaVPN clients must be version 4.8.12.9 or newer. AmneziaWG 1.0 configurations are not upgraded in place; generate new client configurations after deploying this server.
+
 ## Prerequisites
 
-- Linux kernel 5.6+ (WireGuard support)
-- Root access or `NET_ADMIN` capability
-- `iptables`, `iproute2` (usually pre-installed)
-- Go 1.24+ (for building from source)
+- Root access
+- Ubuntu 22.04 LTS with headers for the running kernel
+- `iptables` and `iproute2`
+- Go 1.24+ only when building `awg-server` from source
 
-## 1. Install AmneziaWG Kernel Module
+## 1. Install AmneziaWG 2.0
 
-### Ubuntu / Debian
+Install the official `amneziawg` metapackage. It installs both the DKMS kernel module and the `awg` CLI from the Amnezia PPA:
 
 ```bash
-apt install -y dkms linux-headers-$(uname -r) git make gcc
+apt-get update
+apt-get install -y \
+  build-essential ca-certificates curl dkms gnupg2 iproute2 iptables \
+  libelf-dev \
+  python3-launchpadlib software-properties-common \
+  "linux-headers-$(uname -r)"
+```
 
-git clone https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git
-cd amneziawg-linux-kernel-module/src
-make
-make install
+If the running kernel is XanMod, install the matching LLVM 19 toolchain before installing AmneziaWG. Current XanMod kernels use LLVM-only build flags that the Ubuntu 22.04 default Clang 14 does not support:
+
+```bash
+if [[ $(uname -r) == *xanmod* ]]; then
+  install -d -m 0755 /etc/apt/keyrings
+  curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+    | gpg --batch --yes --dearmor -o /etc/apt/keyrings/llvm-snapshot.gpg
+  echo 'deb [signed-by=/etc/apt/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main' \
+    > /etc/apt/sources.list.d/llvm-19.list
+  apt-get update
+  apt-get install -y clang-19 lld-19 llvm-19
+  for tool in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+    update-alternatives --install "/usr/bin/$tool" "$tool" "/usr/bin/$tool-19" 190
+    update-alternatives --set "$tool" "/usr/bin/$tool-19"
+  done
+  export PATH=/usr/lib/llvm-19/bin:$PATH
+fi
+```
+
+Then enable the official Amnezia PPA and install the metapackage:
+
+```bash
+add-apt-repository -y ppa:amnezia/ppa
+apt-get update
+apt-get install -y amneziawg
+```
+
+Load and verify the installation:
+
+```bash
 modprobe amneziawg
-```
-
-Verify:
-
-```bash
-lsmod | grep amneziawg
-```
-
-### CentOS / RHEL / AlmaLinux
-
-```bash
-yum install -y dkms kernel-devel kernel-headers git make gcc
-
-git clone https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git
-cd amneziawg-linux-kernel-module/src
-make
-make install
-modprobe amneziawg
-```
-
-### DKMS (auto-rebuild on kernel update)
-
-```bash
-cd amneziawg-linux-kernel-module/src
-make dkms-install
-```
-
-This registers the module with DKMS so it rebuilds automatically after kernel updates.
-
-## 2. Install awg CLI Tool
-
-### Build from source
-
-```bash
-apt install -y git make gcc  # or yum install -y ...
-
-git clone https://github.com/amnezia-vpn/amneziawg-tools.git
-cd amneziawg-tools/src
-make
-make install
-```
-
-Verify:
-
-```bash
+modinfo amneziawg
 awg --version
+dkms status
 ```
 
-## 3. Build awg-server
+The upstream DKMS and tools package versions use their own `1.0.*` numbering. That number is not the protocol version; the current official PPA packages support the AmneziaWG 2.0 fields used by `awg-server`, including ranged H1-H4 values, S3/S4, and I1-I5.
+
+## 2. Build awg-server
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o awg-server .
@@ -81,7 +78,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o awg-server .
 
 Direct source builds intentionally do not contain the official release verification key, so `awg-server update` fails closed for them. Official Linux and macOS release binaries embed that Ed25519 key and verify the canonical version-bound asset URLs, signed six-asset checksum manifest, selected checksum, upgrade-only on-disk version, interprocess lock, size limit, and downloaded binary version before replacement. Windows self-update fails closed before network access because an active `.exe` cannot be replaced atomically. Bootstrap an existing legacy or source-built installation with a separately verified signed release before relying on Linux/macOS self-update.
 
-## 4. Deploy
+## 3. Deploy
 
 Copy binary to the server:
 
@@ -89,14 +86,14 @@ Copy binary to the server:
 scp awg-server root@your-server:/usr/local/bin/
 ```
 
-## 5. Enable IP Forwarding
+## 4. Enable IP Forwarding
 
 ```bash
 sysctl -w net.ipv4.ip_forward=1
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 ```
 
-## 6. Run
+## 5. Run
 
 ### Direct
 
@@ -114,7 +111,8 @@ Create `/etc/systemd/system/awg-server.service`:
 ```ini
 [Unit]
 Description=AmneziaWG Server
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
@@ -163,7 +161,7 @@ Startup restores every persisted client before starting the HTTP listener. When 
 
 Client create/update/regeneration/delete operations return a generic HTTP `500` when device work or `clients.json` persistence fails and attempt to restore the previous device state. Rollback is not guaranteed if a second host command fails or the process crashes, so inspect `awg show`, `ip route`, and the service logs after such an error.
 
-## 7. Firewall
+## 6. Firewall
 
 Open the automatic WireGuard UDP range, open every explicit per-client `awg_params.port`, and restrict the HTTP API to the internal network. The example `51820:51840` only covers 21 automatic or explicitly selected ports; increase it or add individual rules to match the deployment.
 
@@ -196,20 +194,19 @@ modinfo amneziawg
 If `modprobe amneziawg` fails, rebuild the module for your kernel version:
 
 ```bash
-cd amneziawg-linux-kernel-module/src
-make clean
-make
-make install
+apt-get install --reinstall "linux-headers-$(uname -r)" amneziawg-dkms
+dkms status
 modprobe amneziawg
 ```
 
 ### awg command not found
 
-Ensure `/usr/bin/awg` exists after `make install`. If installed to a different prefix:
+Reinstall the official tools package and verify the binary:
 
 ```bash
-which awg
-ln -s /usr/local/bin/awg /usr/bin/awg
+apt-get install --reinstall amneziawg-tools
+command -v awg
+awg --version
 ```
 
 ### Interface creation fails
