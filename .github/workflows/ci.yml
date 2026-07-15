@@ -57,6 +57,7 @@ jobs:
             -v "$PWD:/repo:ro" \
             -w /repo \
             koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb \
+            scripts/install.sh \
             scripts/release-marker.sh \
             scripts/release-marker_test.sh \
             scripts/release-notes.sh \
