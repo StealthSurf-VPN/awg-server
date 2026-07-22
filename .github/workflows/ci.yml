@@ -202,6 +202,12 @@ jobs:
             printf 'AWG_RELEASE_SIGNING_PUBLIC_KEY must be canonical base64 without whitespace\n' >&2
             exit 1
           }
+          grep -Fqx -- \
+            "readonly RELEASE_PUBLIC_KEY_BASE64='$RELEASE_PUBLIC_KEY'" \
+            scripts/install.sh || {
+              printf 'Installer public key does not match AWG_RELEASE_SIGNING_PUBLIC_KEY\n' >&2
+              exit 1
+            }
 
           release_notes_args=("$VERSION" CHANGELOG.md)
           if [ -n "$PREVIOUS_TAG" ]; then

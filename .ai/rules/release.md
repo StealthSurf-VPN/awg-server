@@ -40,7 +40,7 @@ bash scripts/release-previous-tag_test.sh
 2. Read only the immutable HEAD commit message from the exact `main` commit.
 3. Parse the strict marker with `scripts/release-marker.sh`.
 4. Resolve the previous published stable release and extract the exact dated changelog section plus its `Full Changelog` compare range with `scripts/release-notes.sh`.
-5. Validate `AWG_RELEASE_SIGNING_PUBLIC_KEY` as a canonical base64 Ed25519 public PEM and run `make build-all VERSION=X.Y.Z RELEASE_PUBLIC_KEY=...` in a read-only-token job.
+5. Validate `AWG_RELEASE_SIGNING_PUBLIC_KEY` as a canonical base64 Ed25519 public PEM, require the installer to embed that same key, and run `make build-all VERSION=X.Y.Z RELEASE_PUBLIC_KEY=...` in a read-only-token job.
 6. Verify the exact six updater asset names, embedded version, independently expected updater key and its presence in every real artifact, and `SHA256SUMS`, then upload an unsigned artifact.
 7. After required approval of the `release-signing` Environment, use a separate job with no source checkout or `GITHUB_TOKEN` permissions to revalidate the exact artifact, checksums, and embedded public key, require its Environment secret `AWG_RELEASE_SIGNING_PRIVATE_KEY` and the configured public key to be one matching Ed25519 pair, sign only `SHA256SUMS`, and verify the signature.
 8. Transfer the signed bundle to a separate publish job that alone receives `contents: write`.

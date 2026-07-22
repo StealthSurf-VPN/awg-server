@@ -73,7 +73,7 @@ After validation, the workflow:
 
 1. resolves and binds the previous stable release tag;
 2. renders the exact changelog section and `Full Changelog` range;
-3. validates the configured Ed25519 public key, then builds Linux, macOS, and Windows binaries for `amd64` and `arm64` with both `VERSION` and that release trust key embedded;
+3. validates the configured Ed25519 public key, requires the installer to embed that same key, then builds Linux, macOS, and Windows binaries for `amd64` and `arm64` with both `VERSION` and that release trust key embedded;
 4. verifies the exact six-asset set, the runnable Linux `amd64` version, an independently expected linker key and its presence in every real artifact, and `SHA256SUMS`;
 5. uploads an unsigned build artifact from the source checkout job;
 6. in a separate job with no source checkout, revalidates the exact artifact contents, checksums, and embedded public key, requires the private key and configured public key to be one matching Ed25519 pair, and signs only `SHA256SUMS`;
