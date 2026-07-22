@@ -30,9 +30,11 @@ func NewServer(manager *clients.Manager, cfg *config.Config, collector *usage.Co
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /api/capabilities", s.authMiddleware(s.handleCapabilities))
 	mux.HandleFunc("POST /api/awg-params/generate", s.authMiddleware(s.handleGenerateAWGParams))
 	mux.HandleFunc("GET /api/clients", s.authMiddleware(s.handleListClients))
 	mux.HandleFunc("POST /api/clients", s.authMiddleware(s.handleCreateClient))
+	mux.HandleFunc("PATCH /api/clients/lan-group", s.authMiddleware(s.handleUpdateLANGroup))
 	mux.HandleFunc("GET /api/clients/{id}/configuration", s.authMiddleware(s.handleGetConfiguration))
 	mux.HandleFunc("PATCH /api/clients/{id}", s.authMiddleware(s.handleUpdateClient))
 	mux.HandleFunc("POST /api/clients/{id}/regenerate-awg-params", s.authMiddleware(s.handleRegenerateClientAWGParams))

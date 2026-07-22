@@ -70,7 +70,7 @@ func NewPool(cfg *config.Config, privateKey [32]byte, maxIfaces int) (*Pool, err
 
 	log.Printf("using outbound interface: %s", outIface)
 
-	return &Pool{
+	pool := &Pool{
 		cfg:       cfg,
 		privKey:   privateKey,
 		pubKey:    PublicKeyFromPrivate(privateKey),
@@ -79,7 +79,13 @@ func NewPool(cfg *config.Config, privateKey [32]byte, maxIfaces int) (*Pool, err
 		orphans:   make(map[string]int),
 		usedPorts: make(map[int]bool),
 		maxIfaces: maxIfaces,
-	}, nil
+	}
+
+	if err := pool.ApplyLANIsolation(nil); err != nil {
+		return nil, fmt.Errorf("initialize LAN firewall: %w", err)
+	}
+
+	return pool, nil
 }
 
 func (p *Pool) AddPeer(params AWGParams, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {

@@ -19,6 +19,9 @@ var ErrClientExists = errors.New("client already exists")
 var ErrClientNotFound = errors.New("client not found")
 var ErrEmptyClientUpdate = errors.New("at least one of awg_params or routing is required")
 var ErrGeneratedParamsUnchanged = errors.New("failed to generate distinct awg params")
+var ErrEmptyClientIDs = errors.New("client_ids is required")
+var ErrEmptyLANGroupID = errors.New("lan_group_id is required")
+var ErrDuplicateClientID = errors.New("client_ids must be unique")
 
 type ClientUpdate struct {
 	AWGParams    *awg.AWGParams
@@ -35,6 +38,7 @@ type devicePool interface {
 	MigratePeer(awg.AWGParams, awg.AWGParams, [32]byte, *[32]byte, string) error
 	PortForParams(awg.AWGParams) (int, error)
 	PublicKey() [32]byte
+	ApplyLANIsolation([]awg.LANPeer) error
 }
 
 type Manager struct {
@@ -93,7 +97,15 @@ func NewManager(pool devicePool, storage *Storage, cfg *config.Config, defaultPa
 		data:          data,
 	}
 
-	for _, c := range data.Clients {
+	legacyGroups := false
+
+	for i := range data.Clients {
+		c := &data.Clients[i]
+		if c.LANGroupID == "" {
+			c.LANGroupID = defaultLANGroupID(c.ID)
+			legacyGroups = true
+		}
+
 		pubKey, err := awg.Base64ToKey(c.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("restore client %q: decode public key: %w", c.ID, err)
@@ -124,12 +136,20 @@ func NewManager(pool devicePool, storage *Storage, cfg *config.Config, defaultPa
 			return nil, fmt.Errorf("restore client %q: add peer: %w", c.ID, err)
 		}
 
-		cp := c
+		cp := *c
 		m.clients[c.ID] = &cp
 
 		m.usedIPs[c.Address] = true
 
 		log.Printf("restored client %s (%s)", c.ID, c.Address)
+	}
+	if legacyGroups {
+		if err := storage.Save(data); err != nil {
+			return nil, fmt.Errorf("persist legacy LAN groups: %w", err)
+		}
+	}
+	if err := pool.ApplyLANIsolation(lanPeers(data.Clients)); err != nil {
+		return nil, fmt.Errorf("restore LAN firewall: %w", err)
 	}
 
 	log.Printf("loaded %d clients from storage", len(m.clients))
@@ -137,7 +157,7 @@ func NewManager(pool devicePool, storage *Storage, cfg *config.Config, defaultPa
 	return m, nil
 }
 
-func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Routing) (*ClientData, error) {
+func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Routing, lanGroupID string) (*ClientData, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -155,6 +175,9 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Rout
 
 	if _, exists := m.clients[name]; exists {
 		return nil, ErrClientExists
+	}
+	if lanGroupID == "" {
+		lanGroupID = defaultLANGroupID(name)
 	}
 
 	effective, err := m.validatedParams(params)
@@ -185,6 +208,7 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Rout
 		PublicKey:    awg.KeyToBase64(pubKey),
 		PresharedKey: awg.KeyToBase64(presharedKey),
 		Address:      ip,
+		LANGroupID:   lanGroupID,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 		AWGParams:    params,
 		Routing:      normalizedRouting,
@@ -192,6 +216,10 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Rout
 
 	prospective := m.prospectiveData()
 	prospective.Clients = append(prospective.Clients, *client)
+
+	if err := m.blockLANLocked(); err != nil {
+		return nil, err
+	}
 
 	if err := m.pool.AddPeer(effective, pubKey, &presharedKey, ip); err != nil {
 		return nil, fmt.Errorf("add peer to device: %w", err)
@@ -206,6 +234,9 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Rout
 	m.clients[client.ID] = client
 	m.usedIPs[ip] = true
 	*m.data = prospective
+	if err := m.rebuildLANLocked(); err != nil {
+		return nil, err
+	}
 
 	cp := *client
 	return &cp, nil
@@ -424,6 +455,69 @@ func (m *Manager) GetClient(id string) (*ClientData, error) {
 	return &cp, nil
 }
 
+func (m *Manager) UpdateLANGroup(clientIDs []string, lanGroupID string) ([]ClientData, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(clientIDs) == 0 {
+		return nil, ErrEmptyClientIDs
+	}
+	if lanGroupID == "" {
+		return nil, ErrEmptyLANGroupID
+	}
+
+	storedIndexes := make(map[string]int, len(m.data.Clients))
+	for i := range m.data.Clients {
+		storedIndexes[m.data.Clients[i].ID] = i
+	}
+
+	seen := make(map[string]struct{}, len(clientIDs))
+	for _, id := range clientIDs {
+		if _, duplicate := seen[id]; duplicate {
+			return nil, ErrDuplicateClientID
+		}
+		seen[id] = struct{}{}
+	}
+
+	for _, id := range clientIDs {
+		if _, exists := m.clients[id]; !exists {
+			return nil, fmt.Errorf("%w: %s", ErrClientNotFound, id)
+		}
+		if _, exists := storedIndexes[id]; !exists {
+			return nil, fmt.Errorf("prepare LAN group update: client %q missing from storage", id)
+		}
+	}
+
+	prospective := m.prospectiveData()
+	for _, id := range clientIDs {
+		prospective.Clients[storedIndexes[id]].LANGroupID = lanGroupID
+	}
+
+	if err := m.blockLANLocked(); err != nil {
+		return nil, err
+	}
+	if err := m.storage.Save(&prospective); err != nil {
+		return nil, persistenceFailure("save LAN group update", err, nil)
+	}
+
+	for _, id := range clientIDs {
+		nextClient := prospective.Clients[storedIndexes[id]]
+		m.clients[id] = &nextClient
+	}
+	*m.data = prospective
+
+	result := make([]ClientData, 0, len(clientIDs))
+	for _, id := range clientIDs {
+		result = append(result, *m.clients[id])
+	}
+
+	if err := m.rebuildLANLocked(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 func (m *Manager) DeleteClient(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -471,6 +565,10 @@ func (m *Manager) DeleteClient(id string) error {
 
 	prospective.Clients = newClients
 
+	if err := m.blockLANLocked(); err != nil {
+		return err
+	}
+
 	if err := m.pool.RemovePeer(params, pubKey, client.Address); err != nil {
 		return fmt.Errorf("remove peer from device: %w", err)
 	}
@@ -484,6 +582,9 @@ func (m *Manager) DeleteClient(id string) error {
 	delete(m.usedIPs, client.Address)
 	delete(m.clients, id)
 	*m.data = prospective
+	if err := m.rebuildLANLocked(); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -506,10 +607,10 @@ func (m *Manager) GetClientConfig(id string) (string, error) {
 		return "", fmt.Errorf("get port for params: %w", err)
 	}
 
-	return renderClientConfig(client, params, serverPubKey, m.config.Endpoint, port)
+	return renderClientConfig(client, params, serverPubKey, m.config.Network().String(), m.config.Endpoint, port)
 }
 
-func renderClientConfig(client *ClientData, params awg.AWGParams, serverPubKey [32]byte, endpoint string, port int) (string, error) {
+func renderClientConfig(client *ClientData, params awg.AWGParams, serverPubKey [32]byte, network, endpoint string, port int) (string, error) {
 	cfg := fmt.Sprintf(`[Interface]
 PrivateKey = %s`, client.PrivateKey)
 
@@ -543,10 +644,43 @@ PresharedKey = %s`, client.PresharedKey)
 
 	cfg += fmt.Sprintf(`
 Endpoint = %s:%d
-AllowedIPs = %s
-PersistentKeepalive = %d`, endpoint, port, allowedIPs, params.PersistentKeepaliveValue())
+AllowedIPs = %s, %s
+PersistentKeepalive = %d`, endpoint, port, network, allowedIPs, params.PersistentKeepaliveValue())
 
 	return cfg, nil
+}
+
+func defaultLANGroupID(id string) string {
+	return "peer:" + id
+}
+
+func lanPeers(clients []ClientData) []awg.LANPeer {
+	peers := make([]awg.LANPeer, 0, len(clients))
+
+	for _, client := range clients {
+		peers = append(peers, awg.LANPeer{
+			Address: client.Address,
+			GroupID: client.LANGroupID,
+		})
+	}
+
+	return peers
+}
+
+func (m *Manager) blockLANLocked() error {
+	if err := m.pool.ApplyLANIsolation(nil); err != nil {
+		return fmt.Errorf("block inter-client traffic: %w", err)
+	}
+
+	return nil
+}
+
+func (m *Manager) rebuildLANLocked() error {
+	if err := m.pool.ApplyLANIsolation(lanPeers(m.data.Clients)); err != nil {
+		return fmt.Errorf("rebuild LAN firewall: %w", err)
+	}
+
+	return nil
 }
 
 func decodePresharedKey(encoded string) (*[32]byte, error) {

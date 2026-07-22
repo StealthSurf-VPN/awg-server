@@ -91,6 +91,7 @@ Client data is stored in `{AWG_DATA_DIR}/clients.json`. The top-level `generated
       "public_key": "<base64>",
       "preshared_key": "<base64>",
       "address": "10.0.0.2",
+      "lan_group_id": "peer:uuid",
       "created_at": "2026-01-01T00:00:00Z"
     }
   ]
@@ -132,18 +133,19 @@ Combined split routing persists the normalized included and excluded intent, not
 
 Legacy DNS records retain their original shape, for example `{"awg_params":{"dns":"9.9.9.9"}}`. A standalone empty legacy override (`{"dns":""}`) is canonically equivalent to no AWG override and is omitted when that client is next created or updated. Explicit `default` and `system` modes are stored as `dns_mode`, while custom mode also stores its normalized, stably deduplicated `dns_servers`. Existing legacy records are not rewritten solely because the server is upgraded.
 
-Clients without custom parameters have `awg_params` omitted and use automatic client listen-port selection plus server defaults, including `AWG_DNS` and `PersistentKeepalive = 25`. Omitted `routing` means full tunnel for backward compatibility; an explicit `{"mode":"full"}` is canonically persisted by omitting `routing`. Bypass and split lists are persisted after network masking and stable exact-deduplication. Clients created before PSK support can also omit `preshared_key`. On startup, all clients are restored and interfaces are recreated as needed, using the persisted PSK when present.
+Clients without custom parameters have `awg_params` omitted and use automatic client listen-port selection plus server defaults, including `AWG_DNS` and `PersistentKeepalive = 25`. Omitted `routing` means full tunnel for backward compatibility; an explicit `{"mode":"full"}` is canonically persisted by omitting `routing`. Bypass and split lists are persisted after network masking and stable exact-deduplication. Clients created before PSK support can also omit `preshared_key`. A legacy client without `lan_group_id` is assigned and persisted as `peer:<id>` on startup, keeping every legacy peer isolated from every other peer. On startup, all clients are restored and interfaces are recreated as needed, using the persisted PSK when present.
 
 ### Client transaction and startup behavior
 
 `clients.json` is written to `clients.json.tmp` with mode `0600` and then renamed into place. API operations coordinate that write with device state:
 
-- create stages the interface, peer, and route, saves the prospective JSON, then commits the in-memory client;
+- create first installs a DROP-only LAN chain, stages the interface, peer, and route, saves the prospective JSON, commits the in-memory client, then rebuilds same-group allows;
 - a client-only update saves first and then replaces the in-memory record;
 - an interface-level update or regeneration migrates the peer, saves, then commits memory; a save failure attempts a reverse migration;
-- delete removes the peer, route, and now-empty interface, saves, then removes the in-memory client; a save failure attempts to add the peer back.
+- delete first installs a DROP-only LAN chain, removes the peer, route, and now-empty interface, saves, removes the in-memory client, then rebuilds same-group allows; a save failure attempts to add the peer back;
+- LAN-group PATCH validates every ID under the manager mutex, installs the DROP-only chain, saves all requested membership changes in one replacement write, commits all records, then rebuilds same-group allows.
 
-Device failures and persistence failures return a generic `500 Internal Server Error`. These sequences prevent a normal failed save from being reported as success, but they are not an absolute transaction across the filesystem and kernel. A rollback can fail, and temporary-file rename is not a promise of durability across every host crash. Inspect logs and live interfaces after any device, persistence, or rollback error.
+Device, persistence, and firewall failures return a generic `500 Internal Server Error`. Once the DROP-only gate is installed, no error path restores permissive LAN rules. A final firewall failure can therefore occur after the complete prospective state was persisted and committed; the new membership remains authoritative while all inter-client traffic stays blocked until a successful rebuild or restart. These sequences are not an absolute transaction across the filesystem and kernel. A rollback can fail, and temporary-file rename is not a promise of durability across every host crash. Inspect logs and live interfaces after any device, persistence, firewall, or rollback error.
 
 Startup restoration is fail-fast. If `clients` is non-empty, missing top-level `server_private_key` or `generated_params` aborts before generating or rewriting either value. An invalid persisted private, public, or preshared key, a private/public key mismatch, invalid AWG/routing settings, or any client that cannot be re-added to its interface aborts manager construction, prevents the HTTP server from starting, and triggers best-effort pool cleanup. The server no longer silently drops an unrestorable client from the loaded set. A failure to bind the configured HTTP port also terminates the process with a non-zero status after cleanup instead of leaving a process running without an API listener.
 

@@ -255,6 +255,10 @@ Client create/update/regeneration/delete operations return a generic HTTP `500` 
 
 Open the automatic WireGuard UDP range, open every explicit per-client `awg_params.port`, and restrict the HTTP API to the internal network. The example `51820:51840` only covers 21 automatic or explicitly selected ports; increase it or add individual rules to match the deployment.
 
+At startup, `awg-server` uses `iptables-restore --wait 5 --noflush` to put an `AWG-LAN` jump at rule 1 of `FORWARD`. It matches only VPN-subnet packets entering and leaving `awg+` interfaces, allows same-`lan_group_id` address pairs, and drops other inter-client traffic. Other forwarding and Internet traffic are unchanged. Startup fails before peer restoration if this fail-closed chain cannot be installed.
+
+After deploying this version and confirming `GET /api/capabilities` returns `{"lan_group_isolation":true}`, remove temporary per-IP UFW rules such as `.2 ↔ .3`. Those rules outlive address reuse and can grant access to an unrelated peer that later receives the same IP.
+
 ### iptables
 
 ```bash

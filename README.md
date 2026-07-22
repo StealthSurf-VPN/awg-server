@@ -101,8 +101,10 @@ All `/api` endpoints require `Authorization: Bearer <AWG_API_TOKEN>`.
 | Method | Path | Success |
 | ------ | ---- | ------- |
 | `GET` | `/health` | `200` (no authentication) |
+| `GET` | `/api/capabilities` | `200` |
 | `GET` | `/api/clients` | `200` |
 | `POST` | `/api/clients` | `201` |
+| `PATCH` | `/api/clients/lan-group` | `200` |
 | `PATCH` | `/api/clients/{id}` | `200` |
 | `GET` | `/api/clients/{id}/configuration` | `200` |
 | `GET` | `/api/clients/{id}/stats` | `200` |
@@ -119,11 +121,21 @@ curl http://localhost:7777/health
 # List clients
 curl http://localhost:7777/api/clients -H "Authorization: Bearer $TOKEN"
 
+# Confirm the complete LAN-group isolation contract
+curl http://localhost:7777/api/capabilities -H "Authorization: Bearer $TOKEN"
+# → {"lan_group_isolation":true}
+
 # Create client (default obfuscation params from env)
 curl -X POST http://localhost:7777/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id":"my-client-uuid"}'
+  -d '{"id":"my-client-uuid","lan_group_id":"peer:primary-connection-uuid"}'
+
+# Atomically place existing clients in one LAN group
+curl -X PATCH http://localhost:7777/api/clients/lan-group \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"client_ids":["primary-connection-uuid","my-client-uuid"],"lan_group_id":"peer:primary-connection-uuid"}'
 
 # Create client with custom server port, client listen port, MTU, DNS, persistent keepalive, and obfuscation params
 curl -X POST http://localhost:7777/api/clients \
@@ -191,7 +203,11 @@ curl -X DELETE http://localhost:7777/api/clients/my-client-uuid \
 
 Routing mode `full` preserves full tunnel, `bypass` subtracts `excluded_ips` from all IPv4 routes, and `split` can subtract exclusions from its `allowed_ips`. Routing and DNS are client-only and do not change interface grouping or the server-side peer `/32`. After a routing, DNS, or per-client H/S regeneration change, fetch the generated configuration and reapply it on the client device. See the [API reference](docs/api.md) for validation, deterministic route subtraction, the 4,096/16,384 routing limits, error statuses, and the regeneration reapplication warning.
 
-Create, update, regeneration, and delete return a generic `500` when device work or `clients.json` persistence fails. The manager commits its in-memory client map only after persistence succeeds and attempts to restore device state when a later step fails. Rollback can itself fail, so a `500` never guarantees that live kernel state is pristine; inspect the server logs and AWG interfaces after device or storage failures. Startup is fail-fast: when persisted clients exist, both the top-level `server_private_key` and `generated_params` must exist; invalid or mismatched client keys, invalid persisted settings, or any client that cannot be restored also prevent the HTTP server from starting. Interfaces created before a failed restoration are cleaned up best-effort, and an HTTP bind failure terminates the process non-zero after cleanup.
+Every client belongs to one persisted `lan_group_id`. Omission on create, and legacy records without the field, use the isolated group `peer:<id>`. The server inserts `AWG-LAN` as rule 1 for VPN-subnet traffic forwarded between any `awg*` interfaces, allows only same-group source/destination pairs, and drops every other inter-client packet. Internet traffic is outside that rule. Create, delete, and LAN-group PATCH first replace the chain with DROP-only rules; if persistence or the final rebuild fails, inter-client traffic remains fully blocked.
+
+Every generated configuration explicitly prepends the network derived from `AWG_ADDRESS` to `AllowedIPs`. For `AWG_ADDRESS=10.100.0.1/24`, full tunnel renders `AllowedIPs = 10.100.0.0/24, 0.0.0.0/0, ::/0`.
+
+Create, update, regeneration, and delete return a generic `500` when device work or `clients.json` persistence fails. The manager commits its in-memory client map only after persistence succeeds and attempts to restore device state when applicable. Create, delete, and LAN-group changes then rebuild the firewall from committed state; a failed final rebuild leaves the complete persisted mutation in place and all inter-client traffic blocked. Rollback can itself fail, so a `500` never guarantees that live kernel state is pristine; inspect the server logs, AWG interfaces, and `AWG-LAN` after device, storage, or firewall failures. Startup is fail-fast: when persisted clients exist, both the top-level `server_private_key` and `generated_params` must exist; invalid or mismatched client keys, invalid persisted settings, or any client that cannot be restored also prevent the HTTP server from starting. Interfaces created before a failed restoration are cleaned up best-effort, and an HTTP bind failure terminates the process non-zero after cleanup.
 
 Usage is collected on startup and every 60 seconds and persisted in `{AWG_DATA_DIR}/usage.json`; shutdown performs a final collect/save. Every interface-level PATCH and per-client H/S regeneration takes a required complete snapshot before migration so counters from the old interface are accumulated first. A command error, malformed peer row, or active interface returning no peers aborts the update before mutation. The snapshot updates memory immediately but reaches `usage.json` on the next scheduled or shutdown save. Invalid persisted usage data is logged and replaced in memory with an empty stats map rather than crashing the collector.
 
@@ -299,6 +315,7 @@ AmneziaWG sets CPS obfuscation parameters at the **interface level**, not per-pe
 - A new client can join an existing profile with port 0 or the interface's actual port; a different explicit port is rejected with `409` before peer mutation, and PATCH rejects any stored port change while that profile is shared
 - Interfaces are created on demand and removed through coordinated peer/route/interface cleanup when their last peer is deleted; failures return `500` and trigger best-effort restoration
 - All interfaces share the same server private key
+- `AWG-LAN` isolates forwarded VPN-subnet traffic across every `awg*` interface by persisted LAN group; unrelated forwarding and Internet traffic are untouched
 
 ```text
 main.go → config → awg (pool, params, keygen) → clients (manager, storage) → api (server, handlers)

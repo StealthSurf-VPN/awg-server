@@ -15,6 +15,7 @@ type ClientData struct {
 	PublicKey    string         `json:"public_key"`
 	PresharedKey string         `json:"preshared_key,omitempty"`
 	Address      string         `json:"address"`
+	LANGroupID   string         `json:"lan_group_id"`
 	CreatedAt    string         `json:"created_at"`
 	AWGParams    *awg.AWGParams `json:"awg_params,omitempty"`
 	Routing      *Routing       `json:"routing,omitempty"`

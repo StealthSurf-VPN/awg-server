@@ -30,6 +30,10 @@ type apiSmokePool struct {
 	removeErr       error
 	migrateErr      error
 	portErr         error
+	firewallErrAt   int
+	firewallCallNum int
+	firewallCalls   [][]awg.LANPeer
+	activeLANPeers  []awg.LANPeer
 }
 
 func (p *apiSmokePool) AddPeer(params awg.AWGParams, publicKey [32]byte, _ *[32]byte, _ string) error {
@@ -81,6 +85,19 @@ func (p *apiSmokePool) PublicKey() [32]byte {
 	return p.serverPublicKey
 }
 
+func (p *apiSmokePool) ApplyLANIsolation(peers []awg.LANPeer) error {
+	copyPeers := append([]awg.LANPeer(nil), peers...)
+	p.firewallCalls = append(p.firewallCalls, copyPeers)
+	p.firewallCallNum++
+
+	if p.firewallErrAt == p.firewallCallNum {
+		return errors.New("sensitive firewall details")
+	}
+
+	p.activeLANPeers = copyPeers
+	return nil
+}
+
 func (p *apiSmokePool) interfaceNames() []string {
 	if !p.hasPeer {
 		return nil
@@ -110,8 +127,10 @@ func TestProtectedRoutesRequireAuthorization(t *testing.T) {
 		path   string
 	}{
 		{method: http.MethodPost, path: "/api/awg-params/generate"},
+		{method: http.MethodGet, path: "/api/capabilities"},
 		{method: http.MethodGet, path: "/api/clients"},
 		{method: http.MethodPost, path: "/api/clients"},
+		{method: http.MethodPatch, path: "/api/clients/lan-group"},
 		{method: http.MethodGet, path: "/api/clients/client/configuration"},
 		{method: http.MethodPatch, path: "/api/clients/client"},
 		{method: http.MethodPost, path: "/api/clients/client/regenerate-awg-params"},
@@ -132,6 +151,155 @@ func TestProtectedRoutesRequireAuthorization(t *testing.T) {
 				t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
 			}
 		})
+	}
+}
+
+func TestAPICapabilities(t *testing.T) {
+	handler, _, _ := newAuthorizedAPISmoke(t)
+
+	response := authorizedAPIRequest(t, handler, http.MethodGet, "/api/capabilities", "")
+	assertAPIStatus(t, response, http.StatusOK)
+
+	var body map[string]bool
+	decodeAPIResponse(t, response, &body)
+	if len(body) != 1 || !body["lan_group_isolation"] {
+		t.Fatalf("capabilities = %+v", body)
+	}
+}
+
+func TestAPILANGroupFlow(t *testing.T) {
+	handler, _, pool := newAuthorizedAPISmoke(t)
+
+	primary := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"primary","lan_group_id":"peer:house"}`)
+	assertAPIStatus(t, primary, http.StatusCreated)
+
+	var explicitlyGrouped clientResponse
+	decodeAPIResponse(t, primary, &explicitlyGrouped)
+	if explicitlyGrouped.LANGroupID != "peer:house" {
+		t.Fatalf("explicit LAN group = %q, want %q", explicitlyGrouped.LANGroupID, "peer:house")
+	}
+
+	device := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"device"}`)
+	assertAPIStatus(t, device, http.StatusCreated)
+
+	var defaulted clientResponse
+	decodeAPIResponse(t, device, &defaulted)
+	if defaulted.LANGroupID != "peer:device" {
+		t.Fatalf("default LAN group = %q, want %q", defaulted.LANGroupID, "peer:device")
+	}
+
+	pool.firewallCalls = nil
+	pool.firewallCallNum = 0
+
+	updated := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/lan-group", `{
+		"client_ids":["primary","device"],
+		"lan_group_id":"peer:primary"
+	}`)
+	assertAPIStatus(t, updated, http.StatusOK)
+
+	var body struct {
+		Clients []clientResponse `json:"clients"`
+	}
+	decodeAPIResponse(t, updated, &body)
+	if len(body.Clients) != 2 {
+		t.Fatalf("updated clients = %+v", body.Clients)
+	}
+	for _, client := range body.Clients {
+		if client.LANGroupID != "peer:primary" {
+			t.Fatalf("updated client = %+v", client)
+		}
+	}
+
+	var raw map[string][]map[string]json.RawMessage
+	decodeAPIResponse(t, updated, &raw)
+	for _, client := range raw["clients"] {
+		for _, field := range []string{"private_key", "public_key", "preshared_key"} {
+			if _, exposed := client[field]; exposed {
+				t.Fatalf("LAN group response exposes %s", field)
+			}
+		}
+	}
+
+	if len(pool.firewallCalls) != 2 || len(pool.firewallCalls[0]) != 0 || len(pool.firewallCalls[1]) != 2 {
+		t.Fatalf("firewall calls = %+v", pool.firewallCalls)
+	}
+}
+
+func TestAPILANGroupValidatesBatchBeforeFirewallMutation(t *testing.T) {
+	handler, _, pool := newAuthorizedAPISmoke(t)
+	created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"primary"}`)
+	assertAPIStatus(t, created, http.StatusCreated)
+	pool.firewallCalls = nil
+	pool.firewallCallNum = 0
+
+	response := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/lan-group", `{
+		"client_ids":["primary","missing"],
+		"lan_group_id":"peer:primary"
+	}`)
+	assertAPIStatus(t, response, http.StatusNotFound)
+	if len(pool.firewallCalls) != 0 {
+		t.Fatalf("firewall calls = %+v, want none", pool.firewallCalls)
+	}
+
+	listed := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+	assertAPIStatus(t, listed, http.StatusOK)
+
+	var clientsBody []clientResponse
+	decodeAPIResponse(t, listed, &clientsBody)
+	if len(clientsBody) != 1 || clientsBody[0].LANGroupID != "peer:primary" {
+		t.Fatalf("clients after rejected batch = %+v", clientsBody)
+	}
+}
+
+func TestAPILANGroupFirewallFailureIsFailClosed(t *testing.T) {
+	handler, _, pool := newAuthorizedAPISmoke(t)
+	for _, id := range []string{"primary", "device"} {
+		created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"`+id+`"}`)
+		assertAPIStatus(t, created, http.StatusCreated)
+	}
+
+	pool.firewallCalls = nil
+	pool.firewallCallNum = 0
+	pool.firewallErrAt = 2
+
+	response := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/lan-group", `{
+		"client_ids":["primary","device"],
+		"lan_group_id":"peer:primary"
+	}`)
+	assertAPIStatus(t, response, http.StatusInternalServerError)
+	if strings.Contains(response.Body.String(), "sensitive firewall details") {
+		t.Fatalf("response exposes firewall error: %s", response.Body.String())
+	}
+	if len(pool.activeLANPeers) != 0 {
+		t.Fatalf("active LAN peers = %+v, want fail-closed outage", pool.activeLANPeers)
+	}
+
+	listed := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+	assertAPIStatus(t, listed, http.StatusOK)
+
+	var clientsBody []clientResponse
+	decodeAPIResponse(t, listed, &clientsBody)
+	for _, client := range clientsBody {
+		if client.LANGroupID != "peer:primary" {
+			t.Fatalf("committed client after firewall failure = %+v", client)
+		}
+	}
+}
+
+func TestAPILANGroupRejectsInvalidBodies(t *testing.T) {
+	handler, _, _ := newAuthorizedAPISmoke(t)
+
+	tests := []string{
+		`{}`,
+		`{"client_ids":[],"lan_group_id":"peer:primary"}`,
+		`{"client_ids":["primary"],"lan_group_id":""}`,
+		`{"client_ids":["primary","primary"],"lan_group_id":"peer:primary"}`,
+		`{"client_ids":["primary"],"lan_group_id":"peer:primary"} {}`,
+	}
+
+	for _, body := range tests {
+		response := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/lan-group", body)
+		assertAPIStatus(t, response, http.StatusBadRequest)
 	}
 }
 
@@ -474,7 +642,7 @@ func TestAuthorizedAPIFlow(t *testing.T) {
 
 	splitConfiguration := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients/smoke-client/configuration", "")
 	assertAPIStatus(t, splitConfiguration, http.StatusOK)
-	if !strings.Contains(splitConfiguration.Body.String(), "AllowedIPs = 10.0.0.0/8") {
+	if !strings.Contains(splitConfiguration.Body.String(), "AllowedIPs = 10.77.0.0/24, 10.0.0.0/8") {
 		t.Fatalf("split configuration:\n%s", splitConfiguration.Body.String())
 	}
 
@@ -503,7 +671,7 @@ func TestAuthorizedAPIFlow(t *testing.T) {
 		"DNS = 9.9.9.9",
 		"MTU = 1380",
 		"Endpoint = vpn.example.test:51820",
-		"AllowedIPs = 0.0.0.0/0, ::/0",
+		"AllowedIPs = 10.77.0.0/24, 0.0.0.0/0, ::/0",
 	} {
 		if !strings.Contains(configuration.Body.String(), line) {
 			t.Fatalf("configuration does not contain %q:\n%s", line, configuration.Body.String())

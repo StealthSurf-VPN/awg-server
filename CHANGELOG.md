@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-07-22
+
+- Added persisted LAN groups with atomic batch membership updates and capability detection
+- Added fail-closed `iptables` isolation for inter-client traffic across all AWG interfaces
+- Added the configured VPN subnet explicitly to every generated client `AllowedIPs`
+
 ## [1.0.4] - 2026-07-15
 
 - Added composable per-client `full`, `bypass`, and `split` routing with deterministic exclusions

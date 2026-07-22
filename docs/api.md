@@ -11,8 +11,10 @@ The server uses the Go method-aware `net/http` `ServeMux`. These are the complet
 | Method | Path | Authentication | Success | Handler errors |
 | ------ | ---- | -------------- | ------- | -------------- |
 | `GET` | `/health` | None | `200` | None |
+| `GET` | `/api/capabilities` | Bearer | `200` | `401` |
 | `GET` | `/api/clients` | Bearer | `200` | `401` |
 | `POST` | `/api/clients` | Bearer | `201` | `400`, `401`, `409`, `503`, `500` |
+| `PATCH` | `/api/clients/lan-group` | Bearer | `200` | `400`, `401`, `404`, `500` |
 | `PATCH` | `/api/clients/{id}` | Bearer | `200` | `400`, `401`, `404`, `409`, `503`, `500` |
 | `GET` | `/api/clients/{id}/configuration` | Bearer | `200` | `401`, `404`, `500` |
 | `GET` | `/api/clients/{id}/stats` | Bearer | `200` | `401`, `404` |
@@ -24,7 +26,7 @@ There is no `GET /api/clients/{id}` endpoint. A method that does not match an ot
 
 The bearer check runs before a matched protected handler. A missing `Authorization` header returns `401` with `{"error":"missing authorization header"}`; a non-Bearer scheme or wrong token returns `401` with `{"error":"invalid token"}`.
 
-`POST /api/clients` and `PATCH /api/clients/{id}` read at most 1 MiB and require exactly one JSON value. Empty, malformed, oversized, trailing-garbage, and multiple-value bodies return `400` before manager mutation. Unknown JSON fields are ignored; consequently, a PATCH containing no recognized top-level field still returns the empty-update `400`. The server does not require a request `Content-Type`, although clients should send `application/json`. All other handlers ignore the request body, including the two POST action endpoints.
+`POST /api/clients`, `PATCH /api/clients/lan-group`, and `PATCH /api/clients/{id}` read at most 1 MiB and require exactly one JSON value. Empty, malformed, oversized, trailing-garbage, and multiple-value bodies return `400` before manager mutation. Unknown JSON fields are ignored; consequently, a PATCH containing no recognized top-level field still returns the empty-update `400`. The server does not require a request `Content-Type`, although clients should send `application/json`. All other handlers ignore the request body, including the two POST action endpoints.
 
 ## Health Check
 
@@ -42,6 +44,21 @@ No authentication required.
 {"status": "ok"}
 ```
 
+## Capabilities
+
+```http
+GET /api/capabilities
+Authorization: Bearer <AWG_API_TOKEN>
+```
+
+**Response** `200 OK`:
+
+```json
+{"lan_group_isolation": true}
+```
+
+`true` guarantees the complete contract in this document: persisted `lan_group_id`, create and atomic batch APIs, fail-closed firewall isolation, and an explicit VPN network in every generated `AllowedIPs`. A backend must treat `404` or `false` as no LAN-group support. The endpoint is available only after startup has installed the DROP-only firewall chain, restored clients, and rebuilt same-group rules successfully.
+
 ## List Clients
 
 ```http
@@ -55,6 +72,7 @@ GET /api/clients
   {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "address": "10.0.0.2",
+    "lan_group_id": "peer:550e8400-e29b-41d4-a716-446655440000",
     "created_at": "2026-01-01T00:00:00Z",
     "awg_params": {
       "client_listen_port": 54321,
@@ -113,7 +131,10 @@ Errors use the common [JSON error envelope](#error-handling).
 POST /api/clients
 Content-Type: application/json
 
-{"id": "550e8400-e29b-41d4-a716-446655440000"}
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "lan_group_id": "peer:primary-connection-id"
+}
 ```
 
 With split routing:
@@ -176,11 +197,13 @@ If `awg_params` is omitted, the client uses server defaults (global `AWG_MTU`, g
 
 If `routing` is omitted, `null`, or `{"mode":"full"}`, the client uses full-tunnel routing. See [Routing Object](#routing-object) for split-tunnel behavior and validation.
 
+`lan_group_id` is an opaque non-empty membership key. The StealthSurf backend uses `peer:<primary-connection-id>`. If it is omitted or empty on create, the server stores `peer:<id>`, keeping the new client isolated until an explicit batch update groups it with another client. Legacy persisted clients without this field receive and persist the same unique default during startup.
+
 Every new client automatically receives a unique server-generated 32-byte preshared key. The API does not accept a PSK in the request and does not expose it in list, create, or update JSON responses. It is returned only as part of the authenticated client configuration.
 
 The request body is limited to 1 MiB and must contain exactly one JSON value. A larger body, malformed JSON, trailing garbage, or a second JSON value is rejected as an invalid request with `400 Bad Request` before client state changes. Unknown fields are ignored. The `id` must be non-empty and no longer than 256 Unicode characters.
 
-Creation stages the interface/peer/route first, saves a prospective `clients.json`, and only then commits the client to the in-memory map. A device failure or persistence failure returns the generic `500`; after a save failure the server attempts to remove the staged peer and any now-empty interface. That rollback is best-effort: if it also fails, the persisted and in-memory client remain uncommitted, but live kernel state may require operator cleanup.
+Creation installs a DROP-only `AWG-LAN` chain before staging the interface, peer, and route. It then saves a prospective `clients.json`, commits the client to memory, and rebuilds same-group allow rules. A device or persistence failure returns the generic `500`; after a save failure the server attempts to remove the staged peer and any now-empty interface, while LAN traffic remains blocked. If the final firewall rebuild fails, the created client is already committed and persisted, the API returns generic `500`, and all inter-client traffic stays blocked until a successful rebuild or restart.
 
 **Response** `201 Created`:
 
@@ -188,6 +211,7 @@ Creation stages the interface/peer/route first, saves a prospective `clients.jso
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "address": "10.0.0.2",
+  "lan_group_id": "peer:primary-connection-id",
   "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
     "client_listen_port": 54321,
@@ -210,7 +234,55 @@ Creation stages the interface/peer/route first, saves a prospective `clients.jso
 - `401` — bearer token missing or invalid
 - `409` — client with this id already exists, requested port is already in use, or an existing profile uses a different actual port
 - `503` — maximum number of interfaces reached
-- `500` — key generation, IP allocation, device/network setup, or `clients.json` persistence failed; the response is generic
+- `500` — key generation, IP allocation, device/network setup, `clients.json` persistence, or firewall rebuild failed; the response is generic and LAN traffic remains fail closed
+
+## Update LAN Group
+
+```http
+PATCH /api/clients/lan-group
+Content-Type: application/json
+
+{
+  "client_ids": ["primary-id", "device-id"],
+  "lan_group_id": "peer:primary-id"
+}
+```
+
+The request must contain a non-empty list of unique existing client IDs and a non-empty `lan_group_id`. The manager validates every ID under its existing write mutex before any firewall or persisted state mutation. If any ID is missing, no client is changed and the firewall is not touched.
+
+After validation, the server atomically replaces `AWG-LAN` with a DROP-only chain, updates every requested record in one prospective `clients.json` replacement, commits every in-memory record, and rebuilds same-group allows. No error path restores permissive rules. A persistence failure leaves the previous membership authoritative and LAN traffic blocked. A final firewall failure leaves the complete new membership authoritative and persisted, returns generic `500`, and keeps all inter-client traffic blocked until a successful rebuild or restart.
+
+**Response** `200 OK`:
+
+```json
+{
+  "clients": [
+    {
+      "id": "primary-id",
+      "address": "10.100.0.2",
+      "lan_group_id": "peer:primary-id",
+      "created_at": "2026-07-22T00:00:00Z",
+      "routing": {"mode": "full"}
+    },
+    {
+      "id": "device-id",
+      "address": "10.100.0.3",
+      "lan_group_id": "peer:primary-id",
+      "created_at": "2026-07-22T00:00:01Z",
+      "routing": {"mode": "full"}
+    }
+  ]
+}
+```
+
+Each entry uses the same safe public shape as `GET /api/clients`; private, public, and preshared keys are never included. Entries follow request order.
+
+**Errors:**
+
+- `400` — malformed body, empty or duplicate `client_ids`, or empty `lan_group_id`
+- `401` — bearer token missing or invalid
+- `404` — at least one client does not exist; no mutation occurred
+- `500` — persistence or firewall operation failed; the response is generic and LAN traffic remains fail closed
 
 ## Update Client
 
@@ -247,6 +319,7 @@ For a client-only update that needs no migration, the prospective JSON is saved 
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "address": "10.0.0.2",
+  "lan_group_id": "peer:550e8400-e29b-41d4-a716-446655440000",
   "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
     "dns_mode": "custom",
@@ -284,6 +357,7 @@ This bearer-authenticated endpoint is defined without a request body, and any su
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "address": "10.0.0.2",
+  "lan_group_id": "peer:550e8400-e29b-41d4-a716-446655440000",
   "created_at": "2026-01-01T00:00:00Z",
   "awg_params": {
     "port": 51825,
@@ -361,11 +435,11 @@ H4 = 234567890-678901234
 PublicKey = <base64>
 PresharedKey = <base64>
 Endpoint = 1.2.3.4:51820
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = 10.0.0.0/24, 0.0.0.0/0, ::/0
 PersistentKeepalive = 60
 ```
 
-`ListenPort` is included only when `awg_params.client_listen_port` is between 1024 and 65535; omission or zero lets the client choose automatically. It is local to the client and does not change the server `Endpoint` port. The MTU is the client's `awg_params.mtu` override, or the global `AWG_MTU` value when the override is omitted or zero. DNS uses global `AWG_DNS` for inherited/default mode, one address for the legacy override, or the normalized comma-separated `dns_servers` list for custom mode. In system mode the `DNS` line is omitted completely so the client keeps its system resolver. Persistent keepalive is the client's `awg_params.persistent_keepalive` override; omission uses 25 and zero disables it. `PresharedKey` is generated and stored by the server for new clients and must match the key installed on the server peer. Legacy clients created before PSK support omit this line and continue to work without a PSK. The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port).
+`ListenPort` is included only when `awg_params.client_listen_port` is between 1024 and 65535; omission or zero lets the client choose automatically. It is local to the client and does not change the server `Endpoint` port. The MTU is the client's `awg_params.mtu` override, or the global `AWG_MTU` value when the override is omitted or zero. DNS uses global `AWG_DNS` for inherited/default mode, one address for the legacy override, or the normalized comma-separated `dns_servers` list for custom mode. In system mode the `DNS` line is omitted completely so the client keeps its system resolver. Persistent keepalive is the client's `awg_params.persistent_keepalive` override; omission uses 25 and zero disables it. `PresharedKey` is generated and stored by the server for new clients and must match the key installed on the server peer. Legacy clients created before PSK support omit this line and continue to work without a PSK. The Endpoint port matches the interface assigned to this client's obfuscation profile (explicit `port` from `awg_params`, or auto-assigned sequentially from base port). The first `AllowedIPs` entry is always the canonical network derived from `AWG_ADDRESS`, even when a later full-tunnel route already covers it.
 
 **Errors:**
 
@@ -406,7 +480,7 @@ DELETE /api/clients/{id}
 
 **Response** `204 No Content`
 
-Deletion removes the AWG peer and its `/32` route, destroys the interface when it becomes empty, saves a prospective `clients.json`, and only then removes the in-memory client and its usage entry. Route deletion or final interface destruction failure attempts to restore the peer and route and returns a generic `500`. If persistence fails after device removal, the server attempts to add the peer back. Rollback is best-effort; a second failure can leave live kernel state requiring operator inspection even though the stored and in-memory client were not committed as deleted.
+Deletion first installs the DROP-only LAN chain, removes the AWG peer and its `/32` route, destroys the interface when it becomes empty, saves a prospective `clients.json`, removes the in-memory client and its usage entry, and rebuilds same-group allows. Route deletion or final interface destruction failure attempts to restore the peer and route and returns a generic `500`. If persistence fails after device removal, the server attempts to add the peer back. A final firewall failure occurs after the deletion is committed and leaves LAN traffic blocked. Rollback is best-effort; a second failure can leave live kernel state requiring operator inspection.
 
 **Errors:**
 
@@ -416,18 +490,18 @@ Deletion removes the AWG peer and its `/32` route, destroys the interface when i
 
 ## Routing Object
 
-`routing` is a top-level client field, separate from `awg_params`. It controls the `AllowedIPs` line rendered in the generated client configuration. IPv4 routes follow this model:
+`routing` is a top-level client field, separate from `awg_params`. It controls the portion of `AllowedIPs` rendered after the mandatory VPN network. IPv4 routes follow this model:
 
 ```text
-AllowedIPv4 = base(mode, allowed_ips) - excluded_ips
+AllowedIPs = VPNNetwork + (base(mode, allowed_ips) - excluded_ips)
 ```
 
 | Mode | `allowed_ips` | `excluded_ips` | Generated behavior |
 | ---- | ------------- | -------------- | ------------------ |
-| `full` | Empty | Empty | `0.0.0.0/0, ::/0` |
-| `bypass` | Empty | One or more IPv4 CIDRs | IPv4 complement plus `::/0` |
-| `split` | One or more IPv4 CIDRs | Empty | Existing ordered split behavior |
-| `split` | One or more IPv4 CIDRs | Optional | Included IPv4 set minus exclusions |
+| `full` | Empty | Empty | VPN network, then `0.0.0.0/0, ::/0` |
+| `bypass` | Empty | One or more IPv4 CIDRs | VPN network, then IPv4 complement plus `::/0` |
+| `split` | One or more IPv4 CIDRs | Empty | VPN network, then existing ordered split behavior |
+| `split` | One or more IPv4 CIDRs | Optional | VPN network, then included IPv4 set minus exclusions |
 
 Omitted routing, `null`, and explicit `{"mode":"full"}` are equivalent and are canonically persisted without a `routing` field. `bypass` uses all IPv4 addresses as its base and requires at least one exclusion. `split` requires at least one included IPv4 CIDR. `full` rejects either non-empty list, and `bypass` rejects `allowed_ips`. Missing or unknown modes and invalid mode/list combinations return `400 Bad Request` before client state changes.
 
@@ -448,7 +522,7 @@ For example, this normalized combined split policy:
 renders:
 
 ```ini
-AllowedIPs = 10.0.0.0/12, 10.16.0.0/14, 10.21.0.0/16, 10.22.0.0/15, 10.24.0.0/13, 10.32.0.0/11, 10.64.0.0/10, 10.128.0.0/9, 172.16.0.0/12
+AllowedIPs = 10.100.0.0/24, 10.0.0.0/12, 10.16.0.0/14, 10.21.0.0/16, 10.22.0.0/15, 10.24.0.0/13, 10.32.0.0/11, 10.64.0.0/10, 10.128.0.0/9, 172.16.0.0/12
 ```
 
 `bypass` appends `::/0` after its computed IPv4 complement, so exclusions affect IPv4 only. `split` never adds an implicit IPv6 route. Split routing without exclusions retains its existing normalized, first-occurrence order rather than sorting the list.

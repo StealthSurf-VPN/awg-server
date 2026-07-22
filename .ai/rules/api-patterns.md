@@ -28,9 +28,11 @@
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | `GET` | `/health` | Unauthenticated health check |
+| `GET` | `/api/capabilities` | Report the complete LAN-group isolation contract |
 | `POST` | `/api/awg-params/generate` | Generate a stateless H1-H4/S1-S2 fragment |
 | `GET` | `/api/clients` | List clients for backend reconciliation and orphan cleanup |
-| `POST` | `/api/clients` | Create a client, optionally with custom `awg_params` and `routing` |
+| `POST` | `/api/clients` | Create a client, optionally with `lan_group_id`, custom `awg_params`, and `routing` |
+| `PATCH` | `/api/clients/lan-group` | Atomically replace LAN-group membership for a validated client batch |
 | `PATCH` | `/api/clients/{id}` | Independently replace or reset the client's `awg_params` and `routing` |
 | `POST` | `/api/clients/{id}/regenerate-awg-params` | Snapshot usage, regenerate H1-H4/S1-S2, and migrate the peer |
 | `GET` | `/api/clients/{id}/configuration` | Return the generated `.conf` file |
@@ -39,9 +41,11 @@
 
 ## Client Fields
 
-- `POST /api/clients` accepts optional top-level `awg_params` and `routing` objects. Omitted or null routing creates the backward-compatible full-tunnel policy.
+- `POST /api/clients` accepts optional top-level `lan_group_id`, `awg_params`, and `routing`. Omitted `lan_group_id` becomes `peer:<id>`; omitted or null routing creates the backward-compatible full-tunnel policy.
+- `GET /api/capabilities` returns exactly `{"lan_group_isolation":true}` after successful startup; the value guarantees persistence, create/batch contracts, fail-closed firewall isolation, and the explicit VPN CIDR in generated `AllowedIPs`.
+- `PATCH /api/clients/lan-group` validates all unique IDs before installing the DROP-only gate or mutating state, saves the complete batch under the manager mutex, and returns `{"clients":[...]}` with the standard safe public client shape.
 - `PATCH /api/clients/{id}` treats `awg_params` and `routing` independently: omission preserves a field, JSON null resets it, and an object replaces its complete stored value.
-- `POST /api/clients` and `PATCH /api/clients/{id}` limit request bodies to 1 MiB; oversized bodies return `400 Bad Request` before mutation.
+- `POST /api/clients`, `PATCH /api/clients/lan-group`, and `PATCH /api/clients/{id}` limit request bodies to 1 MiB; oversized bodies return `400 Bad Request` before mutation.
 - Create and update bodies must contain exactly one JSON document; a second value, trailing garbage, or over-limit trailing data returns the same generic `400 Bad Request` before mutation.
 - A PATCH body containing neither `awg_params` nor `routing` returns `400 Bad Request`; null counts as an explicitly supplied reset.
 - List, create, and update responses return effective routing as `{"mode":"full"}`, normalized bypass intent, or normalized split intent, even when full routing is omitted from persistence.

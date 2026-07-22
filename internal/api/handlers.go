@@ -37,9 +37,10 @@ func (f *optionalField[T]) UnmarshalJSON(data []byte) error {
 }
 
 type createClientRequest struct {
-	ID        string           `json:"id"`
-	AWGParams *awg.AWGParams   `json:"awg_params,omitempty"`
-	Routing   *clients.Routing `json:"routing,omitempty"`
+	ID         string           `json:"id"`
+	LANGroupID string           `json:"lan_group_id,omitempty"`
+	AWGParams  *awg.AWGParams   `json:"awg_params,omitempty"`
+	Routing    *clients.Routing `json:"routing,omitempty"`
 }
 
 type updateClientRequest struct {
@@ -48,21 +49,28 @@ type updateClientRequest struct {
 }
 
 type clientResponse struct {
-	ID        string          `json:"id"`
-	Address   string          `json:"address"`
-	CreatedAt string          `json:"created_at"`
-	AWGParams *awg.AWGParams  `json:"awg_params,omitempty"`
-	Routing   clients.Routing `json:"routing"`
+	ID         string          `json:"id"`
+	Address    string          `json:"address"`
+	LANGroupID string          `json:"lan_group_id"`
+	CreatedAt  string          `json:"created_at"`
+	AWGParams  *awg.AWGParams  `json:"awg_params,omitempty"`
+	Routing    clients.Routing `json:"routing"`
 }
 
 func toResponse(c clients.ClientData) clientResponse {
 	return clientResponse{
-		ID:        c.ID,
-		Address:   c.Address,
-		CreatedAt: c.CreatedAt,
-		AWGParams: c.AWGParams,
-		Routing:   clients.EffectiveRouting(c.Routing),
+		ID:         c.ID,
+		Address:    c.Address,
+		LANGroupID: c.LANGroupID,
+		CreatedAt:  c.CreatedAt,
+		AWGParams:  c.AWGParams,
+		Routing:    clients.EffectiveRouting(c.Routing),
 	}
+}
+
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"lan_group_isolation": true})
 }
 
 func (s *Server) handleListClients(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +137,7 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := s.manager.CreateClient(req.ID, req.AWGParams, normalizedRouting)
+	client, err := s.manager.CreateClient(req.ID, req.AWGParams, normalizedRouting, req.LANGroupID)
 	if err != nil {
 		log.Printf("create client error: %v", err)
 
@@ -163,6 +171,61 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(toResponse(*client))
+}
+
+type updateLANGroupRequest struct {
+	ClientIDs  []string `json:"client_ids"`
+	LANGroupID string   `json:"lan_group_id"`
+}
+
+type updateLANGroupResponse struct {
+	Clients []clientResponse `json:"clients"`
+}
+
+func (s *Server) handleUpdateLANGroup(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	var req updateLANGroupRequest
+
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	updated, err := s.manager.UpdateLANGroup(req.ClientIDs, req.LANGroupID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, clients.ErrEmptyClientIDs):
+			status = http.StatusBadRequest
+		case errors.Is(err, clients.ErrEmptyLANGroupID):
+			status = http.StatusBadRequest
+		case errors.Is(err, clients.ErrDuplicateClientID):
+			status = http.StatusBadRequest
+		case errors.Is(err, clients.ErrClientNotFound):
+			status = http.StatusNotFound
+		default:
+			log.Printf("update LAN group error: %v", err)
+		}
+
+		writeError(w, err, status)
+		return
+	}
+
+	response := updateLANGroupResponse{
+		Clients: make([]clientResponse, 0, len(updated)),
+	}
+	for _, client := range updated {
+		response.Clients = append(response.Clients, toResponse(client))
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {

@@ -25,15 +25,18 @@
 - HTTP API port (7777) should only be accessible from internal network
 - Only the automatic AWG UDP range and explicitly configured per-client interface ports should be public
 - Use firewall rules to restrict access to the HTTP API
+- `AWG-LAN` is rule 1 for forwarded VPN-subnet traffic between `awg+` interfaces. It accepts only persisted same-group source/destination pairs and otherwise drops; membership mutation first replaces it with DROP-only rules and never fails open.
 
 ## Input Validation
 
 - Client ID (`id` in POST body) validated for emptiness and length (max 256 chars)
 - Duplicate client IDs rejected (409 Conflict)
+- LAN-group PATCH requires a non-empty unique `client_ids` list, validates every client under the manager mutex before mutation, and requires a non-empty `lan_group_id`
 - CIDR address validated at config load
 - Bearer token checked before any handler execution (`/health` excluded)
 - Internal server errors (500) return generic message, details logged server-side only
 - Create and PATCH accept exactly one JSON value up to 1 MiB; unknown fields are ignored, and all other handlers ignore request bodies
+- Firewall input contains only the validated configured IPv4 network and generated or validated persisted client IPv4 addresses; opaque `lan_group_id` values are compared in memory and never interpolated into commands or restore input
 - `awg_params` deserialized from JSON with Go's type safety
 - Per-client MTU accepts 0 for inheritance or values in the inclusive range 1280-1420
 - Legacy per-client `dns` accepts an empty string for `AWG_DNS` inheritance or one IPv4 address. Mode-based DNS accepts `default`, `system`, or `custom`; custom mode requires one or more plain IPv4 values in `dns_servers`. URLs, hostnames, CIDRs, IPv6 addresses, and mixed legacy/mode fields are rejected.

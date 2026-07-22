@@ -33,6 +33,7 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - Peer operations via `awg set ... peer`; optional per-peer PSKs are passed through stdin using `preshared-key /dev/stdin`; stats via `awg show ... dump` (used by usage collector)
 - Network configuration (IP, routing, NAT) via `exec.Command`
 - MASQUERADE rule added once for the subnet. `Pool.Close` removes it only after every working and quarantined interface was destroyed successfully; cleanup failures leave it in place and are logged for operator recovery.
+- `AWG-LAN` is rebuilt atomically with `iptables-restore --wait 5 --noflush`. The rule-1 `FORWARD` hook matches only VPN-subnet traffic between `awg+` interfaces; same-group address pairs are accepted and the chain otherwise drops.
 
 ## AWGParams
 
@@ -52,6 +53,7 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - Per-client: stored as `*AWGParams` in `ClientData` (nil = use server defaults)
 - `ClientData` has `ID` (no separate `Name` field; POST body uses `id` directly)
 - `ClientData.PresharedKey` is a server-generated per-peer secret, not an `AWGParams` field and never part of interface grouping
+- `ClientData.LANGroupID` is persisted and controls only server-side inter-client firewall membership; missing legacy values become `peer:<id>`
 
 **Protocol rules:**
 - **Must match** server↔client: H1-H4, S1-S4
@@ -66,7 +68,7 @@ Create and update operations validate raw overrides and the effective profile be
 ## Client Routing
 
 - Per-client routing is stored as `*clients.Routing`; nil means full tunnel for backward compatibility.
-- `full` renders `0.0.0.0/0, ::/0`; `bypass` subtracts `excluded_ips` from all IPv4 routes and retains `::/0`; `split` renders normalized `allowed_ips` minus optional `excluded_ips` without implicit IPv6.
+- Every mode explicitly prepends the configured VPN network. After it, `full` renders `0.0.0.0/0, ::/0`; `bypass` subtracts `excluded_ips` from all IPv4 routes and retains `::/0`; `split` renders normalized `allowed_ips` minus optional `excluded_ips` without implicit IPv6.
 - Client routing never participates in `AWGParams`, interface grouping, port allocation, peer migration, or server-side peer `allowed-ips`.
 - Domain, application, and geosite routing require client-side logic and are not part of the generated AWG configuration contract.
 
@@ -80,6 +82,8 @@ Create and update operations validate raw overrides and the effective profile be
 - Per-client `awg_params` persisted (omitted if nil/default)
 - Per-client `routing` persisted for bypass and split policies; nil/full is omitted for backward compatibility
 - New clients receive a unique 32-byte PSK persisted as `preshared_key`; legacy records may omit it
+- Every client has a persisted `lan_group_id`; create defaults it to `peer:<id>`, and startup saves the same unique default for legacy records
+- Create, delete, and LAN-group mutation install an empty DROP-only `AWG-LAN` while holding the manager lock, then save/commit membership and rebuild same-group allows. A later error leaves a LAN outage instead of restoring permissive rules.
 - Create stages device state, saves prospective JSON, then commits memory. Client-only update saves before committing memory; interface update/regeneration migrates before saving; delete removes device state before saving. Later failures trigger best-effort device rollback and a generic API `500`, but rollback can itself fail.
 - On startup: load JSON → load/generate params → validate each client keypair, PSK, AWG settings, and routing → group by effective params → recreate interfaces → re-add peers. Non-empty persisted clients require the existing top-level server private key and generated H/S defaults; missing values, invalid persisted state, or any peer restoration failure abort startup without silently generating replacement state or dropping that client. Already-created pool state is closed best-effort.
 
