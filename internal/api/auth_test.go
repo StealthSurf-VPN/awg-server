@@ -21,7 +21,7 @@ const testAPIToken = "test-token"
 type apiSmokePool struct {
 	serverPublicKey [32]byte
 	peerPublicKey   [32]byte
-	profileKey      string
+	profileKey      awg.ProfileKey
 	peerPort        int
 	hasPeer         bool
 	migrations      int
@@ -36,20 +36,20 @@ type apiSmokePool struct {
 	activeLANPeers  []awg.LANPeer
 }
 
-func (p *apiSmokePool) AddPeer(params awg.AWGParams, publicKey [32]byte, _ *[32]byte, _ string) error {
+func (p *apiSmokePool) AddPeer(profile awg.Profile, requestedPort int, publicKey [32]byte, _ *[32]byte, _ string) error {
 	if p.addErr != nil {
 		return p.addErr
 	}
 
 	p.peerPublicKey = publicKey
-	p.profileKey = params.Key()
-	p.peerPort = params.Port
+	p.profileKey = profile.Key()
+	p.peerPort = requestedPort
 	p.hasPeer = true
 
 	return nil
 }
 
-func (p *apiSmokePool) RemovePeer(_ awg.AWGParams, _ [32]byte, _ string) error {
+func (p *apiSmokePool) RemovePeer(_ awg.Profile, _ [32]byte, _ string) error {
 	if p.removeErr != nil {
 		return p.removeErr
 	}
@@ -59,21 +59,21 @@ func (p *apiSmokePool) RemovePeer(_ awg.AWGParams, _ [32]byte, _ string) error {
 	return nil
 }
 
-func (p *apiSmokePool) MigratePeer(_, newParams awg.AWGParams, publicKey [32]byte, _ *[32]byte, _ string) error {
+func (p *apiSmokePool) MigratePeer(_, newProfile awg.Profile, requestedPort int, publicKey [32]byte, _ *[32]byte, _ string) error {
 	if p.migrateErr != nil {
 		return p.migrateErr
 	}
 
 	p.peerPublicKey = publicKey
-	p.profileKey = newParams.Key()
-	p.peerPort = newParams.Port
+	p.profileKey = newProfile.Key()
+	p.peerPort = requestedPort
 	p.hasPeer = true
 	p.migrations++
 
 	return nil
 }
 
-func (p *apiSmokePool) PortForParams(awg.AWGParams) (int, error) {
+func (p *apiSmokePool) PortForProfile(awg.Profile) (int, error) {
 	if p.portErr != nil {
 		return 0, p.portErr
 	}
@@ -473,7 +473,7 @@ func TestRegenerationRequiresUsageSnapshot(t *testing.T) {
 	assertAPIStatus(t, created, http.StatusCreated)
 
 	profileKey := pool.profileKey
-	if profileKey == "" {
+	if profileKey == (awg.ProfileKey{}) {
 		t.Fatal("profile key missing before regeneration")
 	}
 	pool.dumpErr = errors.New("sensitive dump details")
@@ -537,7 +537,7 @@ func TestAPIOperationFailures(t *testing.T) {
 		response := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/shared-client", `{"awg_params":{"port":51830}}`)
 		assertAPIStatus(t, response, http.StatusConflict)
 		if pool.migrations != 0 || pool.profileKey != profileKey || pool.peerPort != peerPort {
-			t.Fatalf("peer changed after failed PATCH: migrations=%d profile=%q port=%d", pool.migrations, pool.profileKey, pool.peerPort)
+			t.Fatalf("peer changed after failed PATCH: migrations=%d profile=%v port=%d", pool.migrations, pool.profileKey, pool.peerPort)
 		}
 
 		listed := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")

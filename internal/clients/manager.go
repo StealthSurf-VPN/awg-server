@@ -33,23 +33,23 @@ type ClientUpdate struct {
 type MigrationGuard func(func() error) error
 
 type devicePool interface {
-	AddPeer(awg.AWGParams, [32]byte, *[32]byte, string) error
-	RemovePeer(awg.AWGParams, [32]byte, string) error
-	MigratePeer(awg.AWGParams, awg.AWGParams, [32]byte, *[32]byte, string) error
-	PortForParams(awg.AWGParams) (int, error)
+	AddPeer(awg.Profile, int, [32]byte, *[32]byte, string) error
+	RemovePeer(awg.Profile, [32]byte, string) error
+	MigratePeer(awg.Profile, awg.Profile, int, [32]byte, *[32]byte, string) error
+	PortForProfile(awg.Profile) (int, error)
 	PublicKey() [32]byte
 	ApplyLANIsolation([]awg.LANPeer) error
 }
 
 type Manager struct {
-	mu            sync.RWMutex
-	pool          devicePool
-	storage       *Storage
-	config        *config.Config
-	defaultParams awg.AWGParams
-	clients       map[string]*ClientData
-	usedIPs       map[string]bool
-	data          *StorageData
+	mu             sync.RWMutex
+	pool           devicePool
+	storage        *Storage
+	config         *config.Config
+	defaultProfile awg.Profile
+	clients        map[string]*ClientData
+	usedIPs        map[string]bool
+	data           *StorageData
 }
 
 func (m *Manager) prospectiveData() StorageData {
@@ -87,14 +87,19 @@ func persistenceFailure(operation string, saveErr, rollbackErr error) error {
 }
 
 func NewManager(pool devicePool, storage *Storage, cfg *config.Config, defaultParams awg.AWGParams, data *StorageData) (*Manager, error) {
+	defaultProfile, err := awg.NewLegacyProfile(defaultParams)
+	if err != nil {
+		return nil, fmt.Errorf("validate default legacy profile: %w", err)
+	}
+
 	m := &Manager{
-		pool:          pool,
-		storage:       storage,
-		config:        cfg,
-		defaultParams: defaultParams,
-		clients:       make(map[string]*ClientData),
-		usedIPs:       make(map[string]bool),
-		data:          data,
+		pool:           pool,
+		storage:        storage,
+		config:         cfg,
+		defaultProfile: defaultProfile,
+		clients:        make(map[string]*ClientData),
+		usedIPs:        make(map[string]bool),
+		data:           data,
 	}
 
 	legacyGroups := false
@@ -124,7 +129,7 @@ func NewManager(pool devicePool, storage *Storage, cfg *config.Config, defaultPa
 			return nil, fmt.Errorf("restore client %q: %w", c.ID, err)
 		}
 
-		params, err := m.validatedParams(c.AWGParams)
+		profile, err := m.effectiveProfile(c.AWGParams)
 		if err != nil {
 			return nil, fmt.Errorf("restore client %q: validate awg params: %w", c.ID, err)
 		}
@@ -132,7 +137,7 @@ func NewManager(pool devicePool, storage *Storage, cfg *config.Config, defaultPa
 			return nil, fmt.Errorf("restore client %q: validate routing: %w", c.ID, err)
 		}
 
-		if err := pool.AddPeer(params, pubKey, presharedKey, c.Address); err != nil {
+		if err := pool.AddPeer(profile, profile.Params().Port, pubKey, presharedKey, c.Address); err != nil {
 			return nil, fmt.Errorf("restore client %q: add peer: %w", c.ID, err)
 		}
 
@@ -180,10 +185,11 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Rout
 		lanGroupID = defaultLANGroupID(name)
 	}
 
-	effective, err := m.validatedParams(params)
+	profile, err := m.effectiveProfile(params)
 	if err != nil {
 		return nil, err
 	}
+	requestedPort := profile.Params().Port
 
 	privKey, err := awg.GeneratePrivateKey()
 	if err != nil {
@@ -221,12 +227,12 @@ func (m *Manager) CreateClient(name string, params *awg.AWGParams, routing *Rout
 		return nil, err
 	}
 
-	if err := m.pool.AddPeer(effective, pubKey, &presharedKey, ip); err != nil {
+	if err := m.pool.AddPeer(profile, requestedPort, pubKey, &presharedKey, ip); err != nil {
 		return nil, fmt.Errorf("add peer to device: %w", err)
 	}
 
 	if err := m.storage.Save(&prospective); err != nil {
-		rollbackErr := m.pool.RemovePeer(effective, pubKey, ip)
+		rollbackErr := m.pool.RemovePeer(profile, pubKey, ip)
 
 		return nil, persistenceFailure("save created client", err, rollbackErr)
 	}
@@ -295,7 +301,11 @@ func (m *Manager) RegenerateAWGParams(id string, migrationGuard MigrationGuard) 
 		return nil, errors.New("migration guard is required")
 	}
 
-	oldKey := m.effectiveParams(client.AWGParams).Key()
+	oldProfile, err := m.effectiveProfile(client.AWGParams)
+	if err != nil {
+		return nil, err
+	}
+	oldKey := oldProfile.Key()
 
 	for attempt := 0; attempt < maxRegenerationAttempts; attempt++ {
 		generated, err := awg.GenerateParams()
@@ -310,12 +320,12 @@ func (m *Manager) RegenerateAWGParams(id string, migrationGuard MigrationGuard) 
 			return nil, err
 		}
 
-		effective, err := m.validatedParams(normalized)
+		profile, err := m.effectiveProfile(normalized)
 		if err != nil {
 			return nil, err
 		}
 
-		if effective.Key() == oldKey {
+		if profile.Key() == oldKey {
 			continue
 		}
 
@@ -326,8 +336,11 @@ func (m *Manager) RegenerateAWGParams(id string, migrationGuard MigrationGuard) 
 }
 
 func (m *Manager) applyClientUpdateLocked(client *ClientData, params *awg.AWGParams, routing *Routing, awgParamsSet bool, migrationGuard MigrationGuard) (*ClientData, error) {
-	oldParams := m.effectiveParams(client.AWGParams)
-	newParams := oldParams
+	oldProfile, err := m.effectiveProfile(client.AWGParams)
+	if err != nil {
+		return nil, err
+	}
+	newProfile := oldProfile
 	migrationRequired := false
 
 	if awgParamsSet {
@@ -338,12 +351,12 @@ func (m *Manager) applyClientUpdateLocked(client *ClientData, params *awg.AWGPar
 
 		params = normalized
 
-		newParams, err = m.validatedParams(params)
+		newProfile, err = m.effectiveProfile(params)
 		if err != nil {
 			return nil, err
 		}
 
-		migrationRequired = oldParams.Key() != newParams.Key() || oldParams.Port != newParams.Port
+		migrationRequired = oldProfile.Key() != newProfile.Key() || oldProfile.Params().Port != newProfile.Params().Port
 	}
 
 	nextClient := *client
@@ -396,20 +409,17 @@ func (m *Manager) applyClientUpdateLocked(client *ClientData, params *awg.AWGPar
 	}
 
 	transaction := func() error {
-		oldPort, err := m.pool.PortForParams(oldParams)
+		oldPort, err := m.pool.PortForProfile(oldProfile)
 		if err != nil {
 			return fmt.Errorf("get current port before migration: %w", err)
 		}
 
-		rollbackParams := oldParams
-		rollbackParams.Port = oldPort
-
-		if err := m.pool.MigratePeer(oldParams, newParams, publicKey, presharedKey, client.Address); err != nil {
+		if err := m.pool.MigratePeer(oldProfile, newProfile, newProfile.Params().Port, publicKey, presharedKey, client.Address); err != nil {
 			return fmt.Errorf("migrate peer: %w", err)
 		}
 
 		if err := m.storage.Save(&prospective); err != nil {
-			rollbackErr := m.pool.MigratePeer(newParams, rollbackParams, publicKey, presharedKey, client.Address)
+			rollbackErr := m.pool.MigratePeer(newProfile, oldProfile, oldPort, publicKey, presharedKey, client.Address)
 
 			return persistenceFailure("save client update", err, rollbackErr)
 		}
@@ -537,14 +547,14 @@ func (m *Manager) DeleteClient(id string) error {
 		return err
 	}
 
-	params := m.effectiveParams(client.AWGParams)
-	currentPort, err := m.pool.PortForParams(params)
+	profile, err := m.effectiveProfile(client.AWGParams)
+	if err != nil {
+		return err
+	}
+	currentPort, err := m.pool.PortForProfile(profile)
 	if err != nil {
 		return fmt.Errorf("get current port before deletion: %w", err)
 	}
-
-	rollbackParams := params
-	rollbackParams.Port = currentPort
 
 	prospective := m.prospectiveData()
 	newClients := make([]ClientData, 0, len(prospective.Clients))
@@ -569,12 +579,12 @@ func (m *Manager) DeleteClient(id string) error {
 		return err
 	}
 
-	if err := m.pool.RemovePeer(params, pubKey, client.Address); err != nil {
+	if err := m.pool.RemovePeer(profile, pubKey, client.Address); err != nil {
 		return fmt.Errorf("remove peer from device: %w", err)
 	}
 
 	if err := m.storage.Save(&prospective); err != nil {
-		rollbackErr := m.pool.AddPeer(rollbackParams, pubKey, presharedKey, client.Address)
+		rollbackErr := m.pool.AddPeer(profile, currentPort, pubKey, presharedKey, client.Address)
 
 		return persistenceFailure("save deleted client", err, rollbackErr)
 	}
@@ -598,11 +608,15 @@ func (m *Manager) GetClientConfig(id string) (string, error) {
 		return "", ErrClientNotFound
 	}
 
-	params := m.effectiveParams(client.AWGParams)
+	profile, err := m.effectiveProfile(client.AWGParams)
+	if err != nil {
+		return "", err
+	}
+	params := profile.Params()
 
 	serverPubKey := m.pool.PublicKey()
 
-	port, err := m.pool.PortForParams(params)
+	port, err := m.pool.PortForProfile(profile)
 	if err != nil {
 		return "", fmt.Errorf("get port for params: %w", err)
 	}
@@ -697,11 +711,13 @@ func decodePresharedKey(encoded string) (*[32]byte, error) {
 }
 
 func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
+	defaultParams := m.defaultProfile.Params()
+
 	if params == nil {
-		return cloneEffectiveParams(m.defaultParams)
+		return defaultParams
 	}
 
-	result := cloneEffectiveParams(m.defaultParams)
+	result := defaultParams
 
 	if params.MTU > 0 {
 		result.MTU = params.MTU
@@ -822,17 +838,18 @@ func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
 	return result
 }
 
-func (m *Manager) validatedParams(params *awg.AWGParams) (awg.AWGParams, error) {
+func (m *Manager) effectiveProfile(params *awg.AWGParams) (awg.Profile, error) {
 	if err := awg.ValidateOverrides(params); err != nil {
-		return awg.AWGParams{}, err
+		return awg.Profile{}, err
 	}
 
 	effective := m.effectiveParams(params)
-	if err := awg.ValidateProfile(effective); err != nil {
-		return awg.AWGParams{}, err
+	profile, err := awg.NewLegacyProfile(effective)
+	if err != nil {
+		return awg.Profile{}, err
 	}
 
-	return effective, nil
+	return profile, nil
 }
 
 func cloneEffectiveParams(params awg.AWGParams) awg.AWGParams {

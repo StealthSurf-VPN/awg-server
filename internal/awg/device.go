@@ -27,18 +27,13 @@ func destroyInterface(ifName string) error {
 	return nil
 }
 
-func configureDevice(ifName string, port int, params AWGParams, privateKey [32]byte) error {
-	args := []string{"set", ifName, "listen-port", fmt.Sprintf("%d", port), "private-key", "/dev/stdin"}
+func configureDevice(ifName string, port int, profile Profile, privateKey [32]byte) error {
+	cmd := exec.Command("awg", "setconf", ifName, "/dev/stdin")
 
-	args = append(args, params.CLIArgs()...)
+	cmd.Stdin = strings.NewReader(profile.ServerConfig(privateKey, port))
 
-	cmd := exec.Command("awg", args...)
-
-	cmd.Stdin = strings.NewReader(KeyToBase64(privateKey))
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("awg set: %s: %w", string(output), err)
+	if _, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("awg setconf: %w", err)
 	}
 
 	return nil

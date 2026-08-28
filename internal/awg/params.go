@@ -184,6 +184,32 @@ func (p AWGParams) CLIArgs() []string {
 }
 
 func (p AWGParams) ConfigLines() string {
+	lines := p.serverConfigLines()
+
+	if p.I1 != "" {
+		lines += fmt.Sprintf("\nI1 = %s", p.I1)
+	}
+
+	if p.I2 != "" {
+		lines += fmt.Sprintf("\nI2 = %s", p.I2)
+	}
+
+	if p.I3 != "" {
+		lines += fmt.Sprintf("\nI3 = %s", p.I3)
+	}
+
+	if p.I4 != "" {
+		lines += fmt.Sprintf("\nI4 = %s", p.I4)
+	}
+
+	if p.I5 != "" {
+		lines += fmt.Sprintf("\nI5 = %s", p.I5)
+	}
+
+	return lines
+}
+
+func (p AWGParams) serverConfigLines() string {
 	var lines string
 
 	if p.Jc > 0 {
@@ -238,26 +264,6 @@ func (p AWGParams) ConfigLines() string {
 
 	if p.DisableCookies != "" {
 		lines += fmt.Sprintf("\nDisableCookies = %s", p.DisableCookies)
-	}
-
-	if p.I1 != "" {
-		lines += fmt.Sprintf("\nI1 = %s", p.I1)
-	}
-
-	if p.I2 != "" {
-		lines += fmt.Sprintf("\nI2 = %s", p.I2)
-	}
-
-	if p.I3 != "" {
-		lines += fmt.Sprintf("\nI3 = %s", p.I3)
-	}
-
-	if p.I4 != "" {
-		lines += fmt.Sprintf("\nI4 = %s", p.I4)
-	}
-
-	if p.I5 != "" {
-		lines += fmt.Sprintf("\nI5 = %s", p.I5)
 	}
 
 	return lines

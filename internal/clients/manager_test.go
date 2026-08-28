@@ -12,6 +12,8 @@ import (
 
 type managerTestPool struct {
 	events          []string
+	profiles        []awg.Profile
+	requestedPorts  []int
 	firewallCalls   [][]awg.LANPeer
 	activeLANPeers  []awg.LANPeer
 	firewallErrAt   int
@@ -20,21 +22,26 @@ type managerTestPool struct {
 	removeErr       error
 }
 
-func (p *managerTestPool) AddPeer(_ awg.AWGParams, _ [32]byte, _ *[32]byte, address string) error {
+func (p *managerTestPool) AddPeer(profile awg.Profile, requestedPort int, _ [32]byte, _ *[32]byte, address string) error {
 	p.events = append(p.events, "add:"+address)
+	p.profiles = append(p.profiles, profile)
+	p.requestedPorts = append(p.requestedPorts, requestedPort)
 	return p.addErr
 }
 
-func (p *managerTestPool) RemovePeer(_ awg.AWGParams, _ [32]byte, address string) error {
+func (p *managerTestPool) RemovePeer(profile awg.Profile, _ [32]byte, address string) error {
 	p.events = append(p.events, "remove:"+address)
+	p.profiles = append(p.profiles, profile)
 	return p.removeErr
 }
 
-func (p *managerTestPool) MigratePeer(_, _ awg.AWGParams, _ [32]byte, _ *[32]byte, _ string) error {
+func (p *managerTestPool) MigratePeer(oldProfile, newProfile awg.Profile, requestedPort int, _ [32]byte, _ *[32]byte, _ string) error {
+	p.profiles = append(p.profiles, oldProfile, newProfile)
+	p.requestedPorts = append(p.requestedPorts, requestedPort)
 	return nil
 }
 
-func (p *managerTestPool) PortForParams(awg.AWGParams) (int, error) {
+func (p *managerTestPool) PortForProfile(awg.Profile) (int, error) {
 	return 51820, nil
 }
 
@@ -58,11 +65,61 @@ func (p *managerTestPool) ApplyLANIsolation(peers []awg.LANPeer) error {
 
 func (p *managerTestPool) reset() {
 	p.events = nil
+	p.profiles = nil
+	p.requestedPorts = nil
 	p.firewallCalls = nil
 	p.firewallCallNum = 0
 	p.firewallErrAt = 0
 	p.addErr = nil
 	p.removeErr = nil
+}
+
+func TestManagerBuildsValidatedLegacyProfiles(t *testing.T) {
+	manager, _, _ := newManagerTest(t, &StorageData{})
+
+	profile, err := manager.effectiveProfile(&awg.AWGParams{
+		Port:             51830,
+		ClientListenPort: 51831,
+		MTU:              1380,
+		I1:               "<t>",
+	})
+	if err != nil {
+		t.Fatalf("effectiveProfile() error = %v", err)
+	}
+	if profile.Version() != awg.ProtocolVersion2 {
+		t.Fatalf("profile version = %s, want 2.0", profile.Version())
+	}
+
+	params := profile.Params()
+	if params.Port != 51830 || params.ClientListenPort != 51831 || params.MTU != 1380 || params.I1 != "<t>" {
+		t.Fatalf("profile params = %+v", params)
+	}
+
+	defaultProfile, err := manager.effectiveProfile(nil)
+	if err != nil {
+		t.Fatalf("effectiveProfile(nil) error = %v", err)
+	}
+	if profile.Key() != defaultProfile.Key() {
+		t.Fatal("legacy ProfileKey changed for client-only fields or requested port")
+	}
+}
+
+func TestCreateClientPassesLegacyProfileAndSeparateRequestedPort(t *testing.T) {
+	manager, pool, _ := newManagerTest(t, &StorageData{})
+	pool.reset()
+
+	if _, err := manager.CreateClient("device", &awg.AWGParams{Port: 51830}, nil, ""); err != nil {
+		t.Fatalf("CreateClient() error = %v", err)
+	}
+	if len(pool.profiles) != 1 || len(pool.requestedPorts) != 1 {
+		t.Fatalf("pool calls = profiles:%d ports:%d", len(pool.profiles), len(pool.requestedPorts))
+	}
+	if pool.profiles[0].Version() != awg.ProtocolVersion2 {
+		t.Fatalf("profile version = %s, want 2.0", pool.profiles[0].Version())
+	}
+	if pool.requestedPorts[0] != 51830 {
+		t.Fatalf("requested port = %d, want 51830", pool.requestedPorts[0])
+	}
 }
 
 func TestNewManagerPersistsLegacyLANGroups(t *testing.T) {
