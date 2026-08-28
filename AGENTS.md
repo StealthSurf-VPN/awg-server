@@ -2,9 +2,15 @@
 
 ## Project Overview
 
-`awg-server` is a Go HTTP API server for managing AmneziaWG 2.0 VPN clients. It runs as a static binary on VPN servers, manages the host's AmneziaWG kernel interfaces through the `awg` CLI, and persists client and usage data as JSON.
+`awg-server` is a Go HTTP API server for managing mixed AmneziaWG 2.0 and 3.1
+VPN clients. It runs as a static binary on Ubuntu VPN servers, manages the
+host's AmneziaWG kernel interfaces through the `awg` CLI, and persists client,
+private profile, and usage data as JSON.
 
-The server supports per-client CPS obfuscation profiles through a multi-interface pool: every unique server-side profile gets its own `awgN` interface, while clients with the same profile share an interface.
+The server supports version-aware per-client CPS profiles through a
+multi-interface pool: every unique immutable server-side `Profile` gets its
+own `awgN` interface, while clients with the same effective profile share an
+interface. Legacy 2.0 and 3.1 profiles never share an interface.
 
 The StealthSurf NestJS backend uses this API to create, update, inspect, and delete AmneziaWG client configurations.
 
@@ -15,6 +21,7 @@ The StealthSurf NestJS backend uses this API to create, update, inspect, and del
 - Test: `go test ./...`
 - Race-test Go packages: `go test -race -count=1 ./...`
 - Test release automation: `bash scripts/release-marker_test.sh && bash scripts/release-notes_test.sh && bash scripts/release-previous-tag_test.sh`
+- Test installer transaction: `bash scripts/install_test.sh`
 - Static analysis: `go vet ./...`
 - Format changed Go files: `gofmt -w <files>`
 - Build all release targets: `make build-all VERSION=1.0.0`
@@ -24,7 +31,7 @@ Before considering a code change complete, `go build -o awg-server .` and `go ve
 ## Always-On Conventions
 
 - Always reply to the user in Russian.
-- Write code, comments, and project documentation in English. Keep the supplied `.ai/README.md` migration guide in Russian unless the user asks to translate it.
+- Write code, comments, and project documentation in English.
 - Keep the internal package dependency flow one-directional:
 
   ```text
@@ -37,6 +44,19 @@ Before considering a code change complete, `go build -o awg-server .` and `go ve
 - Keep the API on the standard `net/http` ServeMux unless the user explicitly approves an architectural change.
 - Never edit generated build artifacts (`awg-server` or files under `dist/`).
 - Keep secrets, private keys, and bearer tokens out of source code, logs, fixtures, and documentation examples that could be mistaken for real credentials.
+- API input accepts `2`, `2.0`, and `3.1`, but persisted client versions are
+  canonical `2.0` or `3.1` only; missing persisted versions are legacy 2.0,
+  while omitted new-create versions use the configured default (3.1 by
+  default). Never conflate these boundaries.
+- `HeaderProtectionKey` and its stored `header_key_id` reference are private
+  3.1 state. `ProfileKey` is an opaque internal identity for both protocol
+  versions and includes a header-key-derived digest for 3.1. Never serialize or
+  expose any of them in ordinary API responses, logs, command arguments, error
+  text, or realistic fixtures; send secret interface configuration only through
+  stdin.
+- Normal startup and `awg-server check-runtime` require the AWG 3.1 qualifier.
+  Host migration is installer-only because a binary self-update cannot update
+  and reload the package/module runtime.
 
 ## Key Files
 
@@ -44,10 +64,14 @@ Before considering a code change complete, `go build -o awg-server .` and `go ve
 | ---- | -------------- |
 | `main.go` | CLI commands, startup sequence, dependency wiring, graceful shutdown |
 | `internal/config/config.go` | Environment variable parsing and validation |
+| `internal/config/range.go` | Strict unsigned-16 range value parsing for 3.1 settings |
 | `internal/awg/keygen.go` | Curve25519 key generation and encoding |
-| `internal/awg/params.go` | `AWGParams`, grouping keys, CLI args, config lines, generated CPS params |
+| `internal/awg/version.go` | Canonical protocol version parsing |
+| `internal/awg/params.go` | Public `AWGParams`, client/server config lines, and version-specific generation |
+| `internal/awg/profile.go` | Immutable version-aware profiles, private header keys, and opaque profile identity |
 | `internal/awg/device.go` | Low-level interface and peer operations through `ip` and `awg` |
 | `internal/awg/pool.go` | Multi-interface lifecycle, port allocation, peer migration, NAT |
+| `internal/awg/runtime.go` | AWG 3.1 package/tools/module capability qualifier |
 | `internal/clients/storage.go` | Atomic JSON persistence for clients and server state |
 | `internal/clients/manager.go` | Client CRUD, IP allocation, effective params, `.conf` generation |
 | `internal/api/server.go` | HTTP server, routes, bearer authentication middleware |
@@ -61,12 +85,17 @@ Before considering a code change complete, `go build -o awg-server .` and `go ve
 - Configuration variables: update `internal/config/config.go` and `docs/configuration.md`.
 - Persisted client data: update `ClientData` in `internal/clients/storage.go` and the manager behavior that reads or writes it.
 - AWG device behavior: update the helpers in `internal/awg/device.go` and, when lifecycle or grouping changes, `internal/awg/pool.go`.
-- CPS parameters: update `AWGParams` and keep `Key()`, `CLIArgs()`, and `ConfigLines()` semantics aligned.
+- CPS parameters: update `AWGParams`, version-aware validation, and immutable
+  `Profile` construction together. Keep client-only config rendering separate
+  from server-side `ProfileKey` identity.
 - Installation or deployment requirements: update `README.md` and `docs/installation.md`.
 
 ## Shared Agent Instructions
 
-`AGENTS.md` is the canonical entrypoint for every coding agent. `CLAUDE.md` is only a Claude Code adapter that imports this file. Detailed shared rules live in `.ai/rules/`; agents do not automatically discover them, so they must be read explicitly.
+`AGENTS.md` is the canonical entrypoint for every coding agent. `CLAUDE.md` is
+only a Claude Code adapter that imports this file. Detailed shared rules live in
+`.ai/rules/`; agents do not automatically discover them, so they must be read
+explicitly.
 
 Before changing project code, every agent must read and follow:
 
@@ -90,4 +119,3 @@ More than one rule file can apply to the same task. When a rule conflicts with t
 - Environment variables and persistence shape: `docs/configuration.md`
 - Host installation and deployment: `docs/installation.md`
 - CI and automated release: `docs/ci-cd.md`
-- Shared-instruction layout and migration guide: `.ai/README.md`

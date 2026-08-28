@@ -1,324 +1,205 @@
 # Installation Guide
 
-## Target Platform
+## Supported host and external gates
 
-This guide targets Ubuntu 22.04 LTS running directly on a host or VM. AmneziaWG 2.0 requires Linux 4.14 or newer; Ubuntu 22.04 exceeds that requirement. Docker and LXC containers share the host kernel, so they cannot provide an independent kernel-module installation and are not supported for production deployment.
+The installer supports a root-controlled Ubuntu 22.04 host or VM on `x86_64`
+or `aarch64`/`arm64`. Containers are rejected because their kernel-module state
+is not independently controlled. It is not a production proof for another OS,
+kernel, or architecture.
 
-AmneziaVPN clients must be version 4.8.12.9 or newer. AmneziaWG 1.0 configurations are not upgraded in place; generate new client configurations after deploying this server.
+Before a production rollout, independently qualify both Ubuntu amd64 and arm64
+hosts: package installation, DKMS build/load, `awg-server check-runtime`, the
+authenticated API gate, and a real VPN handshake. Also verify import,
+handshake, and throughput with the actual supported client releases on physical
+Windows, macOS, iOS, and Android. Local Go and shell-harness tests do not prove
+those external gates.
 
-## Prerequisites
-
-- A root shell
-- Ubuntu 22.04 LTS with headers for the running kernel
-- `curl`
-- Go 1.24+ only when building `awg-server` from source
-
-## Recommended: one-line installer
-
-Run this command from a root shell:
+## Recommended installer
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/main/scripts/install.sh)
 ```
 
-The installer supports `x86_64` and `aarch64`/`arm64` hosts or VMs and rejects containers. It installs the host dependencies and AmneziaWG package, resolves the latest stable `awg-server` release, and verifies the signed checksum manifest with its embedded Ed25519 public key before installing the selected binary.
+The bootstrap script is fetched from `main`; its embedded Ed25519 public key
+authenticates the downloaded release bundle. The script prompts for the API
+token without echo, endpoint, and VPN CIDR. It supports environment variables
+in the process, then a safely parsed existing `/etc/awg-server.env`, then
+interactive values for missing required settings. The process environment wins
+even when it is empty.
 
-The bootstrap script itself is trusted from the repository's `main` branch over GitHub HTTPS; the embedded key verifies the downloaded release artifacts.
+The installer adds these 3.1 defaults when they are not already set:
 
-It prompts for `AWG_API_TOKEN` without echo, `AWG_ENDPOINT`, and `AWG_ADDRESS`. Press Enter at the address prompt to use `10.0.0.1/24`.
-
-### Inputs and precedence
-
-Supported settings use this exact precedence, from highest to lowest:
-
-1. Variables present in the installer's process environment
-2. An existing `/etc/awg-server.env`
-3. Interactive prompts for any still-missing required setting
-
-Process-environment presence wins even when its value is empty, so an empty required value is prompted for in a TTY or fails in non-interactive mode instead of revealing the persisted value.
-
-The following settings are the complete service environment accepted by the installer. Unless noted, required values have no default; omitted optional values use the shown server defaults.
-
-| Variable | Required/default | Description |
-| -------- | ---------------- | ----------- |
-| `AWG_API_TOKEN` | Required | Bearer token for every `/api` route. |
-| `AWG_ADDRESS` | Required non-interactively | Server VPN IPv4 address and network in CIDR form. Press Enter at the interactive prompt to use `10.0.0.1/24`. |
-| `AWG_ENDPOINT` | Required | Public IP address or hostname written to client configurations. |
-| `AWG_LISTEN_PORT` | `51820` | Base UDP port for automatically assigned AWG interfaces. |
-| `AWG_HTTP_PORT` | `7777` | HTTP API listen port. |
-| `AWG_MTU` | `1420` | Default MTU written to client configurations. |
-| `AWG_DNS` | `1.1.1.1` | Default DNS server written to client configurations. |
-| `AWG_DATA_DIR` | See below | Persistence directory for `clients.json` and `usage.json`. |
-| `AWG_INTERFACE` | Auto-detect | Outbound interface used for MASQUERADE. |
-| `AWG_JC` | `5` | Default junk packet count. |
-| `AWG_JMIN` | `50` | Default junk packet minimum size. |
-| `AWG_JMAX` | `1000` | Default junk packet maximum size. |
-| `AWG_S3` | `0` | Default underload packet padding. |
-| `AWG_S4` | `0` | Default transport packet padding. |
-| `AWG_I1` | Empty | Default first CPS signature packet. |
-| `AWG_I2` | Empty | Default second CPS signature packet. |
-| `AWG_I3` | Empty | Default third CPS signature packet. |
-| `AWG_I4` | Empty | Default fourth CPS signature packet. |
-| `AWG_I5` | Empty | Default fifth CPS signature packet. |
-| `AWG_MAX_INTERFACES` | `0` | Maximum AWG interface count; `0` means unlimited. |
-
-See the [configuration reference](configuration.md) for validation and per-client override semantics. H1-H4, S1, S2, the server private key, and client PSKs are generated by the server and are not installer inputs.
-
-When `AWG_DATA_DIR` is not set, the installer chooses `/data` only when the legacy `/data/clients.json` file exists; an empty `/data` directory does not qualify. Otherwise it chooses `/var/lib/awg-server`. It writes the selected path to `/etc/awg-server.env`. A rerun loads that file and keeps the selected data directory and its JSON files. Selecting a different data directory does not migrate old data.
-
-### Installation and health gates
-
-The installer:
-
-1. Installs the official AmneziaWG package from the Amnezia PPA, including the XanMod LLVM 19 prerequisites when needed.
-2. Resolves GitHub's latest stable release and downloads its architecture-specific binary, `SHA256SUMS`, and `SHA256SUMS.sig` from one exact version-bound release URL.
-3. Verifies the manifest with the embedded Ed25519 public key, requires exactly one checksum for the selected asset, verifies that checksum, and checks the binary's reported version before installation.
-4. Installs the binary at `/usr/local/bin/awg-server`, the root-only environment at `/etc/awg-server.env`, the forwarding sysctl at `/etc/sysctl.d/99-awg-server.conf`, and the unit at `/etc/systemd/system/awg-server.service`.
-5. Enables and restarts `awg-server.service`, waits for a new active systemd invocation, and requires the exact `{"status":"ok"}` response from `http://127.0.0.1:$AWG_HTTP_PORT/health` within 30 seconds.
-
-The command exits non-zero if any gate fails. A service-gate failure prints the full unit status and the last 50 journal lines. After a successful run, these checks should also pass:
-
-```bash
-/usr/local/bin/awg-server version
-systemctl is-enabled --quiet awg-server.service
-systemctl is-active --quiet awg-server.service
-curl -fsS http://127.0.0.1:7777/health
+```text
+AWG_DEFAULT_PROTOCOL_VERSION=3.1
+AWG31_MTU=1280
+AWG31_PERSISTENT_KEEPALIVE=25-35
+AWG31_CONTENT_PADDING_ADDITION=10-100
+AWG31_REKEY_AFTER_TIME=100-120
+AWG31_REKEY_TIMEOUT=3-7
+AWG31_REJECT_AFTER_TIME=150-180
+AWG31_KEEPALIVE_TIMEOUT=5-15
+AWG31_MAX_HANDSHAKE_ATTEMPTS=15-20
+AWG31_RANDOM_TRAILERS=on
+AWG31_DISABLE_COOKIES=off
 ```
 
-Use the configured `AWG_HTTP_PORT` instead of `7777` when overridden. Rerunning the installer installs the current latest stable release and restarts the unit without deleting the selected data directory.
+See [configuration](configuration.md) for every accepted setting and strict
+validation rule. The installer chooses `/data` only when `/data/clients.json`
+already exists; otherwise it uses `/var/lib/awg-server`. It preserves the
+selected data directory on rerun and does not relocate data automatically.
 
-The installer does not configure inbound firewall policy or open or close ports. After the service starts, `awg-server` manages its own NAT/MASQUERADE rule as AWG interfaces are restored or created. The operator must expose every required AWG UDP port and restrict the HTTP API port to the internal network as described in [Firewall](#firewall).
+## Controlled upgrade transaction
 
-## Manual alternative
+The installer intentionally creates a controlled service outage. Its order is:
 
-Use the following steps only when the verified installer cannot be used or when building from source is intentional. They keep the same binary, environment, sysctl, data, and systemd paths as the automated installation.
+1. Require root, Ubuntu 22.04, a host/VM, and a supported architecture.
+2. Install the current AmneziaWG PPA packages and enforce the minimum package
+   versions before staging a server binary.
+3. Stage the exact architecture-specific AWG 3.1 asset under a root-only
+   directory. Verify the Ed25519 signature, a canonical ordered manifest with
+   the exact six asset names, selected checksum, and embedded binary version
+   before touching the installed binary.
+4. Stop `awg-server.service`. If stop cannot be confirmed, abort without
+   assuming the process is down.
+5. Create one root-only (`0700`) timestamped backup directory and copy the
+   existing environment, `clients.json`, and `usage.json` when present as
+   root-only files (`0600`). The backup intentionally does not contain the
+   binary, unit, or sysctl file. Do not reuse a partial backup as evidence of
+   recovery.
+6. Refuse to proceed if any AmneziaWG interface remains after the service stop.
+   The installer never deletes an unknown interface.
+7. Require at least
+   `amneziawg-tools` `1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1` and
+   `amneziawg-dkms` `1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1` on Ubuntu
+   22.04. Reload the module and run the staged binary's `check-runtime` probe
+   before replacing `/usr/local/bin/awg-server`.
+8. Replace the binary only after the preceding gates, then write root-owned
+   environment/unit/sysctl files and enable and start the unit.
+9. Require a new systemd `InvocationID`, active unit, exact local
+   `{"status":"ok"}` health response, and an authenticated `/api/clients`
+   response that parses as a JSON array within the service deadline.
 
-### 1. Install AmneziaWG 2.0
+The API token is placed in a root-only curl configuration file for that gate;
+it is not put in a curl command-line argument. Values containing CR or LF are
+rejected before the environment or auth configuration is written.
 
-Install the official `amneziawg` metapackage. It installs both the DKMS kernel module and the `awg` CLI from the Amnezia PPA:
+If a post-replacement gate fails, the installer attempts to stop the service,
+retains the backup, and does not automatically restore or restart an
+unqualified binary. If it cannot confirm the stop, it says so rather than
+claiming the service is down. The temporary staging directory is cleaned on
+exit and is not recovery evidence. Recover manually from the retained root-only
+backup after investigating logs, module state, and interfaces. This boundary
+avoids claiming that a mixed package/kernel/service failure can be rolled back
+safely.
+
+## Migrating a legacy host
+
+Use the installer—not the old self-updater—to migrate an existing 2.0 host.
+It preserves `clients.json`; the server restores records without a
+`protocol_version` as 2.0 and saves canonical metadata only after the whole
+restore succeeds. Existing 2.0 client configurations continue to work until an
+authenticated API caller explicitly migrates each client.
+
+This major release accepts only the signed AWG31 asset set:
+
+```text
+awg-server-awg31-darwin-amd64
+awg-server-awg31-darwin-arm64
+awg-server-awg31-linux-amd64
+awg-server-awg31-linux-arm64
+awg-server-awg31-windows-amd64.exe
+awg-server-awg31-windows-arm64.exe
+```
+
+An older updater requests the disjoint legacy asset names and therefore fails
+closed instead of selecting a 3.1 binary. Do not bypass that bridge with an
+old self-update path.
+
+Newly issued clients default to 3.1. After a 3.1 client is issued, downgrading
+the host to v1.0.5 is unsupported: that version has no 3.1 profile/key
+contract, and a legacy updater expects old asset names. Keep the verified backup
+only as recovery material; do not use it as an automated protocol downgrade.
+
+## Manual installation
+
+Manual installation is appropriate only when the operator can independently
+verify the signed release and all host prerequisites.
 
 ```bash
 apt-get update
 apt-get install -y \
   build-essential ca-certificates curl dkms gnupg2 iproute2 iptables \
-  libelf-dev \
-  python3-launchpadlib software-properties-common \
+  libelf-dev openssl python3-launchpadlib software-properties-common \
   "linux-headers-$(uname -r)"
-```
-
-If the running kernel is XanMod, install the matching LLVM 19 toolchain before installing AmneziaWG. Current XanMod kernels use LLVM-only build flags that the Ubuntu 22.04 default Clang 14 does not support:
-
-```bash
-if [[ $(uname -r) == *xanmod* ]]; then
-  install -d -m 0755 /etc/apt/keyrings
-  curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
-    | gpg --batch --yes --dearmor -o /etc/apt/keyrings/llvm-snapshot.gpg
-  echo 'deb [signed-by=/etc/apt/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main' \
-    > /etc/apt/sources.list.d/llvm-19.list
-  apt-get update
-  apt-get install -y clang-19 lld-19 llvm-19
-  for tool in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
-    update-alternatives --install "/usr/bin/$tool" "$tool" "/usr/bin/$tool-19" 190
-    update-alternatives --set "$tool" "/usr/bin/$tool-19"
-  done
-  export PATH=/usr/lib/llvm-19/bin:$PATH
-fi
-```
-
-Then enable the official Amnezia PPA and install the metapackage:
-
-```bash
 add-apt-repository -y ppa:amnezia/ppa
 apt-get update
-apt-get install -y amneziawg
-```
-
-Load and verify the installation:
-
-```bash
+apt-get install -y amneziawg amneziawg-tools amneziawg-dkms
 modprobe amneziawg
-modinfo amneziawg
-awg --version
-dkms status
+install -o root -g root -m 0755 <verified-awg-server> /usr/local/bin/awg-server
+/usr/local/bin/awg-server check-runtime
 ```
 
-The upstream DKMS and tools package versions use their own `1.0.*` numbering. That number is not the protocol version; the current official PPA packages support the AmneziaWG 2.0 fields used by `awg-server`, including ranged H1-H4 values, S3/S4, and I1-I5.
+`check-runtime` requires installed/OK package status, the configured minimum
+package versions, strict `awg --version` output of the form
+`amneziawg-tools v3.1.YYYYMMDD - https://amnezia.org`, and an isolated 3.1
+setconf/showconf readback. It creates and deletes only a randomized temporary
+interface that it created. A diagnostic module version may be unavailable; the
+functional probe is authoritative.
 
-### 2. Build awg-server
-
-```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o awg-server .
-```
-
-For ARM servers (e.g. Oracle Cloud ARM):
-
-```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o awg-server .
-```
-
-Direct source builds intentionally do not contain the official release verification key, so `awg-server update` fails closed for them. Official Linux and macOS release binaries embed that Ed25519 key and verify the canonical version-bound asset URLs, signed six-asset checksum manifest, selected checksum, upgrade-only on-disk version, interprocess lock, size limit, and downloaded binary version before replacement. Windows self-update fails closed before network access because an active `.exe` cannot be replaced atomically. Bootstrap an existing legacy or source-built installation with a separately verified signed release before relying on Linux/macOS self-update.
-
-### 3. Deploy
-
-Copy binary to the server:
-
-```bash
-scp awg-server root@your-server:/usr/local/bin/
-```
-
-### 4. Enable IP forwarding
-
-```bash
-printf '%s\n' 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-awg-server.conf
-sysctl -w net.ipv4.ip_forward=1
-```
-
-### 5. Run
-
-#### Direct
-
-```bash
-mkdir -p /var/lib/awg-server
-read -r -s -p 'AWG_API_TOKEN: ' AWG_API_TOKEN
-export AWG_API_TOKEN
-export AWG_ADDRESS=10.0.0.1/24
-export AWG_ENDPOINT=vpn.example.com
-export AWG_DATA_DIR=/var/lib/awg-server
-/usr/local/bin/awg-server
-```
-
-#### systemd service
-
-Create `/etc/systemd/system/awg-server.service`:
-
-```ini
-[Unit]
-Description=AmneziaWG Server
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=simple
-EnvironmentFile=/etc/awg-server.env
-ExecStartPre=/sbin/modprobe amneziawg
-ExecStart=/usr/local/bin/awg-server
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Create `/etc/awg-server.env` with its final ownership and permissions before writing the token, then edit it:
+Create `/etc/awg-server.env` with root-only permissions and real values outside
+source control:
 
 ```bash
 install -o root -g root -m 0600 /dev/null /etc/awg-server.env
 editor /etc/awg-server.env
 ```
 
-Use these contents:
+Use a systemd unit whose `ExecStartPre` loads `amneziawg`, whose `EnvironmentFile`
+is `/etc/awg-server.env`, and whose `ExecStart` is
+`/usr/local/bin/awg-server`. Enable IPv4 forwarding:
 
 ```bash
-AWG_API_TOKEN=your-secret-token
-AWG_ADDRESS=10.0.0.1/24
-AWG_ENDPOINT=your.server.ip
-AWG_LISTEN_PORT=51820
-AWG_HTTP_PORT=7777
-AWG_DNS=1.1.1.1
-AWG_MTU=1420
-AWG_DATA_DIR=/var/lib/awg-server
-AWG_JC=5
-AWG_JMIN=50
-AWG_JMAX=1000
-AWG_S3=0
-AWG_S4=0
-AWG_MAX_INTERFACES=0
+printf '%s\n' 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-awg-server.conf
+sysctl -w net.ipv4.ip_forward=1
 ```
 
-H1-H4 and S1/S2 are generated on first start and persisted. `AWG_JC`, `AWG_JMIN`, `AWG_JMAX`, `AWG_S3`, and `AWG_S4` are server-wide defaults inherited by clients that do not override those fields. `AWG_DNS` and `AWG_MTU` are generated-client defaults; `AWG_LISTEN_PORT` is the base for automatic interface ports. `AWG_MAX_INTERFACES=0` means unlimited. The example overrides `AWG_DATA_DIR`; if omitted, it defaults to `/data`. `AWG_INTERFACE` defaults to automatic outbound-interface detection, and `AWG_I1` through `AWG_I5` default to empty.
-
-Enable and start:
+After starting or changing the service, confirm both the unauthenticated health
+endpoint and the authenticated clients endpoint. Health alone does not prove
+token loading or manager/API readiness.
 
 ```bash
-mkdir -p /var/lib/awg-server
-systemctl daemon-reload
-systemctl enable awg-server
-systemctl start awg-server
-systemctl status awg-server
+curl -fsS http://127.0.0.1:7777/health
+curl -fsS http://127.0.0.1:7777/api/clients \
+  -H "Authorization: Bearer $AWG_API_TOKEN"
 ```
 
-Startup restores every persisted client before starting the HTTP listener. When persisted clients exist, missing top-level `server_private_key` or `generated_params`, an invalid or mismatched client keypair, invalid AWG/routing settings, or any interface/peer restoration failure is fatal instead of silently generating replacement state or skipping a client. Failure to bind the configured HTTP port also exits non-zero after cleanup, allowing the service manager to restart or report the unit as failed. Inspect `journalctl -u awg-server` if the service does not reach the listening log line; cleanup of interfaces created earlier in a failed restore is best-effort.
+## Firewall and client handling
 
-Client create/update/regeneration/delete operations return a generic HTTP `500` when device work or `clients.json` persistence fails and attempt to restore the previous device state. Rollback is not guaranteed if a second host command fails or the process crashes, so inspect `awg show`, `ip route`, and the service logs after such an error.
+Allow the auto-assigned UDP range and every explicit per-client interface port.
+Restrict the HTTP API to the operator's internal network even though it uses
+bearer authentication. The service maintains an `AWG-LAN` chain that allows
+only same-`lan_group_id` VPN peers and drops other VPN-subnet traffic between
+`awg+` interfaces.
 
-## Firewall
+After a client version migration, parameter reset, or 3.1 regeneration, fetch
+`GET /api/clients/{id}/configuration` again and re-import it on the client.
+A 3.1 configuration contains the private header-protection key only in that
+authenticated configuration response; do not copy it into tickets, logs, or
+documentation.
 
-Open the automatic WireGuard UDP range, open every explicit per-client `awg_params.port`, and restrict the HTTP API to the internal network. The example `51820:51840` only covers 21 automatic or explicitly selected ports; increase it or add individual rules to match the deployment.
+## Troubleshooting boundaries
 
-At startup, `awg-server` uses `iptables-restore --wait 5 --noflush` to put an `AWG-LAN` jump at rule 1 of `FORWARD`. It matches only VPN-subnet packets entering and leaving `awg+` interfaces, allows same-`lan_group_id` address pairs, and drops other inter-client traffic. Other forwarding and Internet traffic are unchanged. Startup fails before peer restoration if this fail-closed chain cannot be installed.
-
-After deploying this version and confirming `GET /api/capabilities` returns `{"lan_group_isolation":true}`, remove temporary per-IP UFW rules such as `.2 ↔ .3`. Those rules outlive address reuse and can grant access to an unrelated peer that later receives the same IP.
-
-### iptables
-
-```bash
-iptables -A INPUT -p udp --dport 51820:51840 -j ACCEPT  # range for multiple AWG interfaces
-iptables -A INPUT -p tcp --dport 7777 -s 10.0.0.0/8 -j ACCEPT
-iptables -A INPUT -p tcp --dport 7777 -j DROP
-```
-
-### ufw (Ubuntu)
-
-```bash
-ufw allow 51820:51840/udp  # range for multiple AWG interfaces
-ufw allow from 10.0.0.0/8 to any port 7777
-```
-
-The unauthenticated `GET /health` endpoint is intended for monitoring. Every `/api` route requires the bearer token; keep TCP port 7777 off the public Internet even though application authentication is enabled.
-
-## Troubleshooting
-
-### Installer or health gate fails
-
-Service-gate failures already print `systemctl status` and the last 50 unit log lines. Recheck the same evidence after correcting the configuration:
+For an installer failure, keep the service stopped if the script says it could
+not qualify the new runtime. Inspect the retained backup, then check:
 
 ```bash
 systemctl --no-pager --full status awg-server.service
 journalctl --no-pager -u awg-server.service -n 50
-curl -fsS http://127.0.0.1:7777/health
-```
-
-Use the configured `AWG_HTTP_PORT` for the health request. Rerun the same exact-tag installer after fixing the cause; existing client and usage JSON in the selected data directory is preserved.
-
-### Module not loading
-
-```bash
-dmesg | grep amnezia
+awg-server check-runtime
+dkms status
 modinfo amneziawg
 ```
 
-If `modprobe amneziawg` fails, rebuild the module for your kernel version:
-
-```bash
-apt-get install --reinstall "linux-headers-$(uname -r)" amneziawg-dkms
-dkms status
-modprobe amneziawg
-```
-
-### awg command not found
-
-Reinstall the official tools package and verify the binary:
-
-```bash
-apt-get install --reinstall amneziawg-tools
-command -v awg
-awg --version
-```
-
-### Interface creation fails
-
-```bash
-ip link add awg0 type amneziawg
-```
-
-If this fails with "Operation not supported", the kernel module is not loaded. Run `modprobe amneziawg`.
+Do not delete unknown `awg*` interfaces to make an installer rerun pass. Do not
+claim recovery from a local shell test alone; re-run the authenticated service
+gate and real client qualification after fixing a host problem.

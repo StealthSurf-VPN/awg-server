@@ -30,6 +30,10 @@ Files most affected: `internal/awg/pool.go`, `internal/clients/manager.go`, `int
 - All reads/writes to shared maps (`p.ifaces`, `p.usedPorts`, `m.clients`, `m.usedIPs`) happen under the relevant mutex
 - No nested `Lock` of the same mutex (deadlock); no lock-ordering inversions if multiple are held
 - `Pool.MigratePeer` is the only multi-step state transition under one lock — verify rollback paths in `pool.go` still hold the mutex
+- Version migration and 3.1 regeneration must retain the exact old/new
+  immutable `Profile`, actual old port, and private key-map snapshot until the
+  prospective Save commits; a snapshot, migration, or Save failure must not
+  report success or discard the old state.
 
 ### exec.Command safety
 
@@ -41,6 +45,14 @@ Files: `internal/awg/pool.go` (iptables MASQUERADE), `internal/awg/device.go` (i
   - Interface name: `awgN` derived internally (safe)
   - Allowed IP, public key: validated via `net.ParseCIDR` / `awg.Base64ToKey` upstream
 - Flag any `fmt.Sprintf` that builds an exec arg from API-provided strings (`AWGParams.H1-H4`, `I1-I5`)
+- Server interface configuration must remain `awg setconf <interface>
+  /dev/stdin`, with the complete immutable Profile on stdin. Do not log the
+  configuration payload or move private/server/header keys into argv or a
+  temporary file.
+- Pool identity must use opaque `ProfileKey`, not the legacy
+  `AWGParams.Key()` helper. Verify it changes for protocol version,
+  server-applied 3.1 fields, and HeaderProtectionKey but not client-only
+  settings or requested port.
 
 ### Error handling
 
@@ -67,6 +79,13 @@ Files: `main.go`, `internal/usage/collector.go`, `internal/api/server.go`.
 - JSON writes go through `Storage.Save` (tmp + rename, perms 0600)
 - No partial writes to `clients.json` or `usage.json` from anywhere except `Storage.Save` / `Collector.Save`
 - Reads tolerate missing files (`os.IsNotExist` → empty struct)
+- Persisted protocol versions are canonical `2.0`/`3.1`; missing disk version
+  alone is legacy 2.0. Inspect restore code for accidental default inheritance
+  or alias acceptance on disk.
+- 3.1 header keys are private state: prospective copies must deep-copy their
+  map, invalid referenced state must fail closed, and garbage collection must
+  be staged in prospective state before Save and become authoritative only
+  after a successful Save.
 
 ### Project conventions
 

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added mixed AmneziaWG 2.0/3.1 client management with explicit per-client
+  protocol migration, canonical protocol metadata, and 3.1-by-default creates.
+- Added private persisted 3.1 header-protection-key state, version-aware
+  profile grouping, response redaction, and fail-closed restore validation.
+- Added required AWG 3.1 package/runtime qualification and a transactional
+  installer outage with an authenticated client-list gate and manual recovery
+  boundary.
+- Renamed major-release binaries to the `awg-server-awg31-*` asset set so older
+  updaters fail closed instead of crossing an unqualified host-runtime bridge.
+
 ## [1.0.5] - 2026-07-22
 
 - Added persisted LAN groups with atomic batch membership updates and capability detection
