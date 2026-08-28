@@ -166,35 +166,89 @@ func TestRunCommandUsageListsCheckRuntime(t *testing.T) {
 	}
 }
 
-func TestTemporaryAWG31DefaultsMatchMigrationContract(t *testing.T) {
-	params, err := temporaryAWG31Defaults(&config.Config{
-		DNS: "1.1.1.1", Jc: 5, Jmin: 50, Jmax: 1000,
-	})
-	if err != nil {
-		t.Fatalf("temporaryAWG31Defaults() error = %v", err)
+func TestManagerDefaultsFromConfigUsesValidatedAWG31Settings(t *testing.T) {
+	parseRange := func(value string) config.Uint16Range {
+		t.Helper()
+
+		parsed, err := config.ParseUint16Range(value)
+		if err != nil {
+			t.Fatalf("ParseUint16Range(%q) error = %v", value, err)
+		}
+
+		return parsed
 	}
 
-	if params.MTU != 1280 || params.RandomTrailers != "on" || params.DisableCookies != "off" {
-		t.Fatalf("temporary defaults = %+v", params)
+	cfg := &config.Config{
+		MTU:                         1420,
+		DNS:                         "1.1.1.1",
+		Jc:                          5,
+		Jmin:                        50,
+		Jmax:                        1000,
+		S3:                          0,
+		S4:                          0,
+		I1:                          "b5",
+		DefaultProtocolVersion:      "2.0",
+		AWG31MTU:                    1280,
+		AWG31PersistentKeepalive:    parseRange("25-35"),
+		AWG31ContentPaddingAddition: parseRange("10-100"),
+		AWG31RekeyAfterTime:         parseRange("100-120"),
+		AWG31RekeyTimeout:           parseRange("3-7"),
+		AWG31RejectAfterTime:        parseRange("150-180"),
+		AWG31KeepaliveTimeout:       parseRange("5-15"),
+		AWG31MaxHandshakeAttempts:   parseRange("15-20"),
+		AWG31RandomTrailers:         "on",
+		AWG31DisableCookies:         "off",
 	}
+	data := &clients.StorageData{
+		GeneratedParams: &awg.GeneratedParams{
+			H1: "100000-200000", H2: "1000000-2000000",
+			H3: "10000000-20000000", H4: "100000000-200000000",
+			S1: 15, S2: 72,
+		},
+	}
+
+	defaults, err := managerDefaultsFromConfig(cfg, data)
+	if err != nil {
+		t.Fatalf("managerDefaultsFromConfig() error = %v", err)
+	}
+
+	if defaults.DefaultVersion != awg.ProtocolVersion2 {
+		t.Fatalf("DefaultVersion = %q, want 2.0", defaults.DefaultVersion)
+	}
+	if defaults.LegacyParams.H1 != data.GeneratedParams.H1 || defaults.LegacyParams.S2 != data.GeneratedParams.S2 {
+		t.Fatalf("legacy defaults did not use persisted generated params: %+v", defaults.LegacyParams)
+	}
+	if defaults.AWG31Params.MTU != cfg.AWG31MTU || defaults.AWG31Params.RandomTrailers != "on" || defaults.AWG31Params.DisableCookies != "off" {
+		t.Fatalf("AWG 3.1 defaults = %+v", defaults.AWG31Params)
+	}
+
 	for _, tt := range []struct {
 		name  string
 		value string
 		want  string
 	}{
-		{name: "persistent keepalive", value: params.PersistentKeepalive.String(), want: "25-35"},
-		{name: "content padding", value: params.ContentPaddingAddition.String(), want: "10-100"},
-		{name: "rekey after", value: params.RekeyAfterTime.String(), want: "100-120"},
-		{name: "rekey timeout", value: params.RekeyTimeout.String(), want: "3-7"},
-		{name: "reject after", value: params.RejectAfterTime.String(), want: "150-180"},
-		{name: "keepalive timeout", value: params.KeepaliveTimeout.String(), want: "5-15"},
-		{name: "max attempts", value: params.MaxHandshakeAttempts.String(), want: "15-20"},
+		{name: "persistent keepalive", value: defaults.AWG31Params.PersistentKeepalive.String(), want: "25-35"},
+		{name: "content padding", value: defaults.AWG31Params.ContentPaddingAddition.String(), want: "10-100"},
+		{name: "rekey after", value: defaults.AWG31Params.RekeyAfterTime.String(), want: "100-120"},
+		{name: "rekey timeout", value: defaults.AWG31Params.RekeyTimeout.String(), want: "3-7"},
+		{name: "reject after", value: defaults.AWG31Params.RejectAfterTime.String(), want: "150-180"},
+		{name: "keepalive timeout", value: defaults.AWG31Params.KeepaliveTimeout.String(), want: "5-15"},
+		{name: "max attempts", value: defaults.AWG31Params.MaxHandshakeAttempts.String(), want: "15-20"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.value != tt.want {
 				t.Fatalf("range = %q, want %q", tt.value, tt.want)
 			}
 		})
+	}
+}
+
+func TestManagerDefaultsFromConfigRejectsNonCanonicalProtocolVersion(t *testing.T) {
+	_, err := managerDefaultsFromConfig(&config.Config{DefaultProtocolVersion: "2"}, &clients.StorageData{
+		GeneratedParams: &awg.GeneratedParams{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "protocol version") {
+		t.Fatalf("managerDefaultsFromConfig() error = %v, want protocol version error", err)
 	}
 }
 

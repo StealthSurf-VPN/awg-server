@@ -123,7 +123,7 @@ func prepareStartup() (*startupState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode server private key: %w", err)
 	}
-	defaults, err := temporaryManagerDefaults(cfg, data)
+	defaults, err := managerDefaultsFromConfig(cfg, data)
 	if err != nil {
 		return nil, err
 	}
@@ -146,9 +146,20 @@ func prepareRestorePlan(state *startupState) (*clients.RestorePlan, error) {
 	return plan, nil
 }
 
-func temporaryManagerDefaults(cfg *config.Config, data *clients.StorageData) (clients.ManagerDefaults, error) {
+func managerDefaultsFromConfig(cfg *config.Config, data *clients.StorageData) (clients.ManagerDefaults, error) {
+	if cfg == nil {
+		return clients.ManagerDefaults{}, fmt.Errorf("prepare defaults: config is required")
+	}
 	if data.GeneratedParams == nil {
 		return clients.ManagerDefaults{}, fmt.Errorf("prepare defaults: generated AWG params are required")
+	}
+
+	defaultVersion, err := awg.ParseProtocolVersion(cfg.DefaultProtocolVersion)
+	if err != nil {
+		return clients.ManagerDefaults{}, fmt.Errorf("parse default protocol version: %w", err)
+	}
+	if defaultVersion.String() != cfg.DefaultProtocolVersion {
+		return clients.ManagerDefaults{}, fmt.Errorf("default protocol version must be canonical")
 	}
 
 	legacy := awg.AWGParams{
@@ -172,50 +183,16 @@ func temporaryManagerDefaults(cfg *config.Config, data *clients.StorageData) (cl
 		I5:   cfg.I5,
 	}
 
-	awg31, err := temporaryAWG31Defaults(cfg)
-	if err != nil {
-		return clients.ManagerDefaults{}, err
-	}
+	persistentKeepalive := cfg.AWG31PersistentKeepalive
+	contentPaddingAddition := cfg.AWG31ContentPaddingAddition
+	rekeyAfterTime := cfg.AWG31RekeyAfterTime
+	rekeyTimeout := cfg.AWG31RekeyTimeout
+	rejectAfterTime := cfg.AWG31RejectAfterTime
+	keepaliveTimeout := cfg.AWG31KeepaliveTimeout
+	maxHandshakeAttempts := cfg.AWG31MaxHandshakeAttempts
 
-	return clients.ManagerDefaults{
-		LegacyParams:   legacy,
-		AWG31Params:    awg31,
-		DefaultVersion: awg.ProtocolVersion31,
-	}, nil
-}
-
-func temporaryAWG31Defaults(cfg *config.Config) (awg.AWGParams, error) {
-	persistentKeepalive, err := config.ParseUint16Range("25-35")
-	if err != nil {
-		return awg.AWGParams{}, err
-	}
-	contentPaddingAddition, err := config.ParseUint16Range("10-100")
-	if err != nil {
-		return awg.AWGParams{}, err
-	}
-	rekeyAfterTime, err := config.ParseUint16Range("100-120")
-	if err != nil {
-		return awg.AWGParams{}, err
-	}
-	rekeyTimeout, err := config.ParseUint16Range("3-7")
-	if err != nil {
-		return awg.AWGParams{}, err
-	}
-	rejectAfterTime, err := config.ParseUint16Range("150-180")
-	if err != nil {
-		return awg.AWGParams{}, err
-	}
-	keepaliveTimeout, err := config.ParseUint16Range("5-15")
-	if err != nil {
-		return awg.AWGParams{}, err
-	}
-	maxHandshakeAttempts, err := config.ParseUint16Range("15-20")
-	if err != nil {
-		return awg.AWGParams{}, err
-	}
-
-	return awg.AWGParams{
-		MTU:                    1280,
+	awg31 := awg.AWGParams{
+		MTU:                    cfg.AWG31MTU,
 		DNS:                    cfg.DNS,
 		Jc:                     cfg.Jc,
 		Jmin:                   cfg.Jmin,
@@ -232,8 +209,14 @@ func temporaryAWG31Defaults(cfg *config.Config) (awg.AWGParams, error) {
 		RejectAfterTime:        &rejectAfterTime,
 		KeepaliveTimeout:       &keepaliveTimeout,
 		MaxHandshakeAttempts:   &maxHandshakeAttempts,
-		RandomTrailers:         "on",
-		DisableCookies:         "off",
+		RandomTrailers:         cfg.AWG31RandomTrailers,
+		DisableCookies:         cfg.AWG31DisableCookies,
+	}
+
+	return clients.ManagerDefaults{
+		LegacyParams:   legacy,
+		AWG31Params:    awg31,
+		DefaultVersion: defaultVersion,
 	}, nil
 }
 
