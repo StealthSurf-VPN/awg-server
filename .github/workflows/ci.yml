@@ -229,12 +229,12 @@ jobs:
             ./internal/update
 
           expected_assets=(
-            awg-server-darwin-amd64
-            awg-server-darwin-arm64
-            awg-server-linux-amd64
-            awg-server-linux-arm64
-            awg-server-windows-amd64.exe
-            awg-server-windows-arm64.exe
+            awg-server-awg31-darwin-amd64
+            awg-server-awg31-darwin-arm64
+            awg-server-awg31-linux-amd64
+            awg-server-awg31-linux-arm64
+            awg-server-awg31-windows-amd64.exe
+            awg-server-awg31-windows-arm64.exe
           )
           for asset in "${expected_assets[@]}"; do
             test -f "dist/$asset"
@@ -244,9 +244,9 @@ jobs:
             }
           done
 
-          actual_count=$(find dist -maxdepth 1 -type f -name 'awg-server-*' | wc -l | tr -d '[:space:]')
+          actual_count=$(find dist -maxdepth 1 -type f -name 'awg-server-awg31-*' | wc -l | tr -d '[:space:]')
           [ "$actual_count" -eq "${#expected_assets[@]}" ]
-          [ "$(dist/awg-server-linux-amd64 version)" = "awg-server $VERSION" ]
+          [ "$(dist/awg-server-awg31-linux-amd64 version)" = "awg-server $VERSION" ]
 
           (
             cd dist
@@ -304,12 +304,12 @@ jobs:
           }
           cat > "$expected_files" <<'FILES'
           dist/SHA256SUMS
-          dist/awg-server-darwin-amd64
-          dist/awg-server-darwin-arm64
-          dist/awg-server-linux-amd64
-          dist/awg-server-linux-arm64
-          dist/awg-server-windows-amd64.exe
-          dist/awg-server-windows-arm64.exe
+          dist/awg-server-awg31-darwin-amd64
+          dist/awg-server-awg31-darwin-arm64
+          dist/awg-server-awg31-linux-amd64
+          dist/awg-server-awg31-linux-arm64
+          dist/awg-server-awg31-windows-amd64.exe
+          dist/awg-server-awg31-windows-arm64.exe
           release-notes.md
           FILES
           find bundle -type f -printf '%P\n' | sort > "$actual_files"
@@ -317,12 +317,12 @@ jobs:
           test -s bundle/release-notes.md
 
           expected_assets=(
-            awg-server-darwin-amd64
-            awg-server-darwin-arm64
-            awg-server-linux-amd64
-            awg-server-linux-arm64
-            awg-server-windows-amd64.exe
-            awg-server-windows-arm64.exe
+            awg-server-awg31-darwin-amd64
+            awg-server-awg31-darwin-arm64
+            awg-server-awg31-linux-amd64
+            awg-server-awg31-linux-arm64
+            awg-server-awg31-windows-amd64.exe
+            awg-server-awg31-windows-arm64.exe
           )
           mapfile -t manifest_lines < bundle/dist/SHA256SUMS
           [ "${#manifest_lines[@]}" -eq "${#expected_assets[@]}" ]
@@ -606,7 +606,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           gh release create "$TAG" \
-            bundle/dist/awg-server-* \
+            bundle/dist/awg-server-awg31-* \
             bundle/dist/SHA256SUMS \
             bundle/dist/SHA256SUMS.sig \
             --repo "$GITHUB_REPOSITORY" \
@@ -639,12 +639,12 @@ jobs:
             and ([.assets[].name] | sort) == ([
               "SHA256SUMS",
               "SHA256SUMS.sig",
-              "awg-server-darwin-amd64",
-              "awg-server-darwin-arm64",
-              "awg-server-linux-amd64",
-              "awg-server-linux-arm64",
-              "awg-server-windows-amd64.exe",
-              "awg-server-windows-arm64.exe"
+              "awg-server-awg31-darwin-amd64",
+              "awg-server-awg31-darwin-arm64",
+              "awg-server-awg31-linux-amd64",
+              "awg-server-awg31-linux-arm64",
+              "awg-server-awg31-windows-amd64.exe",
+              "awg-server-awg31-windows-arm64.exe"
             ] | sort)
           ' "$release_file" >/dev/null
 
@@ -656,12 +656,12 @@ jobs:
           expected_assets=(
             SHA256SUMS
             SHA256SUMS.sig
-            awg-server-darwin-amd64
-            awg-server-darwin-arm64
-            awg-server-linux-amd64
-            awg-server-linux-arm64
-            awg-server-windows-amd64.exe
-            awg-server-windows-arm64.exe
+            awg-server-awg31-darwin-amd64
+            awg-server-awg31-darwin-arm64
+            awg-server-awg31-linux-amd64
+            awg-server-awg31-linux-arm64
+            awg-server-awg31-windows-amd64.exe
+            awg-server-awg31-windows-arm64.exe
           )
           for asset in "${expected_assets[@]}"; do
             cmp --silent "bundle/dist/$asset" "$published_dir/$asset" || {

@@ -1,4 +1,5 @@
 BINARY_NAME := awg-server
+RELEASE_BINARY_NAME := awg-server-awg31
 DIST_DIR := dist
 
 PLATFORMS := \
@@ -30,7 +31,7 @@ build-all: clean
 		echo "Building $(OS)/$(ARCH)..." && \
 		CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build -trimpath \
 			-ldflags="$(LDFLAGS)" \
-			-o $(DIST_DIR)/$(BINARY_NAME)-$(OS)-$(ARCH)$(EXT) . && \
+			-o $(DIST_DIR)/$(RELEASE_BINARY_NAME)-$(OS)-$(ARCH)$(EXT) . && \
 	) true
 
 clean:

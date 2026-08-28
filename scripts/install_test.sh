@@ -98,6 +98,7 @@ reset_settings() {
     INSTALL_TEMP_PATHS=()
     INSTALLER_BACKUP_DIR=''
     INSTALLER_STAGED_BINARY=''
+    unset STUB_MANIFEST_MODE
 }
 
 write_stubs() {
@@ -199,13 +200,55 @@ case "$name" in
                 ;;
             */SHA256SUMS)
                 log 'curl checksum-manifest'
-                printf '%064d  awg-server-linux-amd64\n' 0 > "$output_file"
+                case "${STUB_MANIFEST_MODE:-exact}" in
+                    exact)
+                        printf '%064d  awg-server-awg31-darwin-amd64\n' 0
+                        printf '%064d  awg-server-awg31-darwin-arm64\n' 0
+                        printf '%064d  awg-server-awg31-linux-amd64\n' 0
+                        printf '%064d  awg-server-awg31-linux-arm64\n' 0
+                        printf '%064d  awg-server-awg31-windows-amd64.exe\n' 0
+                        printf '%064d  awg-server-awg31-windows-arm64.exe\n' 0
+                        ;;
+                    legacy)
+                        printf '%064d  awg-server-darwin-amd64\n' 0
+                        printf '%064d  awg-server-darwin-arm64\n' 0
+                        printf '%064d  awg-server-linux-amd64\n' 0
+                        printf '%064d  awg-server-linux-arm64\n' 0
+                        printf '%064d  awg-server-windows-amd64.exe\n' 0
+                        printf '%064d  awg-server-windows-arm64.exe\n' 0
+                        ;;
+                    missing)
+                        printf '%064d  awg-server-awg31-darwin-amd64\n' 0
+                        printf '%064d  awg-server-awg31-darwin-arm64\n' 0
+                        printf '%064d  awg-server-awg31-linux-amd64\n' 0
+                        printf '%064d  awg-server-awg31-linux-arm64\n' 0
+                        printf '%064d  awg-server-awg31-windows-amd64.exe\n' 0
+                        ;;
+                    duplicate)
+                        printf '%064d  awg-server-awg31-darwin-amd64\n' 0
+                        printf '%064d  awg-server-awg31-darwin-amd64\n' 0
+                        printf '%064d  awg-server-awg31-linux-amd64\n' 0
+                        printf '%064d  awg-server-awg31-linux-arm64\n' 0
+                        printf '%064d  awg-server-awg31-windows-amd64.exe\n' 0
+                        printf '%064d  awg-server-awg31-windows-arm64.exe\n' 0
+                        ;;
+                    extra)
+                        printf '%064d  awg-server-awg31-darwin-amd64\n' 0
+                        printf '%064d  awg-server-awg31-darwin-arm64\n' 0
+                        printf '%064d  awg-server-awg31-linux-amd64\n' 0
+                        printf '%064d  awg-server-awg31-linux-arm64\n' 0
+                        printf '%064d  awg-server-awg31-windows-amd64.exe\n' 0
+                        printf '%064d  awg-server-awg31-windows-arm64.exe\n' 0
+                        printf '%064d  awg-server-awg31-linux-ppc64\n' 0
+                        ;;
+                    *) exit 1 ;;
+                esac > "$output_file"
                 ;;
             */SHA256SUMS.sig)
                 log 'curl checksum-signature'
                 printf 'synthetic-signature' > "$output_file"
                 ;;
-            */awg-server-linux-amd64)
+            */awg-server-awg31-linux-amd64)
                 log 'curl release-binary'
                 printf '%s\n' \
                     '#!/usr/bin/env bash' \
@@ -461,11 +504,50 @@ resolve_case_settings() {
     AWG_SERVER_VERSION=1.2.3
 }
 
+test_release_asset_bridge() {
+    local mode
+
+    setup_base_case asset-names
+    [ "$(release_asset_name x86_64)" = awg-server-awg31-linux-amd64 ] \
+        || fail 'x86_64 did not select the AWG31 release asset'
+    [ "$(release_asset_name aarch64)" = awg-server-awg31-linux-arm64 ] \
+        || fail 'aarch64 did not select the AWG31 release asset'
+    [ "$(release_asset_name x86_64)" != awg-server-linux-amd64 ] \
+        || fail 'legacy x86_64 asset name still selected'
+
+    setup_base_case legacy-only
+    export STUB_MANIFEST_MODE=legacy
+    resolve_case_settings
+    if stage_verified_release awg-server-awg31-linux-amd64; then
+        fail 'legacy-only checksum manifest unexpectedly passed the AWG31 gate'
+    fi
+
+    for mode in missing duplicate extra; do
+        setup_base_case "manifest-$mode"
+        export STUB_MANIFEST_MODE=$mode
+        resolve_case_settings
+        if stage_verified_release awg-server-awg31-linux-amd64; then
+            fail "$mode checksum manifest unexpectedly passed the exact asset gate"
+        fi
+    done
+
+    setup_base_case exact-manifest
+    resolve_case_settings
+    stage_verified_release awg-server-awg31-linux-amd64 \
+        || fail 'exact AWG31 checksum manifest was rejected'
+
+    setup_base_case legacy-request
+    resolve_case_settings
+    if stage_verified_release awg-server-linux-amd64; then
+        fail 'legacy requested asset selected an AWG31 release binary'
+    fi
+}
+
 run_transaction() {
     local output_file=$1
     local error_file=$2
 
-    if (install_release_transaction awg-server-linux-amd64) >"$output_file" 2>"$error_file"; then
+    if (install_release_transaction awg-server-awg31-linux-amd64) >"$output_file" 2>"$error_file"; then
         return 0
     fi
 
@@ -1160,6 +1242,7 @@ test_invocation_gate() {
 # shellcheck source=install.sh
 source "$installer"
 
+test_release_asset_bridge
 test_config_parser_rejects_executable_and_unknown_input
 test_config_parser_round_trips_rendered_values
 test_package_minimum_versions

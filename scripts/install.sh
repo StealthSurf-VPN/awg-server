@@ -7,6 +7,14 @@ readonly MINIMUM_TOOLS_PACKAGE_VERSION='1.0.20210914-0~202608130145+ee0f0a9~ubun
 readonly MINIMUM_DKMS_PACKAGE_VERSION='1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1'
 readonly RECOVERY_GUIDANCE='RECOVERY: awg-server remains stopped. Retain the root-only backup and recover manually; do not restart an unqualified binary.'
 readonly UNCONFIRMED_RECOVERY_GUIDANCE='RECOVERY: awg-server stop could not be confirmed. Do not assume the service is stopped; retain the root-only backup and intervene manually.'
+readonly -a EXPECTED_RELEASE_ASSETS=(
+    awg-server-awg31-darwin-amd64
+    awg-server-awg31-darwin-arm64
+    awg-server-awg31-linux-amd64
+    awg-server-awg31-linux-arm64
+    awg-server-awg31-windows-amd64.exe
+    awg-server-awg31-windows-arm64.exe
+)
 readonly -a ENVIRONMENT_KEYS=(
     AWG_API_TOKEN
     AWG_ADDRESS
@@ -322,8 +330,8 @@ select_data_dir() {
 
 release_asset_name() {
     case ${1:-} in
-        x86_64) printf 'awg-server-linux-amd64\n' ;;
-        aarch64 | arm64) printf 'awg-server-linux-arm64\n' ;;
+        x86_64) printf 'awg-server-awg31-linux-amd64\n' ;;
+        aarch64 | arm64) printf 'awg-server-awg31-linux-arm64\n' ;;
         *)
             printf 'unsupported architecture: %s\n' "${1:-unknown}" >&2
             return 1
@@ -580,6 +588,8 @@ stage_verified_release() {
     local checksum_line=''
     local checksum_pattern='^([0-9a-f]{64})  (.+)$'
     local downloaded_version
+    local expected_asset
+    local index
     local key_description
     local key_type
     local line
@@ -615,13 +625,21 @@ stage_verified_release() {
         -sigfile "$INSTALLER_STAGE_DIR/SHA256SUMS.sig" \
         -in "$INSTALLER_STAGE_DIR/SHA256SUMS" || return 1
 
-    while IFS= read -r line || [[ -n $line ]]; do
-        if [[ $line =~ $checksum_pattern ]] \
-            && [[ ${BASH_REMATCH[2]} == "$asset" ]]; then
+    [[ $(tail -c 1 "$INSTALLER_STAGE_DIR/SHA256SUMS" | wc -l | tr -d '[:space:]') == 1 ]] \
+        || return 1
+    index=0
+    while IFS= read -r line; do
+        [[ $index -lt ${#EXPECTED_RELEASE_ASSETS[@]} ]] || return 1
+        expected_asset=${EXPECTED_RELEASE_ASSETS[index]}
+        [[ $line =~ $checksum_pattern ]] || return 1
+        [[ ${BASH_REMATCH[2]} == "$expected_asset" ]] || return 1
+        if [[ $expected_asset == "$asset" ]]; then
             checksum_count=$((checksum_count + 1))
             checksum_line=$line
         fi
+        index=$((index + 1))
     done < "$INSTALLER_STAGE_DIR/SHA256SUMS"
+    [[ $index -eq ${#EXPECTED_RELEASE_ASSETS[@]} ]] || return 1
     [[ $checksum_count -eq 1 ]] \
         || return 1
 
