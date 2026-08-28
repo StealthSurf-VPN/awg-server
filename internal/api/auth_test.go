@@ -427,6 +427,8 @@ func TestAPIGenerateAWGParamsSelectsConfiguredProtocol(t *testing.T) {
 	for _, path := range []string{
 		"/api/awg-params/generate?protocol_version=3",
 		"/api/awg-params/generate?protocol_version=2&protocol_version=3.1",
+		"/api/awg-params/generate?protocol_versoin=2",
+		"/api/awg-params/generate?protocol_version=2&protocol_versoin=3.1",
 	} {
 		handler, _, _ := newAuthorizedAPISmoke(t)
 

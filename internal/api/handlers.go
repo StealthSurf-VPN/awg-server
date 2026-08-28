@@ -320,9 +320,16 @@ func generateProtocolVersion(r *http.Request, defaultVersion string) (awg.Protoc
 		return "", err
 	}
 
+	if len(query) == 0 {
+		return awg.ParseProtocolVersion(defaultVersion)
+	}
+	if len(query) != 1 {
+		return "", errors.New("protocol_version query is invalid")
+	}
+
 	values, present := query["protocol_version"]
 	if !present {
-		return awg.ParseProtocolVersion(defaultVersion)
+		return "", errors.New("protocol_version query is invalid")
 	}
 	if len(values) != 1 {
 		return "", errors.New("protocol_version must appear once")
