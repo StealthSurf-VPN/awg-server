@@ -1,6 +1,11 @@
 package awg
 
-import "testing"
+import (
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+)
 
 func TestNormalizeOverridesForVersionClonesRangesAndDNSServers(t *testing.T) {
 	params := &AWGParams{
@@ -46,5 +51,48 @@ func TestNormalizeOverridesForVersionClonesRangesAndDNSServers(t *testing.T) {
 		if tt.got == tt.want {
 			t.Fatalf("NormalizeOverridesForVersion() did not clone %s", tt.name)
 		}
+	}
+}
+
+func TestAWGParamsUnmarshalJSONRejectsExplicitNullForRangeAndToggleFields(t *testing.T) {
+	fields := []string{
+		"persistent_keepalive",
+		"content_padding_addition",
+		"rekey_after_time",
+		"rekey_timeout",
+		"reject_after_time",
+		"keepalive_timeout",
+		"max_handshake_attempts",
+		"random_trailers",
+		"disable_cookies",
+	}
+
+	for _, field := range fields {
+		t.Run(field, func(t *testing.T) {
+			var params AWGParams
+			payload := []byte(`{"` + strings.ToUpper(field) + `":null}`)
+
+			err := json.Unmarshal(payload, &params)
+			if err == nil {
+				t.Fatal("Unmarshal() error = nil, want explicit null rejection")
+			}
+			if !errors.Is(err, ErrInvalidParams) {
+				t.Fatalf("Unmarshal() error = %v, want ErrInvalidParams", err)
+			}
+		})
+	}
+}
+
+func TestAWGParamsUnmarshalJSONKeepsTopLevelNullAndUnknownFieldsCompatible(t *testing.T) {
+	params := AWGParams{RandomTrailers: "on"}
+	if err := json.Unmarshal([]byte("null"), &params); err != nil {
+		t.Fatalf("Unmarshal(top-level null) error = %v", err)
+	}
+	if params.RandomTrailers != "" {
+		t.Fatalf("Unmarshal(top-level null) RandomTrailers = %q, want empty", params.RandomTrailers)
+	}
+
+	if err := json.Unmarshal([]byte(`{"unknown_field":"ignored"}`), &params); err != nil {
+		t.Fatalf("Unmarshal(unknown field) error = %v", err)
 	}
 }

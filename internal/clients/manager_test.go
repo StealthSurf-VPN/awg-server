@@ -725,6 +725,33 @@ func TestCreateClientModeBasedDNSReplacesInheritedLegacyDNS(t *testing.T) {
 	}
 }
 
+func TestGetClientConfigDNSModeDefaultUsesConfiguredDNSForBothProtocolVersions(t *testing.T) {
+	legacy := restoreClientData("legacy", "10.100.0.2", awg.ProtocolVersion2, "")
+	legacy.AWGParams = &awg.AWGParams{DNSMode: awg.DNSModeDefault}
+
+	modern := restoreClientData("modern", "10.100.0.3", awg.ProtocolVersion31, "opaque-default-id")
+	modern.AWGParams = &awg.AWGParams{DNSMode: awg.DNSModeDefault}
+
+	manager, _, _ := newMixedManagerTest(t, &StorageData{
+		AWG31:   restoreAWG31Storage(),
+		Clients: []ClientData{legacy, modern},
+	})
+	manager.defaults.LegacyParams.DNS = "203.0.113.10"
+	manager.defaults.AWG31Params.DNS = "203.0.113.11"
+
+	for _, id := range []string{"legacy", "modern"} {
+		t.Run(id, func(t *testing.T) {
+			configuration, err := manager.GetClientConfig(id)
+			if err != nil {
+				t.Fatalf("GetClientConfig(%q) error = %v", id, err)
+			}
+			if !strings.Contains(configuration, "DNS = 1.1.1.1") {
+				t.Fatalf("configuration does not use configured DNS:\n%s", configuration)
+			}
+		})
+	}
+}
+
 func TestNewManagerPersistsLegacyLANGroups(t *testing.T) {
 	data := &StorageData{Clients: []ClientData{
 		validStoredClient(t, "one", "10.100.0.2", ""),

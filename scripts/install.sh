@@ -5,8 +5,8 @@ readonly RELEASE_PUBLIC_KEY_BASE64='LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUNvd0JR
 readonly LATEST_MANIFEST_URL='https://github.com/StealthSurf-VPN/awg-server/releases/latest/download/SHA256SUMS'
 readonly MINIMUM_TOOLS_PACKAGE_VERSION='1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1'
 readonly MINIMUM_DKMS_PACKAGE_VERSION='1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1'
-readonly RECOVERY_GUIDANCE='RECOVERY: awg-server remains stopped. Retain the root-only backup and recover manually; do not restart an unqualified binary.'
-readonly UNCONFIRMED_RECOVERY_GUIDANCE='RECOVERY: awg-server stop could not be confirmed. Do not assume the service is stopped; retain the root-only backup and intervene manually.'
+readonly RECOVERY_GUIDANCE='RECOVERY: awg-server remains stopped. Recover manually; do not restart an unqualified binary.'
+readonly UNCONFIRMED_RECOVERY_GUIDANCE='RECOVERY: awg-server stop could not be confirmed. Do not assume the service is stopped; intervene manually.'
 readonly -a EXPECTED_RELEASE_ASSETS=(
     awg-server-awg31-darwin-amd64
     awg-server-awg31-darwin-arm64
@@ -70,6 +70,9 @@ INSTALLER_STAGED_BINARY=''
 INSTALLER_BACKUP_ROOT=/var/backups/awg-server
 INSTALLER_BACKUP_DIR=''
 INSTALLER_SERVICE_GATE_SECONDS=30
+INSTALLER_SERVICE_STOP_ATTEMPTED=0
+INSTALLER_SERVICE_STOP_CONFIRMED=0
+INSTALLER_REPLACEMENT_BEGUN=0
 
 die() {
     printf 'install failed: %s\n' "$1" >&2
@@ -861,6 +864,8 @@ report_recovery() {
     fi
     if [[ -n $INSTALLER_BACKUP_DIR ]]; then
         printf 'Backup retained at: %s\n' "$INSTALLER_BACKUP_DIR" >&2
+    else
+        printf 'RECOVERY: no completed backup was created.\n' >&2
     fi
 }
 
@@ -881,9 +886,16 @@ fail_after_replacement() {
 install_release_transaction() {
     local asset=$1
 
+    INSTALLER_BACKUP_DIR=''
+    INSTALLER_SERVICE_STOP_ATTEMPTED=0
+    INSTALLER_SERVICE_STOP_CONFIRMED=0
+    INSTALLER_REPLACEMENT_BEGUN=0
+
     install_amneziawg || die 'could not install current AmneziaWG packages'
     stage_verified_release "$asset" || die 'could not stage a verified awg-server release'
+    INSTALLER_SERVICE_STOP_ATTEMPTED=1
     stop_existing_service || die 'could not stop awg-server.service'
+    INSTALLER_SERVICE_STOP_CONFIRMED=1
     create_upgrade_backup \
         || fail_stopped_pre_replacement 'could not create a consistent upgrade backup'
     assert_no_remaining_awg_interfaces \
@@ -893,6 +905,7 @@ install_release_transaction() {
         || fail_stopped_pre_replacement 'could not reload the AmneziaWG module'
     qualify_staged_runtime \
         || fail_stopped_pre_replacement 'staged awg-server did not qualify the AWG 3.1 runtime'
+    INSTALLER_REPLACEMENT_BEGUN=1
     install_staged_binary \
         || fail_after_replacement 'could not install the staged awg-server binary'
     write_host_configuration \
@@ -923,6 +936,20 @@ main() {
 }
 
 handle_interruption() {
+    trap '' HUP INT TERM
+
+    if [[ $INSTALLER_REPLACEMENT_BEGUN == 1 ]]; then
+        if stop_failed_service; then
+            report_recovery 1
+        else
+            report_recovery 0
+        fi
+    elif [[ $INSTALLER_SERVICE_STOP_CONFIRMED == 1 ]]; then
+        report_recovery 1
+    elif [[ $INSTALLER_SERVICE_STOP_ATTEMPTED == 1 ]]; then
+        report_recovery 0
+    fi
+
     exit 1
 }
 

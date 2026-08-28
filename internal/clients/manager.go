@@ -811,20 +811,20 @@ func (m *Manager) GetClientConfig(id string) (string, error) {
 		return "", fmt.Errorf("get port for params: %w", err)
 	}
 
-	return renderClientConfigForProfile(client, profile, m.pool.PublicKey(), m.config.Network().String(), m.config.Endpoint, port)
+	return renderClientConfigForProfile(client, profile, m.config.DNS, m.pool.PublicKey(), m.config.Network().String(), m.config.Endpoint, port)
 }
 
 func renderClientConfig(client *ClientData, params awg.AWGParams, serverPubKey [32]byte, network, endpoint string, port int) (string, error) {
-	return renderClientConfigValues(client, params, awg.ProtocolVersion2, params.ConfigLines(), serverPubKey, network, endpoint, port)
+	return renderClientConfigValues(client, params, awg.ProtocolVersion2, params.ConfigLines(), params.DNS, serverPubKey, network, endpoint, port)
 }
 
-func renderClientConfigForProfile(client *ClientData, profile awg.Profile, serverPubKey [32]byte, network, endpoint string, port int) (string, error) {
+func renderClientConfigForProfile(client *ClientData, profile awg.Profile, defaultDNS string, serverPubKey [32]byte, network, endpoint string, port int) (string, error) {
 	params := profile.Params()
 
-	return renderClientConfigValues(client, params, profile.Version(), profile.ClientConfigLines(), serverPubKey, network, endpoint, port)
+	return renderClientConfigValues(client, params, profile.Version(), profile.ClientConfigLines(), defaultDNS, serverPubKey, network, endpoint, port)
 }
 
-func renderClientConfigValues(client *ClientData, params awg.AWGParams, version awg.ProtocolVersion, profileLines string, serverPubKey [32]byte, network, endpoint string, port int) (string, error) {
+func renderClientConfigValues(client *ClientData, params awg.AWGParams, version awg.ProtocolVersion, profileLines, defaultDNS string, serverPubKey [32]byte, network, endpoint string, port int) (string, error) {
 	cfg := fmt.Sprintf(`[Interface]
 PrivateKey = %s`, client.PrivateKey)
 
@@ -834,7 +834,7 @@ ListenPort = %d`, params.ClientListenPort)
 	}
 
 	cfg += fmt.Sprintf("\nAddress = %s/32", client.Address)
-	if dns, includeDNS := awg.ResolveDNS(client.AWGParams, params.DNS); includeDNS {
+	if dns, includeDNS := awg.ResolveDNS(client.AWGParams, defaultDNS); includeDNS {
 		cfg += fmt.Sprintf("\nDNS = %s", dns)
 	}
 	cfg += fmt.Sprintf("\nMTU = %d", params.MTU)

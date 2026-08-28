@@ -1,6 +1,7 @@
 package awg
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,9 @@ func (params *AWGParams) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
+	if err := rejectExplicitNullAWGParams(fields); err != nil {
+		return err
+	}
 
 	*params = AWGParams(decoded)
 
@@ -42,6 +46,28 @@ func (params *AWGParams) UnmarshalJSON(data []byte) error {
 			params.dnsModeSet = true
 		case strings.EqualFold(field, "dns_servers"):
 			params.dnsServersSet = true
+		}
+	}
+
+	return nil
+}
+
+func rejectExplicitNullAWGParams(fields map[string]json.RawMessage) error {
+	for _, restricted := range []string{
+		"persistent_keepalive",
+		"content_padding_addition",
+		"rekey_after_time",
+		"rekey_timeout",
+		"reject_after_time",
+		"keepalive_timeout",
+		"max_handshake_attempts",
+		"random_trailers",
+		"disable_cookies",
+	} {
+		for field, value := range fields {
+			if strings.EqualFold(field, restricted) && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return invalidParam(restricted, "must not be null")
+			}
 		}
 	}
 

@@ -283,6 +283,71 @@ func TestAPIAWG31OverridesResolveAgainstTargetProtocol(t *testing.T) {
 	})
 }
 
+func TestAPIRejectsExplicitNestedAWGParamsNullBeforeMutation(t *testing.T) {
+	fields := []string{
+		"persistent_keepalive",
+		"content_padding_addition",
+		"rekey_after_time",
+		"rekey_timeout",
+		"reject_after_time",
+		"keepalive_timeout",
+		"max_handshake_attempts",
+		"random_trailers",
+		"disable_cookies",
+	}
+	const secret = "secret-like-input-must-not-appear"
+
+	for _, version := range []string{"2.0", "3.1"} {
+		for _, field := range fields {
+			t.Run(version+"/"+field, func(t *testing.T) {
+				handler, _, pool, storage := newAuthorizedAPISmokeWithStorage(t)
+
+				created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"client","protocol_version":"`+version+`"}`)
+				assertAPIStatus(t, created, http.StatusCreated)
+
+				beforeClients := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+				assertAPIStatus(t, beforeClients, http.StatusOK)
+				beforeStorage, err := storage.Load()
+				if err != nil {
+					t.Fatalf("Load() before invalid PATCH error = %v", err)
+				}
+				beforeStorageJSON, err := json.Marshal(beforeStorage)
+				if err != nil {
+					t.Fatalf("Marshal() before invalid PATCH error = %v", err)
+				}
+				beforeProfile := pool.profileKey
+
+				response := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/client", `{"awg_params":{"`+strings.ToUpper(field)+`":null,"unknown_field":"`+secret+`"}}`)
+				assertAPIStatus(t, response, http.StatusBadRequest)
+				if strings.Contains(response.Body.String(), secret) {
+					t.Fatalf("invalid null response reflects secret-like input: %s", response.Body.String())
+				}
+				if !pool.hasPeer || pool.migrations != 0 || pool.profileKey != beforeProfile {
+					t.Fatalf("invalid null PATCH mutated pool: hasPeer=%t migrations=%d profile=%v", pool.hasPeer, pool.migrations, pool.profileKey)
+				}
+
+				afterClients := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+				assertAPIStatus(t, afterClients, http.StatusOK)
+				if !bytes.Equal(beforeClients.Body.Bytes(), afterClients.Body.Bytes()) {
+					t.Fatalf("invalid null PATCH mutated manager state: before=%s after=%s", beforeClients.Body.String(), afterClients.Body.String())
+				}
+
+				afterStorage, err := storage.Load()
+				if err != nil {
+					t.Fatalf("Load() after invalid PATCH error = %v", err)
+				}
+				afterStorageJSON, err := json.Marshal(afterStorage)
+				if err != nil {
+					t.Fatalf("Marshal() after invalid PATCH error = %v", err)
+				}
+				if !bytes.Equal(beforeStorageJSON, afterStorageJSON) {
+					t.Fatalf("invalid null PATCH mutated storage: before=%s after=%s", beforeStorageJSON, afterStorageJSON)
+				}
+			})
+		}
+	}
+}
+
 func TestAPIProtocolVersionPatchUsesOneManagerTransaction(t *testing.T) {
 	handler, _, pool := newAuthorizedAPISmoke(t)
 
@@ -1055,6 +1120,12 @@ func TestAuthorizedAPIFlow(t *testing.T) {
 }
 
 func newAuthorizedAPISmoke(t *testing.T) (http.Handler, *usage.Collector, *apiSmokePool) {
+	handler, collector, pool, _ := newAuthorizedAPISmokeWithStorage(t)
+
+	return handler, collector, pool
+}
+
+func newAuthorizedAPISmokeWithStorage(t *testing.T) (http.Handler, *usage.Collector, *apiSmokePool, *clients.Storage) {
 	t.Helper()
 
 	dataDir := t.TempDir()
@@ -1104,7 +1175,7 @@ func newAuthorizedAPISmoke(t *testing.T) (http.Handler, *usage.Collector, *apiSm
 	collector := usage.NewCollector(dataDir, pool.interfaceNames, pool.showDump)
 	server := NewServer(manager, cfg, collector)
 
-	return server.httpServer.Handler, collector, pool
+	return server.httpServer.Handler, collector, pool, storage
 }
 
 func authorizedAPIRequest(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {

@@ -98,6 +98,9 @@ reset_settings() {
     INSTALL_TEMP_PATHS=()
     INSTALLER_BACKUP_DIR=''
     INSTALLER_STAGED_BINARY=''
+    INSTALLER_SERVICE_STOP_ATTEMPTED=0
+    INSTALLER_SERVICE_STOP_CONFIRMED=0
+    INSTALLER_REPLACEMENT_BEGUN=0
     unset STUB_MANIFEST_MODE
 }
 
@@ -368,6 +371,11 @@ case "$name" in
                 if [ "${STUB_MUTATE_JSON:-0}" = 1 ]; then
                     printf '%s\n' '{"state":"new-normalized"}' > "${STUB_CLIENTS_FILE:?}"
                 fi
+                if [ "${STUB_SIGNAL_PHASE:-}" = start ]; then
+                    log "signal ${STUB_SIGNAL_PHASE}"
+                    log "signal target=${STUB_SIGNAL_TARGET:?}"
+                    kill -TERM "${STUB_SIGNAL_TARGET:?}"
+                fi
                 ;;
             show)
                 cat "${STUB_STATE_DIR:?}/invocation"
@@ -382,6 +390,11 @@ case "$name" in
         if [ "${1:-}" = -r ]; then
             log 'modprobe unload'
             [ "${STUB_FAIL_PHASE:-}" != module-unload ] || exit 1
+            if [ "${STUB_SIGNAL_PHASE:-}" = module-unload ]; then
+                log "signal ${STUB_SIGNAL_PHASE}"
+                log "signal target=${STUB_SIGNAL_TARGET:?}"
+                kill -TERM "${STUB_SIGNAL_TARGET:?}"
+            fi
         else
             log 'modprobe load'
             [ "${STUB_FAIL_PHASE:-}" != module-load ] || exit 1
@@ -407,6 +420,12 @@ case "$name" in
         source=${@: -2:1}
         cp -- "$source" "$destination"
         chmod 0755 "$destination"
+        if [ "$destination" = "${STUB_BINARY_PATH:?}" ] \
+            && [ "${STUB_SIGNAL_PHASE:-}" = binary-install ]; then
+            log "signal ${STUB_SIGNAL_PHASE}"
+            log "signal target=${STUB_SIGNAL_TARGET:?}"
+            kill -TERM "${STUB_SIGNAL_TARGET:?}"
+        fi
         ;;
     cp)
         log "backup-copy $*"
@@ -415,6 +434,29 @@ case "$name" in
         ;;
     chown)
         log "chown $*"
+        target=${!#}
+        if [ "${STUB_FAIL_PHASE:-}" = backup-chown ] \
+            && [[ $target == "${STUB_BACKUP_ROOT:?}"/.pending.*/* ]]; then
+            exit 1
+        fi
+        ;;
+    chmod)
+        log "chmod $*"
+        target=${!#}
+        if [ "${STUB_FAIL_PHASE:-}" = backup-chmod ] \
+            && [[ $target == "${STUB_BACKUP_ROOT:?}"/.pending.*/* ]]; then
+            exit 1
+        fi
+        /bin/chmod "$@"
+        ;;
+    mv)
+        log "mv $*"
+        target=${!#}
+        if [ "${STUB_FAIL_PHASE:-}" = backup-mv ] \
+            && [[ $target == "${STUB_BACKUP_ROOT:?}"/upgrade.* ]]; then
+            exit 1
+        fi
+        /bin/mv "$@"
         ;;
     sysctl)
         log "sysctl $*"
@@ -439,8 +481,8 @@ STUB
     chmod 0755 "$stub_dir/stub-command"
 
     for command in \
-        add-apt-repository apt-get awg chown cp curl dpkg dpkg-query install ip \
-        modinfo modprobe openssl sha256sum sleep sysctl systemctl timeout; do
+        add-apt-repository apt-get awg chmod chown cp curl dpkg dpkg-query install ip \
+        modinfo modprobe mv openssl sha256sum sleep sysctl systemctl timeout; do
         ln -s stub-command "$stub_dir/$command"
     done
 }
@@ -462,6 +504,7 @@ setup_base_case() {
     export STUB_STATE_DIR="$case_dir/state"
     export STUB_BINARY_PATH="$case_dir/bin/awg-server"
     export STUB_CLIENTS_FILE="$case_dir/data/clients.json"
+    export STUB_BACKUP_ROOT="$case_dir/backups"
     export STUB_EXPECTED_TOKEN='synthetic-test-bearer-token'
     export STUB_VERSION=1.2.3
     export STUB_TOOLS_VERSION='1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1'
@@ -469,7 +512,7 @@ setup_base_case() {
     unset STUB_FAIL_PHASE STUB_FOREIGN_INTERFACE STUB_HEALTH_RESPONSE \
         STUB_CLIENTS_RESPONSE STUB_MUTATE_JSON STUB_SAME_INVOCATION \
         STUB_PACKAGE_STATUS_MODE STUB_PACKAGE_VERSION_MODE \
-        STUB_RECOVERY_STOP_MODE STUB_STOP_LEAVES_ACTIVE \
+        STUB_RECOVERY_STOP_MODE STUB_SIGNAL_PHASE STUB_SIGNAL_TARGET STUB_STOP_LEAVES_ACTIVE \
         STUB_SYSTEMCTL_STATUS || true
 
     printf '%s\n' active > "$case_dir/state/service-state"
@@ -577,6 +620,14 @@ assert_retained_backup_reported() {
 
     completed_backup=$(backup_dir "$backup_root")
     assert_file_contains "$error_file" "Backup retained at: $completed_backup"
+}
+
+assert_no_completed_backup_reported() {
+    local error_file=$1
+
+    assert_file_contains "$error_file" 'RECOVERY: no completed backup was created.'
+    assert_file_not_contains "$error_file" 'Backup retained at:'
+    assert_file_not_contains "$error_file" 'root-only backup'
 }
 
 trace_count() {
@@ -875,6 +926,39 @@ test_before_backup_failures() {
     assert_stopped "$case_dir/state/service-state"
     assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
     assert_recovery_message "$case_dir/error"
+}
+
+test_backup_failures_report_no_completed_backup() {
+    local phase
+    local completed
+
+    for phase in backup backup-chown backup-chmod backup-mv; do
+        setup_base_case "backup-failure-$phase"
+        export STUB_FAIL_PHASE=$phase
+        tee "$INSTALLER_ENV_PATH" >/dev/null <<EOF
+AWG_API_TOKEN="$STUB_EXPECTED_TOKEN"
+AWG_ADDRESS="10.0.0.1/24"
+AWG_ENDPOINT="vpn.example.test"
+AWG_DATA_DIR="$case_dir/data"
+EOF
+        chmod 0600 "$INSTALLER_ENV_PATH"
+        printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
+        printf '%s\n' '{"usage":"original"}' > "$case_dir/data/usage.json"
+        resolve_case_settings
+        if run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$phase backup failure unexpectedly passed"
+        fi
+
+        assert_file_contains "$STUB_BINARY_PATH" old-binary
+        assert_stopped "$case_dir/state/service-state"
+        assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
+        assert_recovery_message "$case_dir/error"
+        assert_no_completed_backup_reported "$case_dir/error"
+        completed=$(find "$INSTALLER_BACKUP_ROOT" -mindepth 1 -maxdepth 1 \
+            -type d -name 'upgrade.*' -print)
+        [ -z "$completed" ] \
+            || fail "$phase reported no completed backup but left $completed"
+    done
 }
 
 test_unreadable_service_state_refusal() {
@@ -1226,6 +1310,104 @@ PROBE
     assert_file_not_contains "$STUB_CURL_ARGUMENTS" "$STUB_EXPECTED_TOKEN"
 }
 
+test_interruption_after_replacement_or_during_start_is_safe() {
+    local phase
+    local expected_binary
+    local expected_starts
+    local expected_client_state
+    local expected_stops
+    local starts
+    local stops
+    local completed_backup
+    local signal_pid
+    local remaining_stage
+
+    for phase in module-unload binary-install start; do
+        setup_base_case "interruption-$phase"
+        export STUB_MUTATE_JSON=1
+        export STUB_SIGNAL_PHASE=$phase
+        export INSTALLER_TEST_SCRIPT=$installer
+        export TEST_BINARY_PATH=$INSTALLER_BINARY_PATH
+        export TEST_ENV_PATH=$INSTALLER_ENV_PATH
+        export TEST_SYSCTL_PATH=$INSTALLER_SYSCTL_PATH
+        export TEST_UNIT_PATH=$INSTALLER_UNIT_PATH
+        export TEST_STAGE_ROOT=$INSTALLER_STAGE_ROOT
+        export TEST_BACKUP_ROOT=$INSTALLER_BACKUP_ROOT
+        export TEST_SIGNAL_PID_PATH="$case_dir/signal-pid"
+        tee "$case_dir/interruption-probe.sh" >/dev/null <<'PROBE'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+source "$INSTALLER_TEST_SCRIPT"
+INSTALLER_BINARY_PATH=$TEST_BINARY_PATH
+INSTALLER_ENV_PATH=$TEST_ENV_PATH
+INSTALLER_SYSCTL_PATH=$TEST_SYSCTL_PATH
+INSTALLER_UNIT_PATH=$TEST_UNIT_PATH
+INSTALLER_STAGE_ROOT=$TEST_STAGE_ROOT
+INSTALLER_BACKUP_ROOT=$TEST_BACKUP_ROOT
+INSTALLER_SERVICE_GATE_SECONDS=5
+
+trap cleanup_temp_paths EXIT
+trap handle_interruption HUP INT TERM
+printf '%s\n' "$$" > "$TEST_SIGNAL_PID_PATH"
+export STUB_SIGNAL_TARGET=$$
+
+resolve_installer_settings
+AWG_SERVER_VERSION=1.2.3
+install_release_transaction awg-server-awg31-linux-amd64
+PROBE
+        chmod 0755 "$case_dir/interruption-probe.sh"
+        printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
+
+        if "$BASH" "$case_dir/interruption-probe.sh" \
+            >"$case_dir/output" 2>"$case_dir/error"; then
+            fail "$phase interruption unexpectedly returned success"
+        fi
+
+        case "$phase" in
+            module-unload)
+                expected_binary=old-binary
+                expected_starts=0
+                expected_client_state='{"state":"original"}'
+                expected_stops=1
+                ;;
+            binary-install)
+                expected_binary='staged-check-runtime'
+                expected_starts=0
+                expected_client_state='{"state":"original"}'
+                expected_stops=2
+                ;;
+            start)
+                expected_binary='staged-check-runtime'
+                expected_starts=1
+                expected_client_state='{"state":"new-normalized"}'
+                expected_stops=2
+                ;;
+            *) fail "unknown interruption phase $phase" ;;
+        esac
+
+        assert_stopped "$case_dir/state/service-state"
+        assert_file_contains "$STUB_TRACE" "signal $phase"
+        signal_pid=$(<"$case_dir/signal-pid")
+        assert_file_contains "$STUB_TRACE" "signal target=$signal_pid"
+        assert_file_contains "$STUB_BINARY_PATH" "$expected_binary"
+        assert_file_contains "$case_dir/data/clients.json" "$expected_client_state"
+        assert_recovery_message "$case_dir/error"
+        completed_backup=$(backup_dir "$INSTALLER_BACKUP_ROOT")
+        assert_file_contains "$case_dir/error" "Backup retained at: $completed_backup"
+        starts=$(trace_count "$STUB_TRACE" 'systemctl start')
+        [ "$starts" = "$expected_starts" ] \
+            || fail "$phase interruption start count was $starts, want $expected_starts"
+        stops=$(trace_count "$STUB_TRACE" 'systemctl stop')
+        [ "$stops" = "$expected_stops" ] \
+            || fail "$phase interruption stop count was $stops, want $expected_stops"
+        remaining_stage=$(find "$INSTALLER_STAGE_ROOT" -mindepth 1 -maxdepth 1 \
+            -type d -name 'stage.*' -print)
+        [ -z "$remaining_stage" ] \
+            || fail "$phase interruption left staged paths: $remaining_stage"
+    done
+}
+
 test_invocation_gate() {
     setup_base_case unchanged-invocation
     export STUB_SAME_INVOCATION=1
@@ -1252,6 +1434,7 @@ test_fresh_success_and_backup_permissions
 test_stop_backup_module_order_and_permissions
 test_foreign_interface_refusal
 test_before_backup_failures
+test_backup_failures_report_no_completed_backup
 test_unreadable_service_state_refusal
 test_stop_failures_do_not_make_false_recovery_claims
 test_pre_replacement_failures
@@ -1262,6 +1445,7 @@ test_authenticated_gate_and_json_failures
 test_exact_health_response_is_required
 test_token_newlines_are_rejected_before_curl_config
 test_curl_config_is_cleaned_on_parent_termination
+test_interruption_after_replacement_or_during_start_is_safe
 test_invocation_gate
 
 printf 'install tests passed\n'
