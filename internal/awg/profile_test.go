@@ -1,6 +1,7 @@
 package awg
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -222,6 +223,54 @@ func TestHeaderProtectionKeyEncodingAndErrorsDoNotLeak(t *testing.T) {
 	stringer := reflect.TypeOf((*fmt.Stringer)(nil)).Elem()
 	if reflect.TypeOf(HeaderProtectionKey{}).Implements(stringer) || reflect.TypeOf(ProfileKey{}).Implements(stringer) {
 		t.Fatal("secret or profile identity type implements fmt.Stringer")
+	}
+}
+
+func TestProfileKeysRejectJSONMarshalingWithoutLeakingMaterial(t *testing.T) {
+	headerProtectionKey := syntheticHeaderProtectionKey()
+	profileKey := ProfileKey(headerProtectionKey)
+
+	tests := []struct {
+		name  string
+		value any
+		key   [32]byte
+	}{
+		{
+			name:  "header protection key",
+			value: headerProtectionKey,
+			key:   [32]byte(headerProtectionKey),
+		},
+		{
+			name:  "profile key",
+			value: profileKey,
+			key:   [32]byte(profileKey),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded, err := json.Marshal(tt.value)
+			if err == nil {
+				t.Fatal("json.Marshal() succeeded and returned key material")
+			}
+			if len(encoded) != 0 {
+				t.Fatal("json.Marshal() returned bytes when key serialization failed")
+			}
+
+			message := err.Error()
+			if !strings.Contains(message, "profile key JSON serialization is disabled") {
+				t.Fatal("json.Marshal() error did not contain the fixed serialization error")
+			}
+			for _, material := range []string{
+				KeyToBase64(tt.key),
+				fmt.Sprintf("%x", tt.key),
+				fmt.Sprint(tt.key),
+			} {
+				if strings.Contains(message, material) {
+					t.Fatal("json.Marshal() error contains key material")
+				}
+			}
+		})
 	}
 }
 

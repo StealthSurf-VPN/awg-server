@@ -18,6 +18,16 @@ type HeaderProtectionKey [32]byte
 
 type ProfileKey [32]byte
 
+var errProfileKeyJSONSerialization = errors.New("profile key JSON serialization is disabled")
+
+func (HeaderProtectionKey) MarshalJSON() ([]byte, error) {
+	return nil, errProfileKeyJSONSerialization
+}
+
+func (ProfileKey) MarshalJSON() ([]byte, error) {
+	return nil, errProfileKeyJSONSerialization
+}
+
 type Profile struct {
 	version                ProtocolVersion
 	params                 AWGParams
