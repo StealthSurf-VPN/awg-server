@@ -6,6 +6,7 @@ readonly LATEST_MANIFEST_URL='https://github.com/StealthSurf-VPN/awg-server/rele
 readonly MINIMUM_TOOLS_PACKAGE_VERSION='1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1'
 readonly MINIMUM_DKMS_PACKAGE_VERSION='1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1'
 readonly RECOVERY_GUIDANCE='RECOVERY: awg-server remains stopped. Retain the root-only backup and recover manually; do not restart an unqualified binary.'
+readonly UNCONFIRMED_RECOVERY_GUIDANCE='RECOVERY: awg-server stop could not be confirmed. Do not assume the service is stopped; retain the root-only backup and intervene manually.'
 readonly -a ENVIRONMENT_KEYS=(
     AWG_API_TOKEN
     AWG_ADDRESS
@@ -48,6 +49,8 @@ readonly -a REQUIRED_KEYS=(
 AWG_SERVER_VERSION=''
 PROCESS_ENV_PRESENT=()
 PROCESS_ENV_VALUES=()
+LOADED_CONFIG_PRESENT=()
+LOADED_CONFIG_VALUES=()
 INSTALL_TEMP_PATHS=()
 INSTALLER_BINARY_PATH=/usr/local/bin/awg-server
 INSTALLER_ENV_PATH=/etc/awg-server.env
@@ -90,27 +93,119 @@ capture_process_environment() {
     done
 }
 
+initialize_loaded_config() {
+    local index
+
+    LOADED_CONFIG_PRESENT=()
+    LOADED_CONFIG_VALUES=()
+    for ((index = 0; index < ${#ENVIRONMENT_KEYS[@]}; index++)); do
+        LOADED_CONFIG_PRESENT+=(0)
+        LOADED_CONFIG_VALUES+=('')
+    done
+}
+
+environment_key_index() {
+    local candidate=$1
+    local result_variable=$2
+    local candidate_index
+
+    for ((candidate_index = 0; candidate_index < ${#ENVIRONMENT_KEYS[@]}; candidate_index++)); do
+        if [[ ${ENVIRONMENT_KEYS[candidate_index]} == "$candidate" ]]; then
+            printf -v "$result_variable" '%s' "$candidate_index"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+decode_rendered_environment_value() {
+    local encoded=$1
+    local result_variable=$2
+    local decoded_value=''
+    local escaped
+    local index=0
+    local length=${#encoded}
+    local character
+
+    while ((index < length)); do
+        character=${encoded:index:1}
+        case $character in
+            \\)
+                ((index += 1))
+                ((index < length)) || return 1
+                escaped=${encoded:index:1}
+                case $escaped in
+                    \\ | '"' | '$' | '`') decoded_value+=$escaped ;;
+                    *) return 1 ;;
+                esac
+                ;;
+            '"' | '$' | '`') return 1 ;;
+            *) decoded_value+=$character ;;
+        esac
+        ((index += 1))
+    done
+
+    printf -v "$result_variable" '%s' "$decoded_value"
+}
+
 load_config_file() {
     local config_file=${1:-}
+    local assignment_pattern='^([A-Z][A-Z0-9_]*)="(.*)"$'
+    local decoded
+    local encoded
+    local index
+    local key
+    local line
     local mode
 
-    [[ -f $config_file ]] || die "$config_file must be a regular file"
-    [[ -O $config_file ]] || die "$config_file must be owned by the effective user"
+    [[ -f $config_file && -O $config_file ]] || return 1
 
     if mode=$(stat -c '%a' -- "$config_file" 2>/dev/null); then
         :
     elif mode=$(stat -f '%Lp' "$config_file" 2>/dev/null); then
         :
     else
-        die "cannot inspect permissions for $config_file"
+        return 1
     fi
 
-    [[ $mode =~ ^[0-7]+$ ]] || die "invalid permissions for $config_file"
+    [[ $mode =~ ^[0-7]+$ ]] || return 1
     (( (8#$mode & 0022) == 0 )) \
-        || die "$config_file must not be group or world writable"
+        || return 1
 
-    # shellcheck disable=SC1090
-    source "$config_file"
+    initialize_loaded_config
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line != *$'\r'* && $line =~ $assignment_pattern ]] || return 1
+        key=${BASH_REMATCH[1]}
+        encoded=${BASH_REMATCH[2]}
+        environment_key_index "$key" index || return 1
+        [[ ${LOADED_CONFIG_PRESENT[index]} == 0 ]] || return 1
+        decode_rendered_environment_value "$encoded" decoded || return 1
+        LOADED_CONFIG_PRESENT[index]=1
+        LOADED_CONFIG_VALUES[index]=$decoded
+    done < "$config_file"
+}
+
+apply_loaded_config_environment() {
+    local index
+    local key
+
+    for ((index = 0; index < ${#ENVIRONMENT_KEYS[@]}; index++)); do
+        [[ ${LOADED_CONFIG_PRESENT[index]:-0} == 1 ]] || continue
+        key=${ENVIRONMENT_KEYS[index]}
+        printf -v "$key" '%s' "${LOADED_CONFIG_VALUES[index]}"
+    done
+}
+
+clear_non_process_environment() {
+    local index
+    local key
+
+    for ((index = 0; index < ${#ENVIRONMENT_KEYS[@]}; index++)); do
+        [[ ${PROCESS_ENV_PRESENT[index]:-0} == 1 ]] && continue
+        key=${ENVIRONMENT_KEYS[index]}
+        unset "$key"
+    done
 }
 
 restore_process_environment() {
@@ -198,8 +293,11 @@ resolve_installer_settings() {
     local key
 
     capture_process_environment
+    clear_non_process_environment
     if [[ -e $INSTALLER_ENV_PATH ]]; then
-        load_config_file "$INSTALLER_ENV_PATH"
+        load_config_file "$INSTALLER_ENV_PATH" \
+            || die 'could not safely parse the existing awg-server environment'
+        apply_loaded_config_environment
     fi
     restore_process_environment
     apply_awg31_defaults
@@ -262,8 +360,9 @@ create_curl_auth_config() {
     local token
 
     [[ $AWG_API_TOKEN != *$'\r'* && $AWG_API_TOKEN != *$'\n'* ]] || return 1
+    [[ -n $INSTALLER_STAGE_DIR && -d $INSTALLER_STAGE_DIR ]] || return 1
 
-    config_file=$(mktemp "$INSTALLER_STAGE_ROOT/curl-auth.XXXXXX") || return 1
+    config_file=$(mktemp "$INSTALLER_STAGE_DIR/curl-auth.XXXXXX") || return 1
     chown root:root "$config_file" || {
         rm -f -- "$config_file"
         return 1
@@ -671,11 +770,15 @@ create_upgrade_backup() {
 }
 
 stop_existing_service() {
+    local deadline
     local status
 
-    if systemctl is-active --quiet awg-server.service; then
-        systemctl stop awg-server.service >/dev/null 2>&1 || return 1
-        if systemctl is-active --quiet awg-server.service; then
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    if run_before_deadline "$deadline" systemctl is-active --quiet awg-server.service; then
+        run_before_deadline "$deadline" systemctl stop awg-server.service \
+            >/dev/null 2>&1 || return 1
+        if run_before_deadline "$deadline" \
+            systemctl is-active --quiet awg-server.service; then
             return 1
         else
             status=$?
@@ -714,24 +817,46 @@ install_staged_binary() {
 }
 
 stop_failed_service() {
-    systemctl stop awg-server.service >/dev/null 2>&1 || true
+    local deadline
+    local status
+
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    run_before_deadline "$deadline" systemctl stop awg-server.service \
+        >/dev/null 2>&1 || true
+    if run_before_deadline "$deadline" \
+        systemctl is-active --quiet awg-server.service; then
+        return 1
+    else
+        status=$?
+    fi
+
+    [[ $status -eq 3 || $status -eq 4 ]]
 }
 
 report_recovery() {
-    printf '%s\n' "$RECOVERY_GUIDANCE" >&2
+    local service_stopped=${1:-0}
+
+    if [[ $service_stopped == 1 ]]; then
+        printf '%s\n' "$RECOVERY_GUIDANCE" >&2
+    else
+        printf '%s\n' "$UNCONFIRMED_RECOVERY_GUIDANCE" >&2
+    fi
     if [[ -n $INSTALLER_BACKUP_DIR ]]; then
         printf 'Backup retained at: %s\n' "$INSTALLER_BACKUP_DIR" >&2
     fi
 }
 
 fail_stopped_pre_replacement() {
-    report_recovery
+    report_recovery 1
     die "$1"
 }
 
 fail_after_replacement() {
-    stop_failed_service
-    report_recovery
+    if stop_failed_service; then
+        report_recovery 1
+    else
+        report_recovery 0
+    fi
     die "$1"
 }
 
@@ -779,7 +904,12 @@ main() {
         >&2
 }
 
+handle_interruption() {
+    exit 1
+}
+
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     trap cleanup_temp_paths EXIT
+    trap handle_interruption HUP INT TERM
     main "$@"
 fi
