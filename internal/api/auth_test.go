@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -763,9 +764,22 @@ func newAuthorizedAPISmoke(t *testing.T) (http.Handler, *usage.Collector, *apiSm
 		H4:   "100000000-200000000",
 	}
 	pool := &apiSmokePool{serverPublicKey: [32]byte{1}}
-	manager, err := clients.NewManager(pool, clients.NewStorage(dataDir), cfg, defaultParams, &clients.StorageData{})
+	storage := clients.NewStorage(dataDir)
+	data := &clients.StorageData{AWG31: apiAWG31Storage()}
+	if err := storage.Save(data); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	plan, err := clients.PrepareRestorePlan(cfg, clients.ManagerDefaults{
+		LegacyParams:   defaultParams,
+		AWG31Params:    apiAWG31Defaults(t),
+		DefaultVersion: awg.ProtocolVersion2,
+	}, data)
 	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
+		t.Fatalf("PrepareRestorePlan() error = %v", err)
+	}
+	manager, err := clients.NewManagerFromRestorePlan(pool, storage, cfg, plan)
+	if err != nil {
+		t.Fatalf("NewManagerFromRestorePlan() error = %v", err)
 	}
 
 	collector := usage.NewCollector(dataDir, pool.interfaceNames, pool.showDump)
@@ -802,5 +816,48 @@ func decodeAPIResponse(t *testing.T, response *httptest.ResponseRecorder, target
 
 	if err := json.Unmarshal(response.Body.Bytes(), target); err != nil {
 		t.Fatalf("decode response %q: %v", response.Body.String(), err)
+	}
+}
+
+func apiAWG31Storage() *clients.AWG31Storage {
+	return &clients.AWG31Storage{
+		DefaultHeaderKeyID: "api-synthetic-default-id",
+		GeneratedParams: &awg.GeneratedParamsV31{
+			H1: "100001", H2: "1000001", H3: "10000001", H4: "100000001",
+			S1: 15, S2: 72, S3: 15, S4: 12,
+		},
+		HeaderKeys: map[string]clients.HeaderKeyData{
+			"api-synthetic-default-id": {HeaderProtectionKey: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xa5}, 32))},
+		},
+	}
+}
+
+func apiAWG31Defaults(t *testing.T) awg.AWGParams {
+	t.Helper()
+
+	parseRange := func(value string) *config.Uint16Range {
+		parsed, err := config.ParseUint16Range(value)
+		if err != nil {
+			t.Fatalf("ParseUint16Range(%q) error = %v", value, err)
+		}
+
+		return &parsed
+	}
+
+	return awg.AWGParams{
+		MTU:                    1280,
+		DNS:                    "1.1.1.1",
+		Jc:                     5,
+		Jmin:                   50,
+		Jmax:                   1000,
+		PersistentKeepalive:    parseRange("25-35"),
+		ContentPaddingAddition: parseRange("10-100"),
+		RekeyAfterTime:         parseRange("100-120"),
+		RekeyTimeout:           parseRange("3-7"),
+		RejectAfterTime:        parseRange("150-180"),
+		KeepaliveTimeout:       parseRange("5-15"),
+		MaxHandshakeAttempts:   parseRange("15-20"),
+		RandomTrailers:         "on",
+		DisableCookies:         "off",
 	}
 }

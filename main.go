@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,18 +21,19 @@ import (
 var version = "dev"
 
 type startupState struct {
-	cfg           *config.Config
-	storage       *clients.Storage
-	data          *clients.StorageData
-	privateKey    [32]byte
-	defaultParams awg.AWGParams
+	cfg        *config.Config
+	storage    *clients.Storage
+	data       *clients.StorageData
+	privateKey [32]byte
+	defaults   clients.ManagerDefaults
 }
 
 type mainDependencies struct {
-	checkRuntime   func() (awg.RuntimeDiagnostics, error)
-	prepareStartup func() (*startupState, error)
-	startQualified func(*startupState) error
-	runUpdate      func()
+	checkRuntime       func() (awg.RuntimeDiagnostics, error)
+	prepareStartup     func() (*startupState, error)
+	prepareRestorePlan func(*startupState) (*clients.RestorePlan, error)
+	startQualified     func(*startupState, *clients.RestorePlan) error
+	runUpdate          func()
 }
 
 func main() {
@@ -44,10 +44,11 @@ func main() {
 
 func defaultMainDependencies() mainDependencies {
 	return mainDependencies{
-		checkRuntime:   awg.CheckRuntime,
-		prepareStartup: prepareStartup,
-		startQualified: startQualified,
-		runUpdate:      runUpdate,
+		checkRuntime:       awg.CheckRuntime,
+		prepareStartup:     prepareStartup,
+		prepareRestorePlan: prepareRestorePlan,
+		startQualified:     startQualified,
+		runUpdate:          runUpdate,
 	}
 }
 
@@ -89,12 +90,16 @@ func runApplication(dependencies mainDependencies) error {
 	if err != nil {
 		return err
 	}
+	plan, err := dependencies.prepareRestorePlan(state)
+	if err != nil {
+		return err
+	}
 
 	if _, err := dependencies.checkRuntime(); err != nil {
 		return fmt.Errorf("check AWG 3.1 runtime: %w", err)
 	}
 
-	return dependencies.startQualified(state)
+	return dependencies.startQualified(state, plan)
 }
 
 func prepareStartup() (*startupState, error) {
@@ -105,72 +110,61 @@ func prepareStartup() (*startupState, error) {
 
 	storage := clients.NewStorage(cfg.DataDir)
 
-	data, err := storage.Load()
+	loadedData, err := storage.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load storage: %w", err)
 	}
-	if len(data.Clients) > 0 && (data.ServerPrivateKey == "" || data.GeneratedParams == nil) {
-		return nil, errors.New("validate storage: persisted clients require server_private_key and generated_params")
+	data, err := clients.PrepareStorageDefaults(loadedData)
+	if err != nil {
+		return nil, fmt.Errorf("prepare storage defaults: %w", err)
 	}
 
-	var privateKey [32]byte
-
-	if data.ServerPrivateKey != "" {
-		privateKey, err = awg.Base64ToKey(data.ServerPrivateKey)
-		if err != nil {
-			return nil, fmt.Errorf("decode server private key: %w", err)
-		}
-
-		log.Println("loaded server private key from storage")
-	} else {
-		privateKey, err = awg.GeneratePrivateKey()
-		if err != nil {
-			return nil, fmt.Errorf("generate server private key: %w", err)
-		}
-
-		data.ServerPrivateKey = awg.KeyToBase64(privateKey)
-
-		if err := storage.Save(data); err != nil {
-			return nil, fmt.Errorf("save server private key: %w", err)
-		}
-
-		log.Println("generated new server private key")
+	privateKey, err := awg.Base64ToKey(data.ServerPrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("decode server private key: %w", err)
+	}
+	defaults, err := temporaryManagerDefaults(cfg, data)
+	if err != nil {
+		return nil, err
 	}
 
-	if data.GeneratedParams != nil {
-		log.Println("loaded generated AWG params from storage")
-	} else {
-		gp, err := awg.GenerateParams()
-		if err != nil {
-			return nil, fmt.Errorf("generate AWG params: %w", err)
-		}
+	return &startupState{
+		cfg:        cfg,
+		storage:    storage,
+		data:       data,
+		privateKey: privateKey,
+		defaults:   defaults,
+	}, nil
+}
 
-		data.GeneratedParams = gp
-
-		if err := storage.Save(data); err != nil {
-			return nil, fmt.Errorf("save generated AWG params: %w", err)
-		}
-
-		log.Printf("generated new AWG params: H1=%s H2=%s H3=%s H4=%s S1=%d S2=%d",
-			gp.H1, gp.H2, gp.H3, gp.H4, gp.S1, gp.S2)
+func prepareRestorePlan(state *startupState) (*clients.RestorePlan, error) {
+	plan, err := clients.PrepareRestorePlan(state.cfg, state.defaults, state.data)
+	if err != nil {
+		return nil, fmt.Errorf("prepare restore plan: %w", err)
 	}
 
-	gp := data.GeneratedParams
+	return plan, nil
+}
 
-	defaultParams := awg.AWGParams{
+func temporaryManagerDefaults(cfg *config.Config, data *clients.StorageData) (clients.ManagerDefaults, error) {
+	if data.GeneratedParams == nil {
+		return clients.ManagerDefaults{}, fmt.Errorf("prepare defaults: generated AWG params are required")
+	}
+
+	legacy := awg.AWGParams{
 		MTU:  cfg.MTU,
 		DNS:  cfg.DNS,
 		Jc:   cfg.Jc,
 		Jmin: cfg.Jmin,
 		Jmax: cfg.Jmax,
-		S1:   gp.S1,
-		S2:   gp.S2,
+		S1:   data.GeneratedParams.S1,
+		S2:   data.GeneratedParams.S2,
 		S3:   cfg.S3,
 		S4:   cfg.S4,
-		H1:   gp.H1,
-		H2:   gp.H2,
-		H3:   gp.H3,
-		H4:   gp.H4,
+		H1:   data.GeneratedParams.H1,
+		H2:   data.GeneratedParams.H2,
+		H3:   data.GeneratedParams.H3,
+		H4:   data.GeneratedParams.H4,
 		I1:   cfg.I1,
 		I2:   cfg.I2,
 		I3:   cfg.I3,
@@ -178,26 +172,78 @@ func prepareStartup() (*startupState, error) {
 		I5:   cfg.I5,
 	}
 
-	if err := awg.ValidateProfile(defaultParams); err != nil {
-		return nil, fmt.Errorf("validate default AWG params: %w", err)
+	awg31, err := temporaryAWG31Defaults(cfg)
+	if err != nil {
+		return clients.ManagerDefaults{}, err
 	}
 
-	return &startupState{
-		cfg:           cfg,
-		storage:       storage,
-		data:          data,
-		privateKey:    privateKey,
-		defaultParams: defaultParams,
+	return clients.ManagerDefaults{
+		LegacyParams:   legacy,
+		AWG31Params:    awg31,
+		DefaultVersion: awg.ProtocolVersion31,
 	}, nil
 }
 
-func startQualified(state *startupState) error {
+func temporaryAWG31Defaults(cfg *config.Config) (awg.AWGParams, error) {
+	persistentKeepalive, err := config.ParseUint16Range("25-35")
+	if err != nil {
+		return awg.AWGParams{}, err
+	}
+	contentPaddingAddition, err := config.ParseUint16Range("10-100")
+	if err != nil {
+		return awg.AWGParams{}, err
+	}
+	rekeyAfterTime, err := config.ParseUint16Range("100-120")
+	if err != nil {
+		return awg.AWGParams{}, err
+	}
+	rekeyTimeout, err := config.ParseUint16Range("3-7")
+	if err != nil {
+		return awg.AWGParams{}, err
+	}
+	rejectAfterTime, err := config.ParseUint16Range("150-180")
+	if err != nil {
+		return awg.AWGParams{}, err
+	}
+	keepaliveTimeout, err := config.ParseUint16Range("5-15")
+	if err != nil {
+		return awg.AWGParams{}, err
+	}
+	maxHandshakeAttempts, err := config.ParseUint16Range("15-20")
+	if err != nil {
+		return awg.AWGParams{}, err
+	}
+
+	return awg.AWGParams{
+		MTU:                    1280,
+		DNS:                    cfg.DNS,
+		Jc:                     cfg.Jc,
+		Jmin:                   cfg.Jmin,
+		Jmax:                   cfg.Jmax,
+		I1:                     cfg.I1,
+		I2:                     cfg.I2,
+		I3:                     cfg.I3,
+		I4:                     cfg.I4,
+		I5:                     cfg.I5,
+		PersistentKeepalive:    &persistentKeepalive,
+		ContentPaddingAddition: &contentPaddingAddition,
+		RekeyAfterTime:         &rekeyAfterTime,
+		RekeyTimeout:           &rekeyTimeout,
+		RejectAfterTime:        &rejectAfterTime,
+		KeepaliveTimeout:       &keepaliveTimeout,
+		MaxHandshakeAttempts:   &maxHandshakeAttempts,
+		RandomTrailers:         "on",
+		DisableCookies:         "off",
+	}, nil
+}
+
+func startQualified(state *startupState, plan *clients.RestorePlan) error {
 	pool, err := awg.NewPool(state.cfg, state.privateKey, state.cfg.MaxInterfaces)
 	if err != nil {
 		return fmt.Errorf("create AWG pool: %w", err)
 	}
 
-	mgr, err := clients.NewManager(pool, state.storage, state.cfg, state.defaultParams, state.data)
+	mgr, err := clients.NewManagerFromRestorePlan(pool, state.storage, state.cfg, plan)
 	if err != nil {
 		pool.Close()
 		return fmt.Errorf("create client manager: %w", err)
