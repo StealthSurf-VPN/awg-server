@@ -21,6 +21,7 @@ const (
 	runtimeProbePort           = 51820
 	runtimeInterfaceAttempts   = 8
 	maxInterfaceNameLength     = 15
+	runtimePackageQueryFormat  = "-f=${db:Status-Abbrev}\\t${Version}\\n"
 )
 
 var runtimeToolsVersionPattern = regexp.MustCompile(`\Aamneziawg-tools v3\.1\.[0-9]{8} - https://amnezia\.org\n?\z`)
@@ -89,14 +90,14 @@ func checkRuntime(dependencies runtimeDependencies) (RuntimeDiagnostics, error) 
 }
 
 func checkRuntimePackage(dependencies runtimeDependencies, packageName, minimumVersion string) (string, error) {
-	output, err := dependencies.run("dpkg-query", []string{"-W", "-f=${Version}", packageName}, nil)
+	output, err := dependencies.run("dpkg-query", []string{"-W", runtimePackageQueryFormat, packageName}, nil)
 	if err != nil {
 		return "", fmt.Errorf("query %s package version: %w", packageName, err)
 	}
 
-	version := strings.TrimSuffix(string(output), "\n")
-	if version == "" {
-		return "", fmt.Errorf("query %s package version: empty output", packageName)
+	version, err := parseInstalledPackageVersion(output)
+	if err != nil {
+		return "", fmt.Errorf("query %s package status: %w", packageName, err)
 	}
 
 	if _, err := dependencies.run("dpkg", []string{"--compare-versions", version, "ge", minimumVersion}, nil); err != nil {
@@ -104,6 +105,33 @@ func checkRuntimePackage(dependencies runtimeDependencies, packageName, minimumV
 	}
 
 	return version, nil
+}
+
+func parseInstalledPackageVersion(output []byte) (string, error) {
+	result := string(output)
+	if !strings.HasSuffix(result, "\n") {
+		return "", errors.New("malformed output")
+	}
+
+	result = strings.TrimSuffix(result, "\n")
+	if strings.Contains(result, "\n") {
+		return "", errors.New("malformed output")
+	}
+
+	fields := strings.Split(result, "\t")
+	if len(fields) != 2 || !installedOKPackageStatus(fields[0]) || fields[1] == "" {
+		return "", errors.New("package is not installed and ok")
+	}
+
+	return fields[1], nil
+}
+
+func installedOKPackageStatus(status string) bool {
+	if len(status) != 3 || status[1] != 'i' || status[2] != ' ' {
+		return false
+	}
+
+	return strings.ContainsRune("uihrp", rune(status[0]))
 }
 
 func probeRuntime(dependencies runtimeDependencies) error {

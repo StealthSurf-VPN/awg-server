@@ -11,11 +11,14 @@ const (
 	testMinimumToolsPackage = "1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1"
 	testMinimumDKMSPackage  = "1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1"
 	testToolsVersion        = "amneziawg-tools v3.1.20260828 - https://amnezia.org\n"
+	testInstalledStatus     = "ii "
 )
 
 func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
 	tests := []struct {
 		name         string
+		toolsStatus  string
+		dkmsStatus   string
 		toolsVersion string
 		dkmsVersion  string
 		compareError map[string]error
@@ -23,16 +26,29 @@ func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
 	}{
 		{
 			name:         "exact minimum versions",
+			toolsStatus:  testInstalledStatus,
+			dkmsStatus:   testInstalledStatus,
 			toolsVersion: testMinimumToolsPackage,
 			dkmsVersion:  testMinimumDKMSPackage,
 		},
 		{
 			name:         "newer versions",
+			toolsStatus:  testInstalledStatus,
+			dkmsStatus:   testInstalledStatus,
 			toolsVersion: "1.0.20210915-0~202608130145+ee0f0a9~ubuntu22.04.1",
 			dkmsVersion:  "1.0.0-0~202608281845+b72bb7a~ubuntu22.04.1",
 		},
 		{
+			name:         "held installed packages",
+			toolsStatus:  "hi ",
+			dkmsStatus:   "hi ",
+			toolsVersion: testMinimumToolsPackage,
+			dkmsVersion:  testMinimumDKMSPackage,
+		},
+		{
 			name:         "older tools package",
+			toolsStatus:  testInstalledStatus,
+			dkmsStatus:   testInstalledStatus,
 			toolsVersion: "1.0.20210913-0~202608130145+ee0f0a9~ubuntu22.04.1",
 			dkmsVersion:  testMinimumDKMSPackage,
 			compareError: map[string]error{
@@ -42,6 +58,8 @@ func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
 		},
 		{
 			name:         "older dkms package",
+			toolsStatus:  testInstalledStatus,
+			dkmsStatus:   testInstalledStatus,
 			toolsVersion: testMinimumToolsPackage,
 			dkmsVersion:  "1.0.0-0~202608261845+b72bb7a~ubuntu22.04.1",
 			compareError: map[string]error{
@@ -51,6 +69,8 @@ func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
 		},
 		{
 			name:         "malformed package version",
+			toolsStatus:  testInstalledStatus,
+			dkmsStatus:   testInstalledStatus,
 			toolsVersion: "not-a-debian-version",
 			dkmsVersion:  testMinimumDKMSPackage,
 			compareError: map[string]error{
@@ -60,7 +80,49 @@ func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
 		},
 		{
 			name:         "missing package version",
+			toolsStatus:  testInstalledStatus,
+			dkmsStatus:   testInstalledStatus,
 			toolsVersion: "",
+			dkmsVersion:  testMinimumDKMSPackage,
+			wantErr:      true,
+		},
+		{
+			name:         "config files package",
+			toolsStatus:  "rc ",
+			dkmsStatus:   testInstalledStatus,
+			toolsVersion: testMinimumToolsPackage,
+			dkmsVersion:  testMinimumDKMSPackage,
+			wantErr:      true,
+		},
+		{
+			name:         "unpacked package",
+			toolsStatus:  "iU ",
+			dkmsStatus:   testInstalledStatus,
+			toolsVersion: testMinimumToolsPackage,
+			dkmsVersion:  testMinimumDKMSPackage,
+			wantErr:      true,
+		},
+		{
+			name:         "half configured package",
+			toolsStatus:  "iF ",
+			dkmsStatus:   testInstalledStatus,
+			toolsVersion: testMinimumToolsPackage,
+			dkmsVersion:  testMinimumDKMSPackage,
+			wantErr:      true,
+		},
+		{
+			name:         "package with error flag",
+			toolsStatus:  "iiR",
+			dkmsStatus:   testInstalledStatus,
+			toolsVersion: testMinimumToolsPackage,
+			dkmsVersion:  testMinimumDKMSPackage,
+			wantErr:      true,
+		},
+		{
+			name:         "malformed package status",
+			toolsStatus:  "installed",
+			dkmsStatus:   testInstalledStatus,
+			toolsVersion: testMinimumToolsPackage,
 			dkmsVersion:  testMinimumDKMSPackage,
 			wantErr:      true,
 		},
@@ -69,6 +131,8 @@ func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			harness := newRuntimeHarness()
+			harness.packageStatuses["amneziawg-tools"] = tt.toolsStatus
+			harness.packageStatuses["amneziawg-dkms"] = tt.dkmsStatus
 			harness.packageVersions["amneziawg-tools"] = tt.toolsVersion
 			harness.packageVersions["amneziawg-dkms"] = tt.dkmsVersion
 			harness.compareError = tt.compareError
@@ -81,6 +145,9 @@ func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
 			if tt.wantErr {
 				if harness.deleteCount() != 0 {
 					t.Fatalf("failed package qualification deleted %d interfaces", harness.deleteCount())
+				}
+				if harness.createCount() != 0 {
+					t.Fatalf("failed package qualification created %d interfaces", harness.createCount())
 				}
 
 				return
@@ -305,6 +372,7 @@ type runtimeCommandResult struct {
 
 type runtimeHarness struct {
 	packageVersions   map[string]string
+	packageStatuses   map[string]string
 	compareError      map[string]error
 	toolsOutput       string
 	moduleVersion     string
@@ -323,6 +391,10 @@ func newRuntimeHarness() *runtimeHarness {
 		packageVersions: map[string]string{
 			"amneziawg-tools": testMinimumToolsPackage,
 			"amneziawg-dkms":  testMinimumDKMSPackage,
+		},
+		packageStatuses: map[string]string{
+			"amneziawg-tools": testInstalledStatus,
+			"amneziawg-dkms":  testInstalledStatus,
 		},
 		toolsOutput:   testToolsVersion,
 		moduleVersion: "3.1.0-test\n",
@@ -349,11 +421,11 @@ func (harness *runtimeHarness) run(name string, args []string, stdin []byte) ([]
 
 	switch name {
 	case "dpkg-query":
-		if len(args) != 3 || args[0] != "-W" || args[1] != "-f=${Version}" {
+		if len(args) != 3 || args[0] != "-W" || args[1] != "-f=${db:Status-Abbrev}\\t${Version}\\n" {
 			return nil, fmt.Errorf("unexpected dpkg-query arguments: %v", args)
 		}
 
-		return []byte(harness.packageVersions[args[2]]), nil
+		return []byte(harness.packageStatuses[args[2]] + "\t" + harness.packageVersions[args[2]] + "\n"), nil
 	case "dpkg":
 		if len(args) != 4 || args[0] != "--compare-versions" || args[2] != "ge" {
 			return nil, fmt.Errorf("unexpected dpkg comparison arguments: %v", args)
