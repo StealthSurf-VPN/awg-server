@@ -139,8 +139,9 @@ The key is included only in the authenticated client configuration that needs it
 Example: create a 3.1 client using server defaults.
 
 ```bash
-curl -X POST http://127.0.0.1:7777/api/clients \
-  -H "Authorization: Bearer $AWG_API_TOKEN" \
+printf 'Authorization: Bearer %s\n' "$AWG_API_TOKEN" | \
+  curl -X POST http://127.0.0.1:7777/api/clients \
+  --header @- \
   -H 'Content-Type: application/json' \
   -d '{"id":"client-example","protocol_version":"3.1"}'
 ```
@@ -149,8 +150,9 @@ Example: explicitly migrate a client and reset its stored overrides to the
 target defaults in one request.
 
 ```bash
-curl -X PATCH http://127.0.0.1:7777/api/clients/client-example \
-  -H "Authorization: Bearer $AWG_API_TOKEN" \
+printf 'Authorization: Bearer %s\n' "$AWG_API_TOKEN" | \
+  curl -X PATCH http://127.0.0.1:7777/api/clients/client-example \
+  --header @- \
   -H 'Content-Type: application/json' \
   -d '{"protocol_version":"3.1","awg_params":null}'
 ```

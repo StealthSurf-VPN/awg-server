@@ -169,8 +169,8 @@ token loading or manager/API readiness.
 
 ```bash
 curl -fsS http://127.0.0.1:7777/health
-curl -fsS http://127.0.0.1:7777/api/clients \
-  -H "Authorization: Bearer $AWG_API_TOKEN"
+printf 'Authorization: Bearer %s\n' "$AWG_API_TOKEN" | \
+  curl -fsS --header @- http://127.0.0.1:7777/api/clients
 ```
 
 ## Firewall and client handling
