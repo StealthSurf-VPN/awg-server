@@ -23,7 +23,9 @@ first installs and gates the required package version, then stages and verifies
 a signed 3.1 release before stopping the service. It preserves the data
 directory, qualifies the reloaded runtime, and gates the new service with both
 `/health` and an authenticated `/api/clients` JSON-array request. It does not
-configure a public firewall policy.
+enable automatic startup until those gates pass; a failed transaction remains
+stopped and disabled across reboot when systemd state can be confirmed. It does
+not configure a public firewall policy.
 
 Read [the installation guide](docs/installation.md) before using it on a
 production host. The guide defines the intentional outage, backup, recovery,

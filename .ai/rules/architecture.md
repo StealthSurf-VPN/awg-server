@@ -163,6 +163,9 @@ discarded.
   update/reload DKMS. It installs/gates packages, stages a signed release, then
   stops the service, backs up environment plus clients/usage JSON, refuses any
   remaining AWG interface, reloads, qualifies the staged binary, then
-  replaces/configures/starts it and verifies health plus an authenticated
-  client-list JSON array. Do not add automatic rollback/restart after a failed
-  post-replacement gate.
+  confirms automatic startup is disabled before replacement, starts the new
+  unit explicitly while disabled, verifies health plus an authenticated
+  client-list JSON array, and enables it only after those gates pass. Every
+  failure after the service stop must preserve or truthfully report both the
+  runtime-stop and reboot-time disablement state. Do not add automatic
+  rollback/restart after a failed post-replacement gate.

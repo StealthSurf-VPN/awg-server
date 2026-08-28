@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   profile grouping, response redaction, and fail-closed restore validation.
 - Added required AWG 3.1 package/runtime qualification and a transactional
   installer outage with an authenticated client-list gate and manual recovery
-  boundary.
+  boundary that remains stopped and disabled across reboot on failure when
+  both systemd states can be confirmed.
 - Renamed major-release binaries to the `awg-server-awg31-*` asset set so older
   updaters fail closed instead of crossing an unqualified host-runtime bridge.
 

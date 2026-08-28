@@ -5,8 +5,10 @@ readonly RELEASE_PUBLIC_KEY_BASE64='LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUNvd0JR
 readonly LATEST_MANIFEST_URL='https://github.com/StealthSurf-VPN/awg-server/releases/latest/download/SHA256SUMS'
 readonly MINIMUM_TOOLS_PACKAGE_VERSION='1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1'
 readonly MINIMUM_DKMS_PACKAGE_VERSION='1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1'
-readonly RECOVERY_GUIDANCE='RECOVERY: awg-server remains stopped. Recover manually; do not restart an unqualified binary.'
-readonly UNCONFIRMED_RECOVERY_GUIDANCE='RECOVERY: awg-server stop could not be confirmed. Do not assume the service is stopped; intervene manually.'
+readonly RECOVERY_GUIDANCE='RECOVERY: awg-server remains stopped. Automatic startup is disabled; recover manually and do not restart an unqualified binary.'
+readonly UNCONFIRMED_STOP_RECOVERY_GUIDANCE='RECOVERY: awg-server stop could not be confirmed. Automatic startup is disabled; do not assume the service is stopped; intervene manually.'
+readonly UNCONFIRMED_AUTOSTART_RECOVERY_GUIDANCE='RECOVERY: awg-server remains stopped, but automatic-start disablement could not be confirmed. Do not reboot; intervene manually.'
+readonly UNCONFIRMED_RECOVERY_GUIDANCE='RECOVERY: awg-server stop could not be confirmed. Automatic-start disablement also could not be confirmed; do not assume the service is stopped or reboot; intervene manually.'
 readonly -a EXPECTED_RELEASE_ASSETS=(
     awg-server-awg31-darwin-amd64
     awg-server-awg31-darwin-arm64
@@ -726,8 +728,7 @@ start_and_verify_service() {
     deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
     run_before_deadline "$deadline" systemctl daemon-reload \
         || return 1
-    run_before_deadline "$deadline" systemctl enable awg-server.service \
-        || return 1
+    service_autostart_disabled_before_deadline "$deadline" || return 1
     if ! previous_invocation=$(run_before_deadline "$deadline" systemctl show \
         --property=InvocationID --value awg-server.service); then
         return 1
@@ -735,13 +736,15 @@ start_and_verify_service() {
 
     run_before_deadline "$deadline" \
         systemctl start --no-block awg-server.service || return 1
-    run_before_deadline "$deadline" \
-        systemctl is-enabled --quiet awg-server.service || return 1
 
     while remaining_milliseconds "$deadline" >/dev/null; do
         if service_healthy_before_deadline \
             "$deadline" "$previous_invocation" "$health_port"; then
-            return
+            run_before_deadline "$deadline" \
+                systemctl enable awg-server.service || return 1
+            run_before_deadline "$deadline" \
+                systemctl is-enabled --quiet awg-server.service || return 1
+            return 0
         fi
         run_before_deadline "$deadline" sleep 1 || break
     done
@@ -854,11 +857,55 @@ stop_failed_service() {
     [[ $status -eq 3 || $status -eq 4 ]]
 }
 
+service_autostart_disabled_before_deadline() {
+    local deadline=$1
+    local allow_not_found=${2:-0}
+    local load_state
+    local state
+    local status
+
+    if state=$(run_before_deadline "$deadline" \
+        systemctl is-enabled awg-server.service 2>/dev/null); then
+        status=0
+    else
+        status=$?
+    fi
+    [[ $status -ne 124 && $status -ne 137 ]] || return 1
+
+    case "$state" in
+        disabled | masked) return 0 ;;
+        not-found) [[ $allow_not_found == 1 ]] ;;
+        '')
+            [[ $allow_not_found == 1 && $status -ne 0 ]] || return 1
+            if ! load_state=$(run_before_deadline "$deadline" systemctl show \
+                --property=LoadState --value awg-server.service 2>/dev/null); then
+                return 1
+            fi
+            [[ $load_state == not-found ]]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+disable_service_autostart() {
+    local deadline
+
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    run_before_deadline "$deadline" systemctl disable awg-server.service \
+        >/dev/null 2>&1 || true
+    service_autostart_disabled_before_deadline "$deadline" 1
+}
+
 report_recovery() {
     local service_stopped=${1:-0}
+    local autostart_disabled=${2:-0}
 
-    if [[ $service_stopped == 1 ]]; then
+    if [[ $service_stopped == 1 && $autostart_disabled == 1 ]]; then
         printf '%s\n' "$RECOVERY_GUIDANCE" >&2
+    elif [[ $service_stopped == 1 ]]; then
+        printf '%s\n' "$UNCONFIRMED_AUTOSTART_RECOVERY_GUIDANCE" >&2
+    elif [[ $autostart_disabled == 1 ]]; then
+        printf '%s\n' "$UNCONFIRMED_STOP_RECOVERY_GUIDANCE" >&2
     else
         printf '%s\n' "$UNCONFIRMED_RECOVERY_GUIDANCE" >&2
     fi
@@ -870,16 +917,26 @@ report_recovery() {
 }
 
 fail_stopped_pre_replacement() {
-    report_recovery 1
+    local autostart_disabled=0
+
+    if disable_service_autostart; then
+        autostart_disabled=1
+    fi
+    report_recovery 1 "$autostart_disabled"
     die "$1"
 }
 
 fail_after_replacement() {
+    local autostart_disabled=0
+    local service_stopped=0
+
     if stop_failed_service; then
-        report_recovery 1
-    else
-        report_recovery 0
+        service_stopped=1
     fi
+    if disable_service_autostart; then
+        autostart_disabled=1
+    fi
+    report_recovery "$service_stopped" "$autostart_disabled"
     die "$1"
 }
 
@@ -905,6 +962,9 @@ install_release_transaction() {
         || fail_stopped_pre_replacement 'could not reload the AmneziaWG module'
     qualify_staged_runtime \
         || fail_stopped_pre_replacement 'staged awg-server did not qualify the AWG 3.1 runtime'
+    disable_service_autostart \
+        || fail_stopped_pre_replacement \
+            'could not disable awg-server automatic startup before replacement'
     INSTALLER_REPLACEMENT_BEGUN=1
     install_staged_binary \
         || fail_after_replacement 'could not install the staged awg-server binary'
@@ -936,19 +996,26 @@ main() {
 }
 
 handle_interruption() {
+    local autostart_disabled=0
+    local service_stopped=0
+
     trap '' HUP INT TERM
 
     if [[ $INSTALLER_REPLACEMENT_BEGUN == 1 ]]; then
         if stop_failed_service; then
-            report_recovery 1
-        else
-            report_recovery 0
+            service_stopped=1
         fi
     elif [[ $INSTALLER_SERVICE_STOP_CONFIRMED == 1 ]]; then
-        report_recovery 1
+        service_stopped=1
     elif [[ $INSTALLER_SERVICE_STOP_ATTEMPTED == 1 ]]; then
-        report_recovery 0
+        service_stopped=0
+    else
+        exit 1
     fi
+    if disable_service_autostart; then
+        autostart_disabled=1
+    fi
+    report_recovery "$service_stopped" "$autostart_disabled"
 
     exit 1
 }

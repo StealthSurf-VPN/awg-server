@@ -318,7 +318,7 @@ case "$name" in
         action=''
         for argument in "$@"; do
             case "$argument" in
-                is-active | stop | daemon-reload | enable | start | show | is-enabled)
+                is-active | stop | daemon-reload | disable | enable | start | show | is-enabled)
                     action=$argument
                     break
                     ;;
@@ -356,9 +356,26 @@ case "$name" in
                 ;;
             daemon-reload)
                 [ "${STUB_FAIL_PHASE:-}" != daemon-reload ] || exit 1
+                if [ "$(<"${STUB_STATE_DIR:?}/service-enablement")" = not-found ] \
+                    && [ -e "${STUB_UNIT_PATH:?}" ]; then
+                    printf '%s\n' disabled \
+                        > "${STUB_STATE_DIR:?}/service-enablement"
+                fi
+                ;;
+            disable)
+                case "${STUB_FAIL_PHASE:-}" in
+                    disable) exit 1 ;;
+                    disable-stale) exit 0 ;;
+                esac
+                if [ "$(<"${STUB_STATE_DIR:?}/service-enablement")" = not-found ]; then
+                    exit 1
+                fi
+                printf '%s\n' disabled > "${STUB_STATE_DIR:?}/service-enablement"
                 ;;
             enable)
                 [ "${STUB_FAIL_PHASE:-}" != enable ] || exit 1
+                printf '%s\n' enabled > "${STUB_STATE_DIR:?}/service-enablement"
+                [ "${STUB_FAIL_PHASE:-}" != enable-partial ] || exit 1
                 ;;
             start)
                 [ "${STUB_FAIL_PHASE:-}" != start ] || exit 1
@@ -378,10 +395,37 @@ case "$name" in
                 fi
                 ;;
             show)
-                cat "${STUB_STATE_DIR:?}/invocation"
+                case " $* " in
+                    *' --property=LoadState '*)
+                        [ "${STUB_FAIL_PHASE:-}" != load-state ] || exit 1
+                        if [ "$(<"${STUB_STATE_DIR:?}/service-enablement")" = not-found ]; then
+                            printf '%s\n' not-found
+                        else
+                            printf '%s\n' loaded
+                        fi
+                        ;;
+                    *) cat "${STUB_STATE_DIR:?}/invocation" ;;
+                esac
                 ;;
             is-enabled)
-                [ "${STUB_FAIL_PHASE:-}" != enabled-state ] || exit 1
+                enablement=$(<"${STUB_STATE_DIR:?}/service-enablement")
+                if [ "${STUB_SIGNAL_PHASE:-}" = enabled-state ] \
+                    && [ "$enablement" = enabled ]; then
+                    log "signal ${STUB_SIGNAL_PHASE}"
+                    log "signal target=${STUB_SIGNAL_TARGET:?}"
+                    kill -TERM "${STUB_SIGNAL_TARGET:?}"
+                fi
+                if [ "${STUB_FAIL_PHASE:-}" = enabled-state ] \
+                    && [ "$enablement" = enabled ]; then
+                    exit 1
+                fi
+                if [ "$enablement" != not-found ]; then
+                    case " $* " in
+                        *' --quiet '*) ;;
+                        *) printf '%s\n' "$enablement" ;;
+                    esac
+                fi
+                [ "$enablement" = enabled ]
                 ;;
             *) exit 1 ;;
         esac
@@ -516,6 +560,7 @@ setup_base_case() {
         STUB_SYSTEMCTL_STATUS || true
 
     printf '%s\n' active > "$case_dir/state/service-state"
+    printf '%s\n' enabled > "$case_dir/state/service-enablement"
     printf '%s\n' old-invocation > "$case_dir/state/invocation"
     : > "$STUB_TRACE"
     : > "$STUB_CURL_ARGUMENTS"
@@ -529,6 +574,7 @@ setup_base_case() {
     INSTALLER_ENV_PATH="$case_dir/etc/awg-server.env"
     INSTALLER_SYSCTL_PATH="$case_dir/sysctl/99-awg-server.conf"
     INSTALLER_UNIT_PATH="$case_dir/systemd/awg-server.service"
+    export STUB_UNIT_PATH=$INSTALLER_UNIT_PATH
     INSTALLER_STAGE_ROOT="$case_dir/stage"
     INSTALLER_BACKUP_ROOT="$case_dir/backups"
     INSTALLER_BACKUP_DIR=''
@@ -601,6 +647,7 @@ assert_recovery_message() {
     local error_file=$1
 
     assert_file_contains "$error_file" 'RECOVERY: awg-server remains stopped.'
+    assert_file_contains "$error_file" 'Automatic startup is disabled'
     assert_file_not_contains "$error_file" "$STUB_EXPECTED_TOKEN"
 }
 
@@ -609,7 +656,18 @@ assert_unconfirmed_recovery_message() {
 
     assert_file_contains "$error_file" \
         'RECOVERY: awg-server stop could not be confirmed.'
+    assert_file_contains "$error_file" 'Automatic startup is disabled'
     assert_file_not_contains "$error_file" 'RECOVERY: awg-server remains stopped.'
+    assert_file_not_contains "$error_file" "$STUB_EXPECTED_TOKEN"
+}
+
+assert_unconfirmed_autostart_recovery_message() {
+    local error_file=$1
+
+    assert_file_contains "$error_file" \
+        'automatic-start disablement could not be confirmed'
+    assert_file_contains "$error_file" 'Do not reboot'
+    assert_file_not_contains "$error_file" 'Automatic startup is disabled'
     assert_file_not_contains "$error_file" "$STUB_EXPECTED_TOKEN"
 }
 
@@ -630,11 +688,47 @@ assert_no_completed_backup_reported() {
     assert_file_not_contains "$error_file" 'root-only backup'
 }
 
+assert_autostart_disabled() {
+    local state_dir=$1
+    local enablement
+
+    enablement=$(<"$state_dir/service-enablement")
+    case "$enablement" in
+        disabled | masked | not-found) ;;
+        *) fail "service automatic startup remained $enablement" ;;
+    esac
+}
+
+assert_simulated_reboot_stays_stopped() {
+    local state_dir=$1
+
+    printf '%s\n' inactive > "$state_dir/service-state"
+    if [ "$(<"$state_dir/service-enablement")" = enabled ]; then
+        printf '%s\n' active > "$state_dir/service-state"
+    fi
+    assert_stopped "$state_dir/service-state"
+}
+
 trace_count() {
     local trace_file=$1
     local entry=$2
 
     grep -c -Fx -- "$entry" "$trace_file" || true
+}
+
+trace_first_line() {
+    local trace_file=$1
+    local entry=$2
+
+    awk -v entry="$entry" '$0 == entry { print NR; exit }' "$trace_file"
+}
+
+trace_last_line() {
+    local trace_file=$1
+    local entry=$2
+
+    awk -v entry="$entry" '$0 == entry { line = NR } END { if (line) print line }' \
+        "$trace_file"
 }
 
 test_config_parser_rejects_executable_and_unknown_input() {
@@ -842,6 +936,49 @@ test_fresh_success_and_backup_permissions() {
     [ ! -e "$completed_backup/usage.json" ] || fail 'fresh backup copied an absent usage file'
     [ "$(<"$case_dir/state/service-state")" = active ] \
         || fail 'successful service was not active'
+    [ "$(<"$case_dir/state/service-enablement")" = enabled ] \
+        || fail 'successful service was not enabled'
+}
+
+test_success_enables_only_after_qualification() {
+    local clients_line
+    local disable_line
+    local enable_line
+    local health_line
+    local initial_enablement
+    local runtime_line
+    local start_line
+    local verified_enabled_line
+
+    for initial_enablement in enabled disabled not-found; do
+        setup_base_case "enable-after-qualification-$initial_enablement"
+        printf '%s\n' "$initial_enablement" \
+            > "$case_dir/state/service-enablement"
+        resolve_case_settings
+        if ! run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$initial_enablement successful transaction failed"
+        fi
+
+        [ "$(<"$case_dir/state/service-state")" = active ] \
+            || fail "$initial_enablement successful service was not active"
+        [ "$(<"$case_dir/state/service-enablement")" = enabled ] \
+            || fail "$initial_enablement successful service was not enabled"
+
+        disable_line=$(trace_first_line "$STUB_TRACE" 'systemctl disable')
+        runtime_line=$(trace_first_line "$STUB_TRACE" 'staged-check-runtime')
+        start_line=$(trace_first_line "$STUB_TRACE" 'systemctl start')
+        health_line=$(trace_first_line "$STUB_TRACE" 'curl health')
+        clients_line=$(trace_first_line "$STUB_TRACE" 'curl clients')
+        enable_line=$(trace_first_line "$STUB_TRACE" 'systemctl enable')
+        verified_enabled_line=$(trace_last_line "$STUB_TRACE" 'systemctl is-enabled')
+        [ -n "$disable_line" ] && [ "$runtime_line" -lt "$disable_line" ] \
+            && [ "$disable_line" -lt "$start_line" ] \
+            && [ "$start_line" -lt "$health_line" ] \
+            && [ "$health_line" -lt "$clients_line" ] \
+            && [ "$clients_line" -lt "$enable_line" ] \
+            && [ "$enable_line" -lt "$verified_enabled_line" ] \
+            || fail "$initial_enablement enablement order was not fail-closed"
+    done
 }
 
 test_stop_backup_module_order_and_permissions() {
@@ -892,6 +1029,8 @@ test_foreign_interface_refusal() {
     assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
     assert_file_not_contains "$STUB_TRACE" 'ip link del'
     assert_recovery_message "$case_dir/error"
+    assert_autostart_disabled "$case_dir/state"
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
     assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
 }
 
@@ -926,6 +1065,8 @@ test_before_backup_failures() {
     assert_stopped "$case_dir/state/service-state"
     assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
     assert_recovery_message "$case_dir/error"
+    assert_autostart_disabled "$case_dir/state"
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
 }
 
 test_backup_failures_report_no_completed_backup() {
@@ -953,6 +1094,8 @@ EOF
         assert_stopped "$case_dir/state/service-state"
         assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
         assert_recovery_message "$case_dir/error"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
         assert_no_completed_backup_reported "$case_dir/error"
         completed=$(find "$INSTALLER_BACKUP_ROOT" -mindepth 1 -maxdepth 1 \
             -type d -name 'upgrade.*' -print)
@@ -1015,12 +1158,60 @@ test_stop_failures_do_not_make_false_recovery_claims() {
         assert_file_contains "$STUB_BINARY_PATH" 'staged-check-runtime'
         [ "$(<"$case_dir/state/service-state")" = active ] \
             || fail "$recovery_mode failed recovery stop was not observable as active"
+        assert_autostart_disabled "$case_dir/state"
         assert_unconfirmed_recovery_message "$case_dir/error"
         assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
         starts=$(trace_count "$STUB_TRACE" 'systemctl start')
         [ "$starts" = 1 ] \
             || fail "$recovery_mode failure triggered an automatic restart"
     done
+}
+
+test_disable_failure_does_not_claim_reboot_safety() {
+    local disables
+    local phase
+
+    for phase in disable disable-stale; do
+        setup_base_case "pre-replacement-$phase"
+        export STUB_FAIL_PHASE=$phase
+        resolve_case_settings
+        if run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$phase unexpectedly crossed the replacement boundary"
+        fi
+
+        assert_file_contains "$STUB_BINARY_PATH" old-binary
+        assert_stopped "$case_dir/state/service-state"
+        [ "$(<"$case_dir/state/service-enablement")" = enabled ] \
+            || fail "$phase did not preserve the simulated unsafe boot state"
+        assert_unconfirmed_autostart_recovery_message "$case_dir/error"
+        assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
+        disables=$(trace_count "$STUB_TRACE" 'systemctl disable')
+        [ "$disables" = 2 ] \
+            || fail "$phase disable attempts were $disables, want 2"
+
+        printf '%s\n' inactive > "$case_dir/state/service-state"
+        if [ "$(<"$case_dir/state/service-enablement")" = enabled ]; then
+            printf '%s\n' active > "$case_dir/state/service-state"
+        fi
+        [ "$(<"$case_dir/state/service-state")" = active ] \
+            || fail "$phase test did not reproduce the unsafe reboot state"
+    done
+}
+
+test_first_install_load_state_probe_fails_closed() {
+    setup_base_case first-install-load-state-error
+    printf '%s\n' not-found > "$case_dir/state/service-enablement"
+    export STUB_FAIL_PHASE=load-state
+    resolve_case_settings
+    if run_transaction "$case_dir/output" "$case_dir/error"; then
+        fail 'unreadable first-install LoadState crossed the replacement boundary'
+    fi
+
+    assert_file_contains "$STUB_BINARY_PATH" old-binary
+    assert_stopped "$case_dir/state/service-state"
+    assert_file_not_contains "$STUB_TRACE" 'systemctl start'
+    assert_unconfirmed_autostart_recovery_message "$case_dir/error"
+    assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
 }
 
 test_pre_replacement_failures() {
@@ -1037,6 +1228,8 @@ test_pre_replacement_failures() {
 
         assert_file_contains "$STUB_BINARY_PATH" old-binary
         assert_stopped "$case_dir/state/service-state"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
         backup_dir "$INSTALLER_BACKUP_ROOT" >/dev/null
         assert_recovery_message "$case_dir/error"
         assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
@@ -1070,16 +1263,52 @@ EOF
     assert_file_contains "$case_dir/data/clients.json" '{"state":"new-normalized"}'
     assert_file_contains "$completed_backup/clients.json" '{"state":"original"}'
     assert_stopped "$case_dir/state/service-state"
+    assert_autostart_disabled "$case_dir/state"
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
     starts=$(grep -c -Fx 'systemctl start' "$STUB_TRACE" || true)
     [ "$starts" = 1 ] || fail 'installer automatically restarted a failed service'
     assert_recovery_message "$case_dir/error"
     assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
 }
 
+test_failed_qualification_is_fail_stopped_across_reboot() {
+    local initial_enablement
+    local phase
+    local enables
+
+    for initial_enablement in enabled disabled not-found; do
+        for phase in invocation health auth-transport clients; do
+            prepare_post_replacement_case \
+                "reboot-safe-$initial_enablement-$phase"
+            printf '%s\n' "$initial_enablement" \
+                > "$case_dir/state/service-enablement"
+            case "$phase" in
+                invocation) export STUB_SAME_INVOCATION=1 ;;
+                *) export STUB_FAIL_PHASE=$phase ;;
+            esac
+
+            if run_transaction "$case_dir/output" "$case_dir/error"; then
+                fail "$initial_enablement $phase failure unexpectedly passed"
+            fi
+
+            assert_stopped "$case_dir/state/service-state"
+            assert_autostart_disabled "$case_dir/state"
+            assert_simulated_reboot_stays_stopped "$case_dir/state"
+            enables=$(trace_count "$STUB_TRACE" 'systemctl enable')
+            [ "$enables" = 0 ] \
+                || fail "$initial_enablement $phase enabled before qualification"
+            assert_recovery_message "$case_dir/error"
+            assert_retained_backup_reported \
+                "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
+        done
+    done
+}
+
 test_post_replacement_failure_phases() {
     local phase
 
-    for phase in binary-install sysctl daemon-reload enable start enabled-state; do
+    for phase in \
+        binary-install sysctl daemon-reload enable enable-partial start enabled-state; do
         setup_base_case "post-$phase"
         export STUB_FAIL_PHASE=$phase
         resolve_case_settings
@@ -1088,6 +1317,8 @@ test_post_replacement_failure_phases() {
         fi
 
         assert_stopped "$case_dir/state/service-state"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
         backup_dir "$INSTALLER_BACKUP_ROOT" >/dev/null
         if [ "$phase" != binary-install ]; then
             assert_file_contains "$STUB_BINARY_PATH" 'staged-check-runtime'
@@ -1127,7 +1358,7 @@ test_post_replacement_failure_postconditions() {
     local starts
 
     for phase in \
-        binary-install sysctl daemon-reload enable start enabled-state invocation \
+        binary-install sysctl daemon-reload enable enable-partial start enabled-state invocation \
         health auth-transport clients clients-json; do
         prepare_post_replacement_case "postconditions-$phase"
         expected_binary=1
@@ -1142,9 +1373,17 @@ test_post_replacement_failure_postconditions() {
                 expected_config=0
                 expected_starts=0
                 ;;
-            sysctl | daemon-reload | enable)
+            sysctl | daemon-reload)
                 export STUB_FAIL_PHASE=$phase
                 expected_starts=0
+                ;;
+            enable)
+                export STUB_FAIL_PHASE=$phase
+                expected_json=1
+                ;;
+            enable-partial)
+                export STUB_FAIL_PHASE=$phase
+                expected_json=1
                 ;;
             start)
                 export STUB_FAIL_PHASE=start
@@ -1175,6 +1414,8 @@ test_post_replacement_failure_postconditions() {
         assert_file_not_contains "$STUB_TRACE" \
             "backup-copy -- $completed_backup/clients.json $case_dir/data/clients.json"
         assert_stopped "$case_dir/state/service-state"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
         assert_recovery_message "$case_dir/error"
         assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
 
@@ -1242,6 +1483,8 @@ test_authenticated_gate_and_json_failures() {
         fi
 
         assert_stopped "$case_dir/state/service-state"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
         assert_recovery_message "$case_dir/error"
         assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
     done
@@ -1256,6 +1499,8 @@ test_exact_health_response_is_required() {
     fi
 
     assert_stopped "$case_dir/state/service-state"
+    assert_autostart_disabled "$case_dir/state"
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
     assert_recovery_message "$case_dir/error"
     assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
 }
@@ -1322,7 +1567,7 @@ test_interruption_after_replacement_or_during_start_is_safe() {
     local signal_pid
     local remaining_stage
 
-    for phase in module-unload binary-install start; do
+    for phase in module-unload binary-install start enabled-state; do
         setup_base_case "interruption-$phase"
         export STUB_MUTATE_JSON=1
         export STUB_SIGNAL_PHASE=$phase
@@ -1383,10 +1628,18 @@ PROBE
                 expected_client_state='{"state":"new-normalized"}'
                 expected_stops=2
                 ;;
+            enabled-state)
+                expected_binary='staged-check-runtime'
+                expected_starts=1
+                expected_client_state='{"state":"new-normalized"}'
+                expected_stops=2
+                ;;
             *) fail "unknown interruption phase $phase" ;;
         esac
 
         assert_stopped "$case_dir/state/service-state"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
         assert_file_contains "$STUB_TRACE" "signal $phase"
         signal_pid=$(<"$case_dir/signal-pid")
         assert_file_contains "$STUB_TRACE" "signal target=$signal_pid"
@@ -1417,6 +1670,8 @@ test_invocation_gate() {
     fi
 
     assert_stopped "$case_dir/state/service-state"
+    assert_autostart_disabled "$case_dir/state"
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
     assert_recovery_message "$case_dir/error"
     assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
 }
@@ -1431,14 +1686,18 @@ test_package_minimum_versions
 test_package_status_rejection
 test_settings_precedence_and_rerun
 test_fresh_success_and_backup_permissions
+test_success_enables_only_after_qualification
 test_stop_backup_module_order_and_permissions
 test_foreign_interface_refusal
 test_before_backup_failures
 test_backup_failures_report_no_completed_backup
 test_unreadable_service_state_refusal
 test_stop_failures_do_not_make_false_recovery_claims
+test_disable_failure_does_not_claim_reboot_safety
+test_first_install_load_state_probe_fails_closed
 test_pre_replacement_failures
 test_post_replacement_failure_preserves_new_state
+test_failed_qualification_is_fail_stopped_across_reboot
 test_post_replacement_failure_phases
 test_post_replacement_failure_postconditions
 test_authenticated_gate_and_json_failures

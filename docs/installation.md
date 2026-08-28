@@ -73,24 +73,30 @@ The installer intentionally creates a controlled service outage. Its order is:
    `amneziawg-dkms` `1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1` on Ubuntu
    22.04. Reload the module and run the staged binary's `check-runtime` probe
    before replacing `/usr/local/bin/awg-server`.
-8. Replace the binary only after the preceding gates, then write root-owned
-   environment/unit/sysctl files and enable and start the unit.
+8. Disable automatic startup and confirm the unit is disabled (or absent on a
+   first install) before replacing the binary. Then write the root-owned
+   environment/unit/sysctl files and start the unit explicitly while it remains
+   disabled.
 9. Require a new systemd `InvocationID`, active unit, exact local
    `{"status":"ok"}` health response, and an authenticated `/api/clients`
    response that parses as a JSON array within the service deadline.
+10. Enable the unit only after those qualification gates pass, then confirm
+    systemd reports it enabled.
 
 The API token is placed in a root-only curl configuration file for that gate;
 it is not put in a curl command-line argument. Values containing CR or LF are
 rejected before the environment or auth configuration is written.
 
-If a post-replacement gate fails, the installer attempts to stop the service,
-retains the backup, and does not automatically restore or restart an
-unqualified binary. If it cannot confirm the stop, it says so rather than
-claiming the service is down. The temporary staging directory is cleaned on
-exit and is not recovery evidence. Recover manually from the retained root-only
-backup after investigating logs, module state, and interfaces. This boundary
-avoids claiming that a mixed package/kernel/service failure can be rolled back
-safely.
+If a gate fails after the service stop, the installer keeps automatic startup
+disabled. A post-replacement failure also triggers a bounded stop and a second
+disable/verification pass, so a reboot cannot automatically start an
+unqualified binary. The installer does not restore or restart automatically.
+If it cannot confirm either the runtime stop or boot-time disablement, recovery
+output identifies that state explicitly; do not reboot when disablement is
+unconfirmed. The temporary staging directory is cleaned on exit and is not
+recovery evidence. Recover manually from the retained root-only backup after
+investigating logs, module state, and interfaces. This boundary avoids claiming
+that a mixed package/kernel/service failure can be rolled back safely.
 
 ## Migrating a legacy host
 
@@ -189,11 +195,14 @@ documentation.
 
 ## Troubleshooting boundaries
 
-For an installer failure, keep the service stopped if the script says it could
-not qualify the new runtime. Inspect the retained backup, then check:
+For an installer failure, keep the service stopped and disabled if the script
+says it could not qualify the new runtime. Do not reboot when the installer
+could not confirm automatic-start disablement. Inspect the retained backup,
+then check:
 
 ```bash
 systemctl --no-pager --full status awg-server.service
+systemctl is-enabled awg-server.service
 journalctl --no-pager -u awg-server.service -n 50
 awg-server check-runtime
 dkms status
