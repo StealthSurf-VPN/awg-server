@@ -57,10 +57,6 @@ func TestValidateProfile(t *testing.T) {
 }
 
 func TestValidateOverridesBoundaries(t *testing.T) {
-	zero := 0
-	negative := -1
-	tooLargeKeepalive := 65536
-
 	tests := []struct {
 		name      string
 		params    AWGParams
@@ -70,7 +66,7 @@ func TestValidateOverridesBoundaries(t *testing.T) {
 			name: "accepted boundaries",
 			params: AWGParams{
 				Port: 1024, ClientListenPort: 65535, MTU: 1280,
-				PersistentKeepalive: &zero,
+				PersistentKeepalive: rangePointer(t, "0"),
 				Jc:                  128, Jmin: 1280, Jmax: 1280,
 				S1: 1132, S2: 1188, S3: 64, S4: 32,
 				H1: "4294967295", I1: "<b 0x00ff><t><r 10><rc 0><rd 1000>",
@@ -79,8 +75,6 @@ func TestValidateOverridesBoundaries(t *testing.T) {
 		{name: "port below range", params: AWGParams{Port: 1023}, wantField: "port"},
 		{name: "client port above range", params: AWGParams{ClientListenPort: 65536}, wantField: "client_listen_port"},
 		{name: "mtu below range", params: AWGParams{MTU: 1279}, wantField: "mtu"},
-		{name: "negative keepalive", params: AWGParams{PersistentKeepalive: &negative}, wantField: "persistent_keepalive"},
-		{name: "keepalive above range", params: AWGParams{PersistentKeepalive: &tooLargeKeepalive}, wantField: "persistent_keepalive"},
 		{name: "jc above range", params: AWGParams{Jc: 129}, wantField: "jc"},
 		{name: "s4 above range", params: AWGParams{S4: 33}, wantField: "s4"},
 		{name: "header above uint32", params: AWGParams{H1: "4294967296"}, wantField: "h1"},
@@ -92,6 +86,72 @@ func TestValidateOverridesBoundaries(t *testing.T) {
 			assertValidationField(t, err, tt.wantField)
 		})
 	}
+}
+
+func TestValidateOverridesForVersion(t *testing.T) {
+	legacyFields := []struct {
+		name      string
+		params    AWGParams
+		wantField string
+	}{
+		{name: "content padding", params: AWGParams{ContentPaddingAddition: rangePointer(t, "10-100")}, wantField: "content_padding_addition"},
+		{name: "rekey after", params: AWGParams{RekeyAfterTime: rangePointer(t, "100-120")}, wantField: "rekey_after_time"},
+		{name: "rekey timeout", params: AWGParams{RekeyTimeout: rangePointer(t, "3-7")}, wantField: "rekey_timeout"},
+		{name: "reject after", params: AWGParams{RejectAfterTime: rangePointer(t, "150-180")}, wantField: "reject_after_time"},
+		{name: "keepalive timeout", params: AWGParams{KeepaliveTimeout: rangePointer(t, "5-15")}, wantField: "keepalive_timeout"},
+		{name: "max handshake attempts", params: AWGParams{MaxHandshakeAttempts: rangePointer(t, "15-20")}, wantField: "max_handshake_attempts"},
+		{name: "random trailers", params: AWGParams{RandomTrailers: "on"}, wantField: "random_trailers"},
+		{name: "disable cookies", params: AWGParams{DisableCookies: "off"}, wantField: "disable_cookies"},
+		{name: "ranged keepalive", params: AWGParams{PersistentKeepalive: rangePointer(t, "25-35")}, wantField: "persistent_keepalive"},
+		{name: "off keepalive", params: AWGParams{PersistentKeepalive: rangePointer(t, "off")}, wantField: "persistent_keepalive"},
+	}
+
+	for _, tt := range legacyFields {
+		t.Run("2.0 rejects "+tt.name, func(t *testing.T) {
+			err := ValidateOverridesForVersion(ProtocolVersion2, &tt.params)
+			assertValidationField(t, err, tt.wantField)
+		})
+	}
+
+	v31 := AWGParams{
+		PersistentKeepalive:    rangePointer(t, "off"),
+		ContentPaddingAddition: rangePointer(t, "10-100"),
+		RekeyAfterTime:         rangePointer(t, "100-120"),
+		RekeyTimeout:           rangePointer(t, "3-7"),
+		RejectAfterTime:        rangePointer(t, "150-180"),
+		KeepaliveTimeout:       rangePointer(t, "5-15"),
+		MaxHandshakeAttempts:   rangePointer(t, "15-20"),
+		RandomTrailers:         "on",
+		DisableCookies:         "off",
+	}
+	if err := ValidateOverridesForVersion(ProtocolVersion31, &v31); err != nil {
+		t.Fatalf("ValidateOverridesForVersion(3.1) error = %v", err)
+	}
+
+	invalidToggles := []struct {
+		name      string
+		params    AWGParams
+		wantField string
+	}{
+		{name: "random trailers", params: AWGParams{RandomTrailers: "yes"}, wantField: "random_trailers"},
+		{name: "disable cookies", params: AWGParams{DisableCookies: "false"}, wantField: "disable_cookies"},
+	}
+
+	for _, tt := range invalidToggles {
+		t.Run("3.1 rejects invalid "+tt.name, func(t *testing.T) {
+			err := ValidateOverridesForVersion(ProtocolVersion31, &tt.params)
+			assertValidationField(t, err, tt.wantField)
+		})
+	}
+}
+
+func TestValidateProfileForVersionRequiresAWG31PaddingMinimum(t *testing.T) {
+	params := validTestProfile()
+	params.S3 = 11
+	params.S4 = 12
+
+	err := ValidateProfileForVersion(ProtocolVersion31, params)
+	assertValidationField(t, err, "s3")
 }
 
 func TestValidateCPSTags(t *testing.T) {

@@ -327,6 +327,37 @@ func TestRenderClientConfigPrependsVPNNetwork(t *testing.T) {
 	}
 }
 
+func TestRenderClientConfigUsesCanonicalPersistentKeepalive(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "legacy default", want: "25"},
+		{name: "scalar zero", value: "0", want: "0"},
+		{name: "range", value: "25-35", want: "25-35"},
+		{name: "off", value: "off", want: "off"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := awg.AWGParams{MTU: 1420}
+			if tt.value != "" {
+				params.PersistentKeepalive = managerRangePointer(t, tt.value)
+			}
+			client := &ClientData{PrivateKey: "private", Address: "10.100.0.2"}
+
+			configuration, err := renderClientConfig(client, params, [32]byte{}, "10.100.0.0/24", "vpn.example.test", 51820)
+			if err != nil {
+				t.Fatalf("renderClientConfig() error = %v", err)
+			}
+			if !strings.Contains(configuration, "PersistentKeepalive = "+tt.want) {
+				t.Fatalf("configuration missing canonical keepalive %q:\n%s", tt.want, configuration)
+			}
+		})
+	}
+}
+
 func newManagerTest(t *testing.T, data *StorageData) (*Manager, *managerTestPool, *Storage) {
 	t.Helper()
 
@@ -378,4 +409,15 @@ func validStoredClient(t *testing.T, id, address, lanGroupID string) ClientData 
 		Address:      address,
 		LANGroupID:   lanGroupID,
 	}
+}
+
+func managerRangePointer(t *testing.T, value string) *config.Uint16Range {
+	t.Helper()
+
+	parsed, err := config.ParseUint16Range(value)
+	if err != nil {
+		t.Fatalf("ParseUint16Range(%q) error = %v", value, err)
+	}
+
+	return &parsed
 }

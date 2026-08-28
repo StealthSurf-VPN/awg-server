@@ -37,6 +37,14 @@ type headerRange struct {
 }
 
 func ValidateOverrides(params *AWGParams) error {
+	return ValidateOverridesForVersion(ProtocolVersion2, params)
+}
+
+func ValidateOverridesForVersion(version ProtocolVersion, params *AWGParams) error {
+	if !version.Valid() {
+		return invalidParam("protocol_version", "must be 2.0 or 3.1")
+	}
+
 	if params == nil {
 		return nil
 	}
@@ -59,6 +67,36 @@ func ValidateOverrides(params *AWGParams) error {
 
 	if err := ValidatePersistentKeepalive(params.PersistentKeepalive); err != nil {
 		return validationFrom("persistent_keepalive", err)
+	}
+	if version == ProtocolVersion2 && params.PersistentKeepalive != nil && !params.PersistentKeepalive.IsScalar() {
+		return invalidParam("persistent_keepalive", "must be a scalar for protocol version 2.0")
+	}
+
+	if version == ProtocolVersion2 {
+		for _, value := range []struct {
+			field string
+			set   bool
+		}{
+			{field: "content_padding_addition", set: params.ContentPaddingAddition != nil},
+			{field: "rekey_after_time", set: params.RekeyAfterTime != nil},
+			{field: "rekey_timeout", set: params.RekeyTimeout != nil},
+			{field: "reject_after_time", set: params.RejectAfterTime != nil},
+			{field: "keepalive_timeout", set: params.KeepaliveTimeout != nil},
+			{field: "max_handshake_attempts", set: params.MaxHandshakeAttempts != nil},
+			{field: "random_trailers", set: params.RandomTrailers != ""},
+			{field: "disable_cookies", set: params.DisableCookies != ""},
+		} {
+			if value.set {
+				return invalidParam(value.field, "is only supported for protocol version 3.1")
+			}
+		}
+	} else {
+		if err := validateToggle("random_trailers", params.RandomTrailers); err != nil {
+			return err
+		}
+		if err := validateToggle("disable_cookies", params.DisableCookies); err != nil {
+			return err
+		}
 	}
 
 	for _, value := range []struct {
@@ -120,8 +158,28 @@ func ValidateOverrides(params *AWGParams) error {
 }
 
 func ValidateProfile(params AWGParams) error {
-	if err := ValidateOverrides(&params); err != nil {
+	return ValidateProfileForVersion(ProtocolVersion2, params)
+}
+
+func ValidateProfileForVersion(version ProtocolVersion, params AWGParams) error {
+	if err := ValidateOverridesForVersion(version, &params); err != nil {
 		return err
+	}
+
+	if version == ProtocolVersion31 {
+		for _, value := range []struct {
+			field string
+			value int
+		}{
+			{field: "s1", value: params.S1},
+			{field: "s2", value: params.S2},
+			{field: "s3", value: params.S3},
+			{field: "s4", value: params.S4},
+		} {
+			if value.value < 12 {
+				return invalidParam(value.field, "must be at least 12 for protocol version 3.1")
+			}
+		}
 	}
 
 	if params.Jc > 0 {
@@ -324,6 +382,14 @@ func parseCPSSize(value string) (int, error) {
 
 func isHexDigit(value byte) bool {
 	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
+}
+
+func validateToggle(field, value string) error {
+	if value == "" || value == "on" || value == "off" {
+		return nil
+	}
+
+	return invalidParam(field, "must be on or off")
 }
 
 func validationFrom(field string, err error) error {

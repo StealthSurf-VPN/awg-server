@@ -645,7 +645,7 @@ PresharedKey = %s`, client.PresharedKey)
 	cfg += fmt.Sprintf(`
 Endpoint = %s:%d
 AllowedIPs = %s, %s
-PersistentKeepalive = %d`, endpoint, port, network, allowedIPs, params.PersistentKeepaliveValue())
+PersistentKeepalive = %s`, endpoint, port, network, allowedIPs, params.PersistentKeepaliveConfigValue(awg.ProtocolVersion2))
 
 	return cfg, nil
 }
@@ -698,10 +698,10 @@ func decodePresharedKey(encoded string) (*[32]byte, error) {
 
 func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
 	if params == nil {
-		return m.defaultParams
+		return cloneEffectiveParams(m.defaultParams)
 	}
 
-	result := m.defaultParams
+	result := cloneEffectiveParams(m.defaultParams)
 
 	if params.MTU > 0 {
 		result.MTU = params.MTU
@@ -712,7 +712,39 @@ func (m *Manager) effectiveParams(params *awg.AWGParams) awg.AWGParams {
 	}
 
 	if params.PersistentKeepalive != nil {
-		result.PersistentKeepalive = params.PersistentKeepalive
+		result.PersistentKeepalive = cloneUint16Range(params.PersistentKeepalive)
+	}
+
+	if params.ContentPaddingAddition != nil {
+		result.ContentPaddingAddition = cloneUint16Range(params.ContentPaddingAddition)
+	}
+
+	if params.RekeyAfterTime != nil {
+		result.RekeyAfterTime = cloneUint16Range(params.RekeyAfterTime)
+	}
+
+	if params.RekeyTimeout != nil {
+		result.RekeyTimeout = cloneUint16Range(params.RekeyTimeout)
+	}
+
+	if params.RejectAfterTime != nil {
+		result.RejectAfterTime = cloneUint16Range(params.RejectAfterTime)
+	}
+
+	if params.KeepaliveTimeout != nil {
+		result.KeepaliveTimeout = cloneUint16Range(params.KeepaliveTimeout)
+	}
+
+	if params.MaxHandshakeAttempts != nil {
+		result.MaxHandshakeAttempts = cloneUint16Range(params.MaxHandshakeAttempts)
+	}
+
+	if params.RandomTrailers != "" {
+		result.RandomTrailers = params.RandomTrailers
+	}
+
+	if params.DisableCookies != "" {
+		result.DisableCookies = params.DisableCookies
 	}
 
 	if params.Port > 0 {
@@ -801,6 +833,33 @@ func (m *Manager) validatedParams(params *awg.AWGParams) (awg.AWGParams, error) 
 	}
 
 	return effective, nil
+}
+
+func cloneEffectiveParams(params awg.AWGParams) awg.AWGParams {
+	clone := params
+	if params.DNSServers != nil {
+		clone.DNSServers = append([]string(nil), params.DNSServers...)
+	}
+
+	clone.PersistentKeepalive = cloneUint16Range(params.PersistentKeepalive)
+	clone.ContentPaddingAddition = cloneUint16Range(params.ContentPaddingAddition)
+	clone.RekeyAfterTime = cloneUint16Range(params.RekeyAfterTime)
+	clone.RekeyTimeout = cloneUint16Range(params.RekeyTimeout)
+	clone.RejectAfterTime = cloneUint16Range(params.RejectAfterTime)
+	clone.KeepaliveTimeout = cloneUint16Range(params.KeepaliveTimeout)
+	clone.MaxHandshakeAttempts = cloneUint16Range(params.MaxHandshakeAttempts)
+
+	return clone
+}
+
+func cloneUint16Range(value *config.Uint16Range) *config.Uint16Range {
+	if value == nil {
+		return nil
+	}
+
+	clone := *value
+
+	return &clone
 }
 
 func (m *Manager) allocateIP() (string, error) {

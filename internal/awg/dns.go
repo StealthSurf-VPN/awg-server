@@ -7,6 +7,8 @@ import (
 	"net/netip"
 	"reflect"
 	"strings"
+
+	"github.com/stealthsurf-vpn/awg-server/internal/config"
 )
 
 const (
@@ -70,10 +72,13 @@ func cloneAWGParams(params *AWGParams) *AWGParams {
 		copy(clone.DNSServers, params.DNSServers)
 	}
 
-	if params.PersistentKeepalive != nil {
-		keepalive := *params.PersistentKeepalive
-		clone.PersistentKeepalive = &keepalive
-	}
+	clone.PersistentKeepalive = cloneUint16Range(params.PersistentKeepalive)
+	clone.ContentPaddingAddition = cloneUint16Range(params.ContentPaddingAddition)
+	clone.RekeyAfterTime = cloneUint16Range(params.RekeyAfterTime)
+	clone.RekeyTimeout = cloneUint16Range(params.RekeyTimeout)
+	clone.RejectAfterTime = cloneUint16Range(params.RejectAfterTime)
+	clone.KeepaliveTimeout = cloneUint16Range(params.KeepaliveTimeout)
+	clone.MaxHandshakeAttempts = cloneUint16Range(params.MaxHandshakeAttempts)
 
 	return &clone
 }
@@ -123,6 +128,10 @@ func validateDNSSettings(params *AWGParams) error {
 }
 
 func NormalizeOverrides(params *AWGParams) (*AWGParams, error) {
+	return NormalizeOverridesForVersion(ProtocolVersion2, params)
+}
+
+func NormalizeOverridesForVersion(version ProtocolVersion, params *AWGParams) (*AWGParams, error) {
 	if params == nil {
 		return nil, nil
 	}
@@ -149,7 +158,7 @@ func NormalizeOverrides(params *AWGParams) (*AWGParams, error) {
 		normalized.DNSServers = servers
 	}
 
-	if err := ValidateOverrides(normalized); err != nil {
+	if err := ValidateOverridesForVersion(version, normalized); err != nil {
 		return nil, err
 	}
 
@@ -162,6 +171,16 @@ func NormalizeOverrides(params *AWGParams) (*AWGParams, error) {
 	}
 
 	return normalized, nil
+}
+
+func cloneUint16Range(value *config.Uint16Range) *config.Uint16Range {
+	if value == nil {
+		return nil
+	}
+
+	clone := *value
+
+	return &clone
 }
 
 func ResolveDNS(params *AWGParams, defaultDNS string) (string, bool) {
