@@ -2,6 +2,7 @@ package awg
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -9,19 +10,23 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/stealthsurf-vpn/awg-server/internal/config"
 )
 
 const (
-	minimumToolsPackageVersion = "1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1"
-	minimumDKMSPackageVersion  = "1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1"
-	runtimeModuleVersionPath   = "/sys/module/amneziawg/version"
-	runtimeProbePort           = 51820
-	runtimeInterfaceAttempts   = 8
-	maxInterfaceNameLength     = 15
-	runtimePackageQueryFormat  = "-f=${db:Status-Abbrev}\\t${Version}\\n"
+	minimumToolsPackageVersion  = "1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1"
+	minimumDKMSPackageVersion   = "1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1"
+	runtimeModuleVersionPath    = "/sys/module/amneziawg/version"
+	runtimeProbePort            = 0
+	runtimeInterfaceAttempts    = 8
+	maxInterfaceNameLength      = 15
+	runtimePackageQueryFormat   = "-f=${db:Status-Abbrev}\\t${Version}\\n"
+	runtimeQualificationTimeout = 20 * time.Second
+	runtimeCleanupTimeout       = 5 * time.Second
 )
 
 var runtimeToolsVersionPattern = regexp.MustCompile(`\Aamneziawg-tools v3\.1\.[0-9]{8} - https://amnezia\.org\n?\z`)
@@ -34,21 +39,29 @@ type RuntimeDiagnostics struct {
 }
 
 type runtimeDependencies struct {
-	run        func(string, []string, []byte) ([]byte, error)
+	run        func(context.Context, string, []string, []byte) ([]byte, error)
 	readFile   func(string) ([]byte, error)
 	randomName func() (string, error)
 }
 
 func CheckRuntime() (RuntimeDiagnostics, error) {
-	return checkRuntime(runtimeDependencies{
+	return checkRuntimeWithTimeout(runtimeDependencies{
 		run:        runRuntimeCommand,
 		readFile:   os.ReadFile,
 		randomName: generateRuntimeInterfaceName,
-	})
+	}, runtimeQualificationTimeout)
 }
 
-func checkRuntime(dependencies runtimeDependencies) (RuntimeDiagnostics, error) {
+func checkRuntimeWithTimeout(dependencies runtimeDependencies, timeout time.Duration) (RuntimeDiagnostics, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	return checkRuntime(ctx, dependencies)
+}
+
+func checkRuntime(ctx context.Context, dependencies runtimeDependencies) (RuntimeDiagnostics, error) {
 	toolsPackageVersion, err := checkRuntimePackage(
+		ctx,
 		dependencies,
 		"amneziawg-tools",
 		minimumToolsPackageVersion,
@@ -58,12 +71,12 @@ func checkRuntime(dependencies runtimeDependencies) (RuntimeDiagnostics, error) 
 	}
 
 	dkmsPackageVersion, err := checkRuntimePackage(
-		dependencies, "amneziawg-dkms", minimumDKMSPackageVersion)
+		ctx, dependencies, "amneziawg-dkms", minimumDKMSPackageVersion)
 	if err != nil {
 		return RuntimeDiagnostics{}, err
 	}
 
-	toolsOutput, err := dependencies.run("awg", []string{"--version"}, nil)
+	toolsOutput, err := dependencies.run(ctx, "awg", []string{"--version"}, nil)
 	if err != nil {
 		return RuntimeDiagnostics{}, fmt.Errorf("read awg tools version: %w", err)
 	}
@@ -82,15 +95,15 @@ func checkRuntime(dependencies runtimeDependencies) (RuntimeDiagnostics, error) 
 		diagnostics.ModuleVersion = strings.TrimSuffix(string(moduleVersion), "\n")
 	}
 
-	if err := probeRuntime(dependencies); err != nil {
+	if err := probeRuntime(ctx, dependencies); err != nil {
 		return RuntimeDiagnostics{}, err
 	}
 
 	return diagnostics, nil
 }
 
-func checkRuntimePackage(dependencies runtimeDependencies, packageName, minimumVersion string) (string, error) {
-	output, err := dependencies.run("dpkg-query", []string{"-W", runtimePackageQueryFormat, packageName}, nil)
+func checkRuntimePackage(ctx context.Context, dependencies runtimeDependencies, packageName, minimumVersion string) (string, error) {
+	output, err := dependencies.run(ctx, "dpkg-query", []string{"-W", runtimePackageQueryFormat, packageName}, nil)
 	if err != nil {
 		return "", fmt.Errorf("query %s package version: %w", packageName, err)
 	}
@@ -100,7 +113,7 @@ func checkRuntimePackage(dependencies runtimeDependencies, packageName, minimumV
 		return "", fmt.Errorf("query %s package status: %w", packageName, err)
 	}
 
-	if _, err := dependencies.run("dpkg", []string{"--compare-versions", version, "ge", minimumVersion}, nil); err != nil {
+	if _, err := dependencies.run(ctx, "dpkg", []string{"--compare-versions", version, "ge", minimumVersion}, nil); err != nil {
 		return "", fmt.Errorf("verify %s package version: %w", packageName, err)
 	}
 
@@ -134,7 +147,7 @@ func installedOKPackageStatus(status string) bool {
 	return strings.ContainsRune("uihrp", rune(status[0]))
 }
 
-func probeRuntime(dependencies runtimeDependencies) error {
+func probeRuntime(ctx context.Context, dependencies runtimeDependencies) error {
 	privateKey, err := GeneratePrivateKey()
 	if err != nil {
 		return fmt.Errorf("generate runtime probe private key: %w", err)
@@ -151,6 +164,10 @@ func probeRuntime(dependencies runtimeDependencies) error {
 	}
 
 	for attempt := 0; attempt < runtimeInterfaceAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("create runtime probe interface: %w", err)
+		}
+
 		ifName, err := dependencies.randomName()
 		if err != nil {
 			return fmt.Errorf("generate runtime probe interface name: %w", err)
@@ -159,25 +176,37 @@ func probeRuntime(dependencies runtimeDependencies) error {
 			return err
 		}
 
-		output, err := dependencies.run("ip", []string{"link", "add", ifName, "type", "amneziawg"}, nil)
+		output, err := dependencies.run(ctx, "ip", []string{"link", "add", ifName, "type", "amneziawg"}, nil)
 		if err != nil {
 			if runtimeInterfaceExists(output) {
+				if ctx.Err() != nil {
+					return fmt.Errorf("create runtime probe interface: %w", err)
+				}
+
 				continue
 			}
 
-			return fmt.Errorf("create runtime probe interface: %w", err)
+			createErr := fmt.Errorf("create runtime probe interface: %w", err)
+			if ctx.Err() == nil {
+				return createErr
+			}
+
+			if cleanupErr := deleteRuntimeProbeInterface(dependencies, ifName); cleanupErr != nil {
+				return errors.Join(createErr, cleanupErr)
+			}
+
+			return createErr
 		}
 
-		return probeCreatedRuntimeInterface(dependencies, ifName, profile, privateKey)
+		return probeCreatedRuntimeInterface(ctx, dependencies, ifName, profile, privateKey)
 	}
 
 	return errors.New("create runtime probe interface: exhausted collision-safe names")
 }
 
-func probeCreatedRuntimeInterface(dependencies runtimeDependencies, ifName string, profile Profile, privateKey [32]byte) (err error) {
+func probeCreatedRuntimeInterface(ctx context.Context, dependencies runtimeDependencies, ifName string, profile Profile, privateKey [32]byte) (err error) {
 	defer func() {
-		if _, cleanupErr := dependencies.run("ip", []string{"link", "del", ifName}, nil); cleanupErr != nil {
-			cleanupErr = fmt.Errorf("delete runtime probe interface: %w", cleanupErr)
+		if cleanupErr := deleteRuntimeProbeInterface(dependencies, ifName); cleanupErr != nil {
 			if err == nil {
 				err = cleanupErr
 			} else {
@@ -187,17 +216,32 @@ func probeCreatedRuntimeInterface(dependencies runtimeDependencies, ifName strin
 	}()
 
 	serverConfig := profile.ServerConfig(privateKey, runtimeProbePort)
-	if _, err := dependencies.run("awg", []string{"setconf", ifName, "/dev/stdin"}, []byte(serverConfig)); err != nil {
+	if _, err := dependencies.run(ctx, "awg", []string{"setconf", ifName, "/dev/stdin"}, []byte(serverConfig)); err != nil {
 		return fmt.Errorf("configure runtime probe interface: %w", err)
 	}
 
-	readback, err := dependencies.run("awg", []string{"showconf", ifName}, nil)
+	if _, err := dependencies.run(ctx, "ip", []string{"link", "set", ifName, "up"}, nil); err != nil {
+		return fmt.Errorf("activate runtime probe interface: %w", err)
+	}
+
+	readback, err := dependencies.run(ctx, "awg", []string{"showconf", ifName}, nil)
 	if err != nil {
 		return fmt.Errorf("read runtime probe interface configuration: %w", err)
 	}
 
 	if err := compareRuntimeConfig(serverConfig, string(readback)); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func deleteRuntimeProbeInterface(dependencies runtimeDependencies, ifName string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), runtimeCleanupTimeout)
+	defer cancel()
+
+	if _, err := dependencies.run(cleanupCtx, "ip", []string{"link", "del", ifName}, nil); err != nil {
+		return fmt.Errorf("delete runtime probe interface: %w", err)
 	}
 
 	return nil
@@ -261,12 +305,36 @@ func compareRuntimeConfig(expectedConfig, actualConfig string) error {
 	}
 
 	for field, expectedValue := range expected {
+		if field == "ListenPort" {
+			if !validRuntimeProbePort(actual[field]) {
+				return errors.New("runtime probe readback mismatch for ListenPort")
+			}
+
+			continue
+		}
+
 		if actual[field] != expectedValue {
 			return fmt.Errorf("runtime probe readback mismatch for %s", field)
 		}
 	}
 
 	return nil
+}
+
+func validRuntimeProbePort(value string) bool {
+	if value == "" {
+		return false
+	}
+
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+
+	port, err := strconv.ParseUint(value, 10, 16)
+
+	return err == nil && port != 0
 }
 
 func parseRuntimeConfig(value string) (map[string]string, error) {
@@ -325,8 +393,8 @@ func runtimeInterfaceExists(output []byte) bool {
 	return strings.Contains(strings.ToLower(string(output)), "file exists")
 }
 
-func runRuntimeCommand(name string, args []string, stdin []byte) ([]byte, error) {
-	command := exec.Command(name, args...)
+func runRuntimeCommand(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error) {
+	command := exec.CommandContext(ctx, name, args...)
 	if len(stdin) > 0 {
 		command.Stdin = bytes.NewReader(stdin)
 	}

@@ -72,6 +72,9 @@ INSTALLER_STAGED_BINARY=''
 INSTALLER_BACKUP_ROOT=/var/backups/awg-server
 INSTALLER_BACKUP_DIR=''
 INSTALLER_SERVICE_GATE_SECONDS=30
+INSTALLER_RUNTIME_GATE_SECONDS=30
+INSTALLER_AUTOSTART_DISABLE_ATTEMPTED=0
+INSTALLER_AUTOSTART_DISABLE_CONFIRMED=0
 INSTALLER_SERVICE_STOP_ATTEMPTED=0
 INSTALLER_SERVICE_STOP_CONFIRMED=0
 INSTALLER_REPLACEMENT_BEGUN=0
@@ -740,6 +743,7 @@ start_and_verify_service() {
     while remaining_milliseconds "$deadline" >/dev/null; do
         if service_healthy_before_deadline \
             "$deadline" "$previous_invocation" "$health_port"; then
+            INSTALLER_AUTOSTART_DISABLE_CONFIRMED=0
             run_before_deadline "$deadline" \
                 systemctl enable awg-server.service || return 1
             run_before_deadline "$deadline" \
@@ -793,33 +797,107 @@ create_upgrade_backup() {
     INSTALLER_BACKUP_DIR=$completed_dir
 }
 
-stop_existing_service() {
+read_service_state_before_deadline() {
+    local deadline=$1
+    local load_result=$2
+    local active_result=$3
+    local parsed_active_state=''
+    local active_state_count=0
+    local line
+    local parsed_load_state=''
+    local load_state_count=0
+    local output
+
+    output=$(run_before_deadline "$deadline" systemctl show \
+        --property=LoadState --property=ActiveState \
+        awg-server.service 2>/dev/null) || return 2
+    while IFS= read -r line; do
+        case "$line" in
+            LoadState=*)
+                load_state_count=$((load_state_count + 1))
+                parsed_load_state=${line#LoadState=}
+                ;;
+            ActiveState=*)
+                active_state_count=$((active_state_count + 1))
+                parsed_active_state=${line#ActiveState=}
+                ;;
+            *) return 2 ;;
+        esac
+    done <<< "$output"
+
+    [[ $load_state_count -eq 1 && $active_state_count -eq 1 \
+        && $parsed_load_state =~ ^[a-z][a-z-]*$ \
+        && $parsed_active_state =~ ^[a-z][a-z-]*$ ]] || return 2
+    printf -v "$load_result" '%s' "$parsed_load_state"
+    printf -v "$active_result" '%s' "$parsed_active_state"
+}
+
+service_stopped_before_deadline() {
+    local deadline=$1
+    local active_state
+    local load_state
+
+    read_service_state_before_deadline \
+        "$deadline" load_state active_state || return 2
+    case "$active_state" in
+        inactive | failed) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+service_stopped_with_new_deadline() {
+    local deadline
+
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    service_stopped_before_deadline "$deadline"
+}
+
+request_service_stop() {
+    local deadline
+
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    run_before_deadline "$deadline" \
+        systemctl stop --no-block awg-server.service >/dev/null 2>&1
+}
+
+wait_for_service_stopped() {
     local deadline
     local status
 
     deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
-    if run_before_deadline "$deadline" systemctl is-active --quiet awg-server.service; then
-        run_before_deadline "$deadline" systemctl stop awg-server.service \
-            >/dev/null 2>&1 || return 1
-        if run_before_deadline "$deadline" \
-            systemctl is-active --quiet awg-server.service; then
-            return 1
+    while remaining_milliseconds "$deadline" >/dev/null; do
+        if service_stopped_before_deadline "$deadline"; then
+            return 0
         else
             status=$?
         fi
-        [[ $status -eq 3 || $status -eq 4 ]] || return 1
+        [[ $status -eq 1 ]] || return 1
+        run_before_deadline "$deadline" sleep 1 >/dev/null 2>&1 || break
+    done
+
+    return 1
+}
+
+stop_existing_service() {
+    local status
+
+    if service_stopped_with_new_deadline; then
         return 0
     else
         status=$?
     fi
-
-    [[ $status -eq 3 || $status -eq 4 ]]
+    [[ $status -eq 1 ]] || return 1
+    request_service_stop || return 1
+    wait_for_service_stopped
 }
 
 assert_no_remaining_awg_interfaces() {
+    local deadline
     local interfaces
 
-    interfaces=$(ip -o link show type amneziawg 2>/dev/null) || return 1
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    interfaces=$(run_before_deadline "$deadline" \
+        ip -o link show type amneziawg 2>/dev/null) || return 1
     [[ -z $interfaces ]]
 }
 
@@ -830,8 +908,20 @@ reload_amneziawg_module() {
 }
 
 qualify_staged_runtime() {
+    local deadline
+    local qualification_status=0
+
     [[ -n $INSTALLER_STAGED_BINARY && -x $INSTALLER_STAGED_BINARY ]] || return 1
-    "$INSTALLER_STAGED_BINARY" check-runtime >/dev/null 2>&1
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    service_stopped_before_deadline "$deadline" || return 1
+    service_autostart_disabled_before_deadline "$deadline" 1 || return 1
+
+    deadline=$(deadline_after_seconds "$INSTALLER_RUNTIME_GATE_SECONDS") || return 1
+    run_before_deadline "$deadline" \
+        "$INSTALLER_STAGED_BINARY" check-runtime >/dev/null 2>&1 \
+        || qualification_status=$?
+    assert_no_remaining_awg_interfaces || return 1
+    [[ $qualification_status -eq 0 ]]
 }
 
 install_staged_binary() {
@@ -841,20 +931,12 @@ install_staged_binary() {
 }
 
 stop_failed_service() {
-    local deadline
-    local status
-
-    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
-    run_before_deadline "$deadline" systemctl stop awg-server.service \
-        >/dev/null 2>&1 || true
-    if run_before_deadline "$deadline" \
-        systemctl is-active --quiet awg-server.service; then
-        return 1
-    else
-        status=$?
+    if service_stopped_with_new_deadline; then
+        return 0
     fi
 
-    [[ $status -eq 3 || $status -eq 4 ]]
+    request_service_stop || true
+    wait_for_service_stopped
 }
 
 service_autostart_disabled_before_deadline() {
@@ -890,10 +972,13 @@ service_autostart_disabled_before_deadline() {
 disable_service_autostart() {
     local deadline
 
+    INSTALLER_AUTOSTART_DISABLE_ATTEMPTED=1
+    INSTALLER_AUTOSTART_DISABLE_CONFIRMED=0
     deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
-    run_before_deadline "$deadline" systemctl disable awg-server.service \
-        >/dev/null 2>&1 || true
-    service_autostart_disabled_before_deadline "$deadline" 1
+    run_before_deadline "$deadline" \
+        systemctl disable --quiet awg-server.service || true
+    service_autostart_disabled_before_deadline "$deadline" 1 || return 1
+    INSTALLER_AUTOSTART_DISABLE_CONFIRMED=1
 }
 
 report_recovery() {
@@ -926,6 +1011,20 @@ fail_stopped_pre_replacement() {
     die "$1"
 }
 
+fail_ambiguous_service_stop() {
+    local autostart_disabled=0
+    local service_stopped=0
+
+    if disable_service_autostart; then
+        autostart_disabled=1
+    fi
+    if stop_failed_service; then
+        service_stopped=1
+    fi
+    report_recovery "$service_stopped" "$autostart_disabled"
+    die "$1"
+}
+
 fail_after_replacement() {
     local autostart_disabled=0
     local service_stopped=0
@@ -944,14 +1043,19 @@ install_release_transaction() {
     local asset=$1
 
     INSTALLER_BACKUP_DIR=''
+    INSTALLER_AUTOSTART_DISABLE_ATTEMPTED=0
+    INSTALLER_AUTOSTART_DISABLE_CONFIRMED=0
     INSTALLER_SERVICE_STOP_ATTEMPTED=0
     INSTALLER_SERVICE_STOP_CONFIRMED=0
     INSTALLER_REPLACEMENT_BEGUN=0
 
     install_amneziawg || die 'could not install current AmneziaWG packages'
     stage_verified_release "$asset" || die 'could not stage a verified awg-server release'
+    disable_service_autostart \
+        || die 'could not disable awg-server automatic startup before stopping it'
     INSTALLER_SERVICE_STOP_ATTEMPTED=1
-    stop_existing_service || die 'could not stop awg-server.service'
+    stop_existing_service \
+        || fail_ambiguous_service_stop 'could not confirm awg-server.service stopped'
     INSTALLER_SERVICE_STOP_CONFIRMED=1
     create_upgrade_backup \
         || fail_stopped_pre_replacement 'could not create a consistent upgrade backup'
@@ -962,9 +1066,6 @@ install_release_transaction() {
         || fail_stopped_pre_replacement 'could not reload the AmneziaWG module'
     qualify_staged_runtime \
         || fail_stopped_pre_replacement 'staged awg-server did not qualify the AWG 3.1 runtime'
-    disable_service_autostart \
-        || fail_stopped_pre_replacement \
-            'could not disable awg-server automatic startup before replacement'
     INSTALLER_REPLACEMENT_BEGUN=1
     install_staged_binary \
         || fail_after_replacement 'could not install the staged awg-server binary'
@@ -1008,11 +1109,17 @@ handle_interruption() {
     elif [[ $INSTALLER_SERVICE_STOP_CONFIRMED == 1 ]]; then
         service_stopped=1
     elif [[ $INSTALLER_SERVICE_STOP_ATTEMPTED == 1 ]]; then
-        service_stopped=0
+        if stop_failed_service; then
+            service_stopped=1
+        fi
+    elif [[ $INSTALLER_AUTOSTART_DISABLE_ATTEMPTED == 1 ]]; then
+        :
     else
         exit 1
     fi
-    if disable_service_autostart; then
+    if [[ $INSTALLER_AUTOSTART_DISABLE_CONFIRMED == 1 ]]; then
+        autostart_disabled=1
+    elif disable_service_autostart; then
         autostart_disabled=1
     fi
     report_recovery "$service_stopped" "$autostart_disabled"

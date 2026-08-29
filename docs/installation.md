@@ -59,8 +59,12 @@ The installer intentionally creates a controlled service outage. Its order is:
    directory. Verify the Ed25519 signature, a canonical ordered manifest with
    the exact six asset names, selected checksum, and embedded binary version
    before touching the installed binary.
-4. Stop `awg-server.service`. If stop cannot be confirmed, abort without
-   assuming the process is down.
+4. Disable automatic startup and verify that the existing unit is disabled (or
+   absent on a first install) before requesting a stop. Stop
+   `awg-server.service` under a deadline and proceed only when a fresh systemd
+   query reports `ActiveState=inactive` or `ActiveState=failed` (including for
+   a not-found unit); `LoadState=not-found` or an arbitrary nonzero `systemctl`
+   result alone is not treated as proof that the process is down.
 5. Create one root-only (`0700`) timestamped backup directory and copy the
    existing environment, `clients.json`, and `usage.json` when present as
    root-only files (`0600`). The backup intentionally does not contain the
@@ -71,12 +75,12 @@ The installer intentionally creates a controlled service outage. Its order is:
 7. Require at least
    `amneziawg-tools` `1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1` and
    `amneziawg-dkms` `1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1` on Ubuntu
-   22.04. Reload the module and run the staged binary's `check-runtime` probe
-   before replacing `/usr/local/bin/awg-server`.
-8. Disable automatic startup and confirm the unit is disabled (or absent on a
-   first install) before replacing the binary. Then write the root-owned
-   environment/unit/sysctl files and start the unit explicitly while it remains
-   disabled.
+   22.04. Reload the module and run the staged binary's `check-runtime` under a
+   deadline while the service remains stopped and disabled. Verify again that
+   no AmneziaWG interface remains after the probe before replacing
+   `/usr/local/bin/awg-server`.
+8. Write the root-owned environment/unit/sysctl files and start the unit
+   explicitly while it remains disabled.
 9. Require a new systemd `InvocationID`, active unit, exact local
    `{"status":"ok"}` health response, and an authenticated `/api/clients`
    response that parses as a JSON array within the service deadline.
@@ -87,16 +91,21 @@ The API token is placed in a root-only curl configuration file for that gate;
 it is not put in a curl command-line argument. Values containing CR or LF are
 rejected before the environment or auth configuration is written.
 
-If a gate fails after the service stop, the installer keeps automatic startup
-disabled. A post-replacement failure also triggers a bounded stop and a second
-disable/verification pass, so a reboot cannot automatically start an
-unqualified binary. The installer does not restore or restart automatically.
-If it cannot confirm either the runtime stop or boot-time disablement, recovery
-output identifies that state explicitly; do not reboot when disablement is
-unconfirmed. The temporary staging directory is cleaned on exit and is not
-recovery evidence. Recover manually from the retained root-only backup after
-investigating logs, module state, and interfaces. This boundary avoids claiming
-that a mixed package/kernel/service failure can be rolled back safely.
+If the initial stop is ambiguous, the installer performs fresh bounded state
+checks, repeats the fail-closed stop/disable work, and reports only the states it
+can confirm. If a later gate fails, it keeps automatic startup disabled; a
+post-replacement failure also triggers a bounded stop and another
+disable/verification pass. The installer does not restore or restart
+automatically. If it cannot confirm either the runtime stop or boot-time
+disablement, recovery output identifies that state explicitly; do not reboot
+when disablement is unconfirmed. The temporary staging directory is cleaned on
+exit and is not recovery evidence. Runtime-probe cleanup is separately bounded
+so it can still run after a probe command times out, but an external hard kill
+or power loss cannot provide an absolute cleanup guarantee. Recover manually
+after investigating logs, module state, and interfaces; use the retained
+root-only backup only when the installer reports that one was completed. This
+boundary avoids claiming that a mixed
+package/kernel/service failure can be rolled back safely.
 
 ## Migrating a legacy host
 
@@ -148,8 +157,14 @@ install -o root -g root -m 0755 <verified-awg-server> /usr/local/bin/awg-server
 `check-runtime` requires installed/OK package status, the configured minimum
 package versions, strict `awg --version` output of the form
 `amneziawg-tools v3.1.YYYYMMDD - https://amnezia.org`, and an isolated 3.1
-setconf/showconf readback. It creates and deletes only a randomized temporary
-interface that it created. A diagnostic module version may be unavailable; the
+setconf/socket-bind/showconf readback. The randomized temporary interface asks
+the kernel for an available UDP port instead of using `AWG_LISTEN_PORT` or a
+fixed probe port, is brought up to force the socket bind, and must report the
+assigned nonzero port on readback. Each external command is bounded. Deletion
+of an interface created, or ambiguously created by a timed-out `ip` command,
+has its own bounded cleanup context so it is still attempted when the main
+qualification deadline expires; inspect the host manually after an external
+hard kill or power loss. A diagnostic module version may be unavailable; the
 functional probe is authoritative.
 
 Create `/etc/awg-server.env` with root-only permissions and real values outside

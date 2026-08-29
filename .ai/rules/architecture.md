@@ -155,17 +155,27 @@ discarded.
 - Requires the qualified AmneziaWG 3.1 package/module/`awg` runtime,
   `iptables`, and `iproute2`. `awg.CheckRuntime` is the single functional
   capability probe; normal startup and the staged installer binary both use it.
+  It configures a randomized temporary interface with a kernel-assigned UDP
+  port, brings the link up to exercise the socket bind, and validates the
+  assigned nonzero port plus the full 3.1 readback. Probe commands are bounded;
+  deletion of an interface created, or ambiguously created by a timed-out `ip`
+  command, uses a separate bounded cleanup context and is not an absolute
+  guarantee after an external hard kill or power loss.
 - Runs as root or with `NET_ADMIN` capability
 - `net.ipv4.ip_forward=1` sysctl required
 - Volume at `/data` for persistence
 - Firewall must allow the automatic UDP port range and every explicit per-client interface port
 - The installer is the supported 2.0-host migration because self-update cannot
   update/reload DKMS. It installs/gates packages, stages a signed release, then
-  stops the service, backs up environment plus clients/usage JSON, refuses any
-  remaining AWG interface, reloads, qualifies the staged binary, then
-  confirms automatic startup is disabled before replacement, starts the new
-  unit explicitly while disabled, verifies health plus an authenticated
-  client-list JSON array, and enables it only after those gates pass. Every
-  failure after the service stop must preserve or truthfully report both the
-  runtime-stop and reboot-time disablement state. Do not add automatic
-  rollback/restart after a failed post-replacement gate.
+  verifies automatic startup is disabled before stopping the service and
+  requires an exact stopped-state result. It then backs up environment plus
+  clients/usage JSON, refuses any remaining AWG interface, reloads, and runs a
+  bounded staged-binary qualification while stopped and disabled. It verifies
+  again that no AWG interface remains before replacement, starts the new unit
+  explicitly while disabled, verifies health plus an authenticated client-list
+  JSON array, and enables it only after those gates pass. A stop ambiguity must
+  trigger fresh bounded stop/state checks and disable verification. Every later
+  failure must preserve or truthfully report both the runtime-stop and
+  reboot-time disablement state; a post-replacement failure repeats the bounded
+  stop and disable checks. Do not add automatic rollback/restart after a failed
+  post-replacement gate.

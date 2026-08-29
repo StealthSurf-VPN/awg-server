@@ -20,12 +20,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/m
 
 The installer is the supported bridge from a 2.0 host to this major release. It
 first installs and gates the required package version, then stages and verifies
-a signed 3.1 release before stopping the service. It preserves the data
-directory, qualifies the reloaded runtime, and gates the new service with both
-`/health` and an authenticated `/api/clients` JSON-array request. It does not
-enable automatic startup until those gates pass; a failed transaction remains
-stopped and disabled across reboot when systemd state can be confirmed. It does
-not configure a public firewall policy.
+a signed 3.1 release. Before the controlled stop it disables and verifies
+automatic startup, and it proceeds only after systemd reports the exact stopped
+state. It preserves the data directory, performs a bounded qualification of the
+reloaded runtime while the unit is stopped and disabled, and verifies that the
+probe left no AmneziaWG interface behind. The new service must pass both
+`/health` and an authenticated `/api/clients` JSON-array request before the
+installer enables it. A failure after the stop boundary requires manual
+recovery and remains stopped and disabled across reboot when both systemd
+states can be confirmed. The installer does not configure a public firewall
+policy.
 
 Read [the installation guide](docs/installation.md) before using it on a
 production host. The guide defines the intentional outage, backup, recovery,
@@ -63,10 +67,15 @@ awg-server
 ```
 
 `check-runtime` is a Linux host diagnostic. It verifies installed Ubuntu
-packages, strict `awg --version` output, and an isolated create/setconf/readback/
-delete 3.1 interface probe before any normal startup creates a client-owned
-interface. Normal startup runs the same qualifier after pure persisted-state
-validation and before pool, firewall, or HTTP work.
+packages, strict `awg --version` output, and an isolated 3.1 interface probe
+before any normal startup creates a client-owned interface. The probe requests
+a kernel-assigned UDP port, brings its randomized temporary interface up to
+exercise the actual socket bind, and requires the assigned port and complete
+configuration to survive readback. External commands are bounded; deletion of
+an interface created, or ambiguously created by a timed-out `ip` command, uses
+a separate bounded cleanup attempt.
+Normal startup runs the same qualifier after pure persisted-state validation
+and before pool, firewall, or HTTP work.
 
 `update` is available only to official signed Linux and macOS release binaries.
 It is upgrade-only and fails closed for unexpected asset names, manifests,

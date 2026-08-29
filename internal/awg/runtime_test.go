@@ -1,10 +1,12 @@
 package awg
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -12,6 +14,7 @@ const (
 	testMinimumDKMSPackage  = "1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1"
 	testToolsVersion        = "amneziawg-tools v3.1.20260828 - https://amnezia.org\n"
 	testInstalledStatus     = "ii "
+	testRuntimeSelectedPort = "49152"
 )
 
 func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
@@ -137,7 +140,7 @@ func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
 			harness.packageVersions["amneziawg-dkms"] = tt.dkmsVersion
 			harness.compareError = tt.compareError
 
-			_, err := checkRuntime(harness.dependencies())
+			_, err := checkRuntime(context.Background(), harness.dependencies())
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("checkRuntime() error = %v, want error = %t", err, tt.wantErr)
 			}
@@ -177,7 +180,7 @@ func TestCheckRuntimeRequiresExactToolsVersionOutput(t *testing.T) {
 			harness := newRuntimeHarness()
 			harness.toolsOutput = tt.output
 
-			_, err := checkRuntime(harness.dependencies())
+			_, err := checkRuntime(context.Background(), harness.dependencies())
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("checkRuntime() error = %v, want error = %t", err, tt.wantErr)
 			}
@@ -192,7 +195,7 @@ func TestCheckRuntimeRecordsModuleVersionWhileFunctionalProbeRemainsAuthoritativ
 	harness := newRuntimeHarness()
 	harness.moduleVersion = "unrelated-module-version\n"
 
-	diagnostics, err := checkRuntime(harness.dependencies())
+	diagnostics, err := checkRuntime(context.Background(), harness.dependencies())
 	if err != nil {
 		t.Fatalf("checkRuntime() error = %v", err)
 	}
@@ -207,11 +210,11 @@ func TestCheckRuntimeRecordsModuleVersionWhileFunctionalProbeRemainsAuthoritativ
 func TestCheckRuntimeConfiguresAndReadsBackCompleteAWG31Profile(t *testing.T) {
 	harness := newRuntimeHarness()
 
-	if _, err := checkRuntime(harness.dependencies()); err != nil {
+	if _, err := checkRuntime(context.Background(), harness.dependencies()); err != nil {
 		t.Fatalf("checkRuntime() error = %v", err)
 	}
 
-	if got, want := harness.probeSequence(), []string{"ip link add", "awg setconf", "awg showconf", "ip link del"}; !sameStrings(got, want) {
+	if got, want := harness.probeSequence(), []string{"ip link add", "awg setconf", "ip link set up", "awg showconf", "ip link del"}; !sameStrings(got, want) {
 		t.Fatalf("probe sequence = %v, want %v", got, want)
 	}
 
@@ -234,6 +237,9 @@ func TestCheckRuntimeConfiguresAndReadsBackCompleteAWG31Profile(t *testing.T) {
 			t.Fatalf("probe config omitted %s", field)
 		}
 	}
+	if fields["ListenPort"] != "0" {
+		t.Fatalf("probe ListenPort = %q, want kernel-selected port 0", fields["ListenPort"])
+	}
 
 	if got := harness.interfaceNames(); len(got) != 1 || len(got[0]) > 15 {
 		t.Fatalf("probe interface names = %v, want one name no longer than 15 bytes", got)
@@ -249,6 +255,126 @@ func TestCheckRuntimeConfiguresAndReadsBackCompleteAWG31Profile(t *testing.T) {
 				t.Fatalf("awg argv contains a generated key: %v", call.args)
 			}
 		}
+	}
+}
+
+func TestCheckRuntimeAcceptsOnlyNonzeroDecimalSelectedPort(t *testing.T) {
+	tests := []struct {
+		name    string
+		port    string
+		wantErr bool
+	}{
+		{name: "minimum port", port: "1"},
+		{name: "maximum port", port: "65535"},
+		{name: "zero", port: "0", wantErr: true},
+		{name: "above uint16", port: "65536", wantErr: true},
+		{name: "negative", port: "-1", wantErr: true},
+		{name: "explicit plus", port: "+1", wantErr: true},
+		{name: "non decimal", port: "1x", wantErr: true},
+		{name: "empty", port: "", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			harness := newRuntimeHarness()
+			harness.showconfTransform = func(config string) string {
+				return replaceRuntimeConfigValue(t, config, "ListenPort", tt.port)
+			}
+
+			_, err := checkRuntime(context.Background(), harness.dependencies())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkRuntime() error = %v, want error = %t", err, tt.wantErr)
+			}
+			if harness.deleteCount() != 1 {
+				t.Fatalf("selected port qualification deleted %d interfaces, want 1", harness.deleteCount())
+			}
+		})
+	}
+}
+
+func TestCheckRuntimeRejectsMissingSelectedPort(t *testing.T) {
+	harness := newRuntimeHarness()
+	harness.showconfTransform = func(config string) string {
+		return removeRuntimeConfigField(t, config, "ListenPort")
+	}
+
+	err := checkRuntimeError(harness)
+	if err == nil {
+		t.Fatal("checkRuntime() accepted readback without ListenPort")
+	}
+	if harness.deleteCount() != 1 {
+		t.Fatalf("missing selected port deleted %d interfaces, want 1", harness.deleteCount())
+	}
+}
+
+func TestCheckRuntimeTimeoutUsesFreshBoundedCleanupContext(t *testing.T) {
+	harness := newRuntimeHarness()
+	harness.blockShowconf = true
+
+	_, err := checkRuntimeWithTimeout(harness.dependencies(), 10*time.Millisecond)
+	if err == nil {
+		t.Fatal("checkRuntimeWithTimeout() accepted a timed out probe")
+	}
+	if harness.deleteCount() != 1 {
+		t.Fatalf("timed out probe deleted %d interfaces, want exactly 1", harness.deleteCount())
+	}
+	if len(harness.cleanupContextHasDeadline) != 1 || !harness.cleanupContextHasDeadline[0] {
+		t.Fatalf("cleanup deadline flags = %v, want one bounded cleanup context", harness.cleanupContextHasDeadline)
+	}
+	if len(harness.cleanupContextErrors) != 1 || harness.cleanupContextErrors[0] != nil {
+		t.Fatalf("cleanup context errors = %v, want one fresh context", harness.cleanupContextErrors)
+	}
+}
+
+func TestCheckRuntimeCleansUpAmbiguousTimedOutCreateExactlyOnce(t *testing.T) {
+	cleanupErr := errors.New("cleanup failed")
+	harness := newRuntimeHarness()
+	harness.blockCreate = true
+	harness.blockCreateOutput = []byte("HeaderProtectionKey = must-not-leak\n")
+	harness.deleteError = cleanupErr
+
+	_, err := checkRuntimeWithTimeout(harness.dependencies(), 10*time.Millisecond)
+	if err == nil {
+		t.Fatal("checkRuntimeWithTimeout() accepted an ambiguous timed out interface creation")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timed out create error = %v, want deadline error", err)
+	}
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("timed out create error = %v, want joined cleanup error", err)
+	}
+	if strings.Contains(err.Error(), "HeaderProtectionKey") || strings.Contains(err.Error(), "must-not-leak") {
+		t.Fatalf("timed out create error leaks command output: %q", err)
+	}
+	if got, want := harness.probeSequence(), []string{"ip link add", "ip link del"}; !sameStrings(got, want) {
+		t.Fatalf("probe sequence = %v, want %v", got, want)
+	}
+	if got, want := harness.deletedInterfaces(), []string{"awgrt0000000001"}; !sameStrings(got, want) {
+		t.Fatalf("deleted interfaces = %v, want %v", got, want)
+	}
+	if len(harness.cleanupContextHasDeadline) != 1 || !harness.cleanupContextHasDeadline[0] {
+		t.Fatalf("cleanup deadline flags = %v, want one bounded cleanup context", harness.cleanupContextHasDeadline)
+	}
+	if len(harness.cleanupContextErrors) != 1 || harness.cleanupContextErrors[0] != nil {
+		t.Fatalf("cleanup context errors = %v, want one fresh context", harness.cleanupContextErrors)
+	}
+}
+
+func TestCheckRuntimeDoesNotDeleteOrRetryCanceledCreateCollision(t *testing.T) {
+	harness := newRuntimeHarness()
+	harness.randomNames = []string{"awgrt0000000001", "awgrt0000000002"}
+	harness.blockCreate = true
+	harness.blockCreateOutput = []byte("RTNETLINK answers: File exists\n")
+
+	_, err := checkRuntimeWithTimeout(harness.dependencies(), 10*time.Millisecond)
+	if err == nil {
+		t.Fatal("checkRuntimeWithTimeout() accepted a canceled interface-name collision")
+	}
+	if got, want := harness.interfaceNames(), []string{"awgrt0000000001"}; !sameStrings(got, want) {
+		t.Fatalf("created interface names = %v, want no retry after cancellation: %v", got, want)
+	}
+	if harness.deleteCount() != 0 {
+		t.Fatalf("canceled collision deleted %d interfaces, want no foreign-interface deletion", harness.deleteCount())
 	}
 }
 
@@ -299,9 +425,25 @@ func TestCheckRuntimeCleansUpOnlyInterfacesItCreated(t *testing.T) {
 			want: 0,
 		},
 		{
+			name: "unambiguous interface creation failure",
+			setup: func(harness *runtimeHarness) {
+				harness.createErrors["awgrt0000000001"] = runtimeCommandResult{
+					err: errors.New("exit status 2"),
+				}
+			},
+			want: 0,
+		},
+		{
 			name: "setconf failure after interface creation",
 			setup: func(harness *runtimeHarness) {
 				harness.setconfError = errors.New("exit status 1")
+			},
+			want: 1,
+		},
+		{
+			name: "link up failure after interface creation",
+			setup: func(harness *runtimeHarness) {
+				harness.linkUpError = errors.New("exit status 1")
 			},
 			want: 1,
 		},
@@ -324,7 +466,7 @@ func TestCheckRuntimeCleansUpOnlyInterfacesItCreated(t *testing.T) {
 			harness := newRuntimeHarness()
 			tt.setup(harness)
 
-			_, _ = checkRuntime(harness.dependencies())
+			_, _ = checkRuntime(context.Background(), harness.dependencies())
 
 			if got := harness.deleteCount(); got != tt.want {
 				t.Fatalf("delete count = %d, want %d", got, tt.want)
@@ -341,7 +483,7 @@ func TestCheckRuntimeRetriesExistingNameWithoutDeletingForeignInterface(t *testi
 		err:    errors.New("exit status 2"),
 	}
 
-	if _, err := checkRuntime(harness.dependencies()); err != nil {
+	if _, err := checkRuntime(context.Background(), harness.dependencies()); err != nil {
 		t.Fatalf("checkRuntime() error = %v", err)
 	}
 
@@ -354,7 +496,7 @@ func TestCheckRuntimeRetriesExistingNameWithoutDeletingForeignInterface(t *testi
 }
 
 func checkRuntimeError(harness *runtimeHarness) error {
-	_, err := checkRuntime(harness.dependencies())
+	_, err := checkRuntime(context.Background(), harness.dependencies())
 
 	return err
 }
@@ -371,19 +513,26 @@ type runtimeCommandResult struct {
 }
 
 type runtimeHarness struct {
-	packageVersions   map[string]string
-	packageStatuses   map[string]string
-	compareError      map[string]error
-	toolsOutput       string
-	moduleVersion     string
-	randomNames       []string
-	randomNameIndex   int
-	createErrors      map[string]runtimeCommandResult
-	setconfError      error
-	showconfError     error
-	showconfTransform func(string) string
-	setconfInputs     []string
-	calls             []runtimeCall
+	packageVersions           map[string]string
+	packageStatuses           map[string]string
+	compareError              map[string]error
+	toolsOutput               string
+	moduleVersion             string
+	randomNames               []string
+	randomNameIndex           int
+	createErrors              map[string]runtimeCommandResult
+	setconfError              error
+	linkUpError               error
+	showconfError             error
+	showconfTransform         func(string) string
+	blockCreate               bool
+	blockCreateOutput         []byte
+	blockShowconf             bool
+	deleteError               error
+	setconfInputs             []string
+	calls                     []runtimeCall
+	cleanupContextHasDeadline []bool
+	cleanupContextErrors      []error
 }
 
 func newRuntimeHarness() *runtimeHarness {
@@ -411,7 +560,7 @@ func (harness *runtimeHarness) dependencies() runtimeDependencies {
 	}
 }
 
-func (harness *runtimeHarness) run(name string, args []string, stdin []byte) ([]byte, error) {
+func (harness *runtimeHarness) run(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error) {
 	call := runtimeCall{
 		name:  name,
 		args:  append([]string(nil), args...),
@@ -441,6 +590,11 @@ func (harness *runtimeHarness) run(name string, args []string, stdin []byte) ([]
 			return nil, harness.setconfError
 		}
 		if len(args) == 2 && args[0] == "showconf" {
+			if harness.blockShowconf {
+				<-ctx.Done()
+
+				return nil, ctx.Err()
+			}
 			if harness.showconfError != nil {
 				return nil, harness.showconfError
 			}
@@ -448,7 +602,12 @@ func (harness *runtimeHarness) run(name string, args []string, stdin []byte) ([]
 				return nil, errors.New("showconf before setconf")
 			}
 
-			config := harness.setconfInputs[len(harness.setconfInputs)-1]
+			config := strings.Replace(
+				harness.setconfInputs[len(harness.setconfInputs)-1],
+				"ListenPort = 0",
+				"ListenPort = "+testRuntimeSelectedPort,
+				1,
+			)
 			if harness.showconfTransform != nil {
 				config = harness.showconfTransform(config)
 			}
@@ -457,11 +616,24 @@ func (harness *runtimeHarness) run(name string, args []string, stdin []byte) ([]
 		}
 	case "ip":
 		if len(args) == 5 && args[0] == "link" && args[1] == "add" && args[3] == "type" && args[4] == "amneziawg" {
+			if harness.blockCreate {
+				<-ctx.Done()
+
+				return harness.blockCreateOutput, ctx.Err()
+			}
+
 			result := harness.createErrors[args[2]]
 			return result.output, result.err
 		}
+		if len(args) == 4 && args[0] == "link" && args[1] == "set" && args[3] == "up" {
+			return nil, harness.linkUpError
+		}
 		if len(args) == 3 && args[0] == "link" && args[1] == "del" {
-			return nil, nil
+			_, hasDeadline := ctx.Deadline()
+			harness.cleanupContextHasDeadline = append(harness.cleanupContextHasDeadline, hasDeadline)
+			harness.cleanupContextErrors = append(harness.cleanupContextErrors, ctx.Err())
+
+			return nil, harness.deleteError
 		}
 	}
 
@@ -548,6 +720,8 @@ func (harness *runtimeHarness) probeSequence() []string {
 			sequence = append(sequence, "ip link add")
 		case call.name == "awg" && len(call.args) > 0 && call.args[0] == "setconf":
 			sequence = append(sequence, "awg setconf")
+		case call.name == "ip" && len(call.args) > 1 && call.args[0] == "link" && call.args[1] == "set":
+			sequence = append(sequence, "ip link set up")
 		case call.name == "awg" && len(call.args) > 0 && call.args[0] == "showconf":
 			sequence = append(sequence, "awg showconf")
 		case call.name == "ip" && len(call.args) > 1 && call.args[0] == "link" && call.args[1] == "del":
@@ -599,6 +773,24 @@ func replaceRuntimeConfigValue(t *testing.T, config, field, replacement string) 
 		}
 
 		return strings.Replace(config, line, needle+replacement, 1)
+	}
+
+	t.Fatalf("config does not contain %s", field)
+
+	return ""
+}
+
+func removeRuntimeConfigField(t *testing.T, config, field string) string {
+	t.Helper()
+
+	needle := field + " = "
+	lines := strings.Split(config, "\n")
+	for index, line := range lines {
+		if !strings.HasPrefix(line, needle) {
+			continue
+		}
+
+		return strings.Join(append(lines[:index], lines[index+1:]...), "\n")
 	}
 
 	t.Fatalf("config does not contain %s", field)
