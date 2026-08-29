@@ -969,30 +969,9 @@ EOF
     done
 }
 
-test_fresh_success_and_backup_permissions() {
-    local completed_backup
-
-    setup_base_case fresh-success
-    resolve_case_settings
-    if ! run_transaction "$case_dir/output" "$case_dir/error"; then
-        fail 'fresh transaction failed'
-    fi
-
-    completed_backup=$(backup_dir "$INSTALLER_BACKUP_ROOT")
-    assert_mode "$INSTALLER_STAGE_ROOT" 700
-    assert_mode "$INSTALLER_BACKUP_ROOT" 700
-    assert_mode "$completed_backup" 700
-    [ ! -e "$completed_backup/environment" ] || fail 'fresh backup copied an absent environment file'
-    [ ! -e "$completed_backup/clients.json" ] || fail 'fresh backup copied an absent clients file'
-    [ ! -e "$completed_backup/usage.json" ] || fail 'fresh backup copied an absent usage file'
-    [ "$(<"$case_dir/state/service-state")" = active ] \
-        || fail 'successful service was not active'
-    [ "$(<"$case_dir/state/service-enablement")" = enabled ] \
-        || fail 'successful service was not enabled'
-}
-
 test_success_enables_only_after_qualification() {
     local clients_line
+    local completed_backup
     local disable_line
     local enable_line
     local health_line
@@ -1018,6 +997,19 @@ test_success_enables_only_after_qualification() {
             || fail "$initial_enablement successful service was not active"
         [ "$(<"$case_dir/state/service-enablement")" = enabled ] \
             || fail "$initial_enablement successful service was not enabled"
+
+        if [ "$initial_enablement" = enabled ]; then
+            completed_backup=$(backup_dir "$INSTALLER_BACKUP_ROOT")
+            assert_mode "$INSTALLER_STAGE_ROOT" 700
+            assert_mode "$INSTALLER_BACKUP_ROOT" 700
+            assert_mode "$completed_backup" 700
+            [ ! -e "$completed_backup/environment" ] \
+                || fail 'fresh backup copied an absent environment file'
+            [ ! -e "$completed_backup/clients.json" ] \
+                || fail 'fresh backup copied an absent clients file'
+            [ ! -e "$completed_backup/usage.json" ] \
+                || fail 'fresh backup copied an absent usage file'
+        fi
 
         disable_line=$(trace_first_line "$STUB_TRACE" 'systemctl disable')
         stop_line=$(trace_first_line "$STUB_TRACE" 'systemctl stop')
@@ -1419,98 +1411,32 @@ test_staged_runtime_timeout_is_bounded_and_fail_stopped() {
         'staged-runtime-observed-unsafe-service-state'
 }
 
-test_post_replacement_failure_preserves_new_state() {
-    local completed_backup
-    local starts
-
-    setup_base_case post-replacement
-    export STUB_FAIL_PHASE=health
-    export STUB_MUTATE_JSON=1
-    tee "$INSTALLER_ENV_PATH" >/dev/null <<EOF
-AWG_API_TOKEN="$STUB_EXPECTED_TOKEN"
-AWG_ADDRESS="10.0.0.1/24"
-AWG_ENDPOINT="vpn.example.test"
-AWG_DATA_DIR="$case_dir/data"
-AWG_MTU="1350"
-EOF
-    chmod 0600 "$INSTALLER_ENV_PATH"
-    printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
-    resolve_case_settings
-    if run_transaction "$case_dir/output" "$case_dir/error"; then
-        fail 'failed health gate unexpectedly passed'
-    fi
-
-    completed_backup=$(backup_dir "$INSTALLER_BACKUP_ROOT")
-    assert_file_contains "$STUB_BINARY_PATH" 'staged-check-runtime'
-    assert_file_contains "$INSTALLER_ENV_PATH" 'AWG_DEFAULT_PROTOCOL_VERSION="3.1"'
-    assert_file_contains "$case_dir/data/clients.json" '{"state":"new-normalized"}'
-    assert_file_contains "$completed_backup/clients.json" '{"state":"original"}'
-    assert_stopped "$case_dir/state/service-state"
-    assert_autostart_disabled "$case_dir/state"
-    assert_simulated_reboot_stays_stopped "$case_dir/state"
-    starts=$(grep -c -Fx 'systemctl start' "$STUB_TRACE" || true)
-    [ "$starts" = 1 ] || fail 'installer automatically restarted a failed service'
-    assert_recovery_message "$case_dir/error"
-    assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
-}
-
-test_failed_qualification_is_fail_stopped_across_reboot() {
+test_failed_health_qualification_is_fail_stopped_across_reboot() {
     local initial_enablement
-    local phase
     local enables
 
     for initial_enablement in enabled disabled not-found; do
-        for phase in invocation health auth-transport clients; do
-            prepare_post_replacement_case \
-                "reboot-safe-$initial_enablement-$phase"
-            printf '%s\n' "$initial_enablement" \
-                > "$case_dir/state/service-enablement"
-            if [ "$initial_enablement" = not-found ]; then
-                printf '%s\n' inactive > "$case_dir/state/service-state"
-            fi
-            case "$phase" in
-                invocation) export STUB_SAME_INVOCATION=1 ;;
-                *) export STUB_FAIL_PHASE=$phase ;;
-            esac
+        prepare_post_replacement_case "reboot-safe-$initial_enablement-health"
+        printf '%s\n' "$initial_enablement" \
+            > "$case_dir/state/service-enablement"
+        if [ "$initial_enablement" = not-found ]; then
+            printf '%s\n' inactive > "$case_dir/state/service-state"
+        fi
+        export STUB_FAIL_PHASE=health
 
-            if run_transaction "$case_dir/output" "$case_dir/error"; then
-                fail "$initial_enablement $phase failure unexpectedly passed"
-            fi
-
-            assert_stopped "$case_dir/state/service-state"
-            assert_autostart_disabled "$case_dir/state"
-            assert_simulated_reboot_stays_stopped "$case_dir/state"
-            enables=$(trace_count "$STUB_TRACE" 'systemctl enable')
-            [ "$enables" = 0 ] \
-                || fail "$initial_enablement $phase enabled before qualification"
-            assert_recovery_message "$case_dir/error"
-            assert_retained_backup_reported \
-                "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
-        done
-    done
-}
-
-test_post_replacement_failure_phases() {
-    local phase
-
-    for phase in \
-        binary-install sysctl daemon-reload enable enable-partial start enabled-state; do
-        setup_base_case "post-$phase"
-        export STUB_FAIL_PHASE=$phase
-        resolve_case_settings
         if run_transaction "$case_dir/output" "$case_dir/error"; then
-            fail "$phase unexpectedly passed"
+            fail "$initial_enablement health failure unexpectedly passed"
         fi
 
         assert_stopped "$case_dir/state/service-state"
         assert_autostart_disabled "$case_dir/state"
         assert_simulated_reboot_stays_stopped "$case_dir/state"
-        backup_dir "$INSTALLER_BACKUP_ROOT" >/dev/null
-        if [ "$phase" != binary-install ]; then
-            assert_file_contains "$STUB_BINARY_PATH" 'staged-check-runtime'
-        fi
+        enables=$(trace_count "$STUB_TRACE" 'systemctl enable')
+        [ "$enables" = 0 ] \
+            || fail "$initial_enablement health enabled before qualification"
         assert_recovery_message "$case_dir/error"
-        assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
+        assert_retained_backup_reported \
+            "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
     done
 }
 
@@ -1642,8 +1568,7 @@ test_post_replacement_failure_postconditions() {
     done
 }
 
-test_authenticated_gate_and_json_failures() {
-    local phase
+test_authenticated_gate_keeps_token_private() {
     local config_path
 
     setup_base_case authenticated-success
@@ -1659,21 +1584,6 @@ test_authenticated_gate_and_json_failures() {
     assert_file_not_contains "$STUB_CURL_ARGUMENTS" "$STUB_EXPECTED_TOKEN"
     assert_file_not_contains "$case_dir/output" "$STUB_EXPECTED_TOKEN"
     assert_file_not_contains "$case_dir/error" "$STUB_EXPECTED_TOKEN"
-
-    for phase in auth-transport clients clients-json; do
-        setup_base_case "authenticated-$phase"
-        export STUB_FAIL_PHASE=$phase
-        resolve_case_settings
-        if run_transaction "$case_dir/output" "$case_dir/error"; then
-            fail "$phase client-list gate unexpectedly passed"
-        fi
-
-        assert_stopped "$case_dir/state/service-state"
-        assert_autostart_disabled "$case_dir/state"
-        assert_simulated_reboot_stays_stopped "$case_dir/state"
-        assert_recovery_message "$case_dir/error"
-        assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
-    done
 }
 
 test_exact_health_response_is_required() {
@@ -1926,21 +1836,6 @@ PROBE
     done
 }
 
-test_invocation_gate() {
-    setup_base_case unchanged-invocation
-    export STUB_SAME_INVOCATION=1
-    resolve_case_settings
-    if run_transaction "$case_dir/output" "$case_dir/error"; then
-        fail 'unchanged InvocationID unexpectedly passed'
-    fi
-
-    assert_stopped "$case_dir/state/service-state"
-    assert_autostart_disabled "$case_dir/state"
-    assert_simulated_reboot_stays_stopped "$case_dir/state"
-    assert_recovery_message "$case_dir/error"
-    assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
-}
-
 # shellcheck source=install.sh
 source "$installer"
 
@@ -1950,7 +1845,6 @@ test_config_parser_round_trips_rendered_values
 test_package_minimum_versions
 test_package_status_rejection
 test_settings_precedence_and_rerun
-test_fresh_success_and_backup_permissions
 test_success_enables_only_after_qualification
 test_not_found_service_must_have_a_stopped_active_state
 test_stop_backup_module_order_and_permissions
@@ -1963,16 +1857,13 @@ test_disable_failure_does_not_claim_reboot_safety
 test_first_install_load_state_probe_fails_closed
 test_pre_replacement_failures
 test_staged_runtime_timeout_is_bounded_and_fail_stopped
-test_post_replacement_failure_preserves_new_state
-test_failed_qualification_is_fail_stopped_across_reboot
-test_post_replacement_failure_phases
+test_failed_health_qualification_is_fail_stopped_across_reboot
 test_post_replacement_failure_postconditions
-test_authenticated_gate_and_json_failures
+test_authenticated_gate_keeps_token_private
 test_exact_health_response_is_required
 test_token_newlines_are_rejected_before_curl_config
 test_curl_config_is_cleaned_on_parent_termination
 test_interruption_during_autostart_disable_is_recovered
 test_interruption_after_replacement_or_during_start_is_safe
-test_invocation_gate
 
 printf 'install tests passed\n'

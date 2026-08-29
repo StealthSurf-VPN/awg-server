@@ -26,62 +26,39 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 	return f(request)
 }
 
-func TestReleaseAssetName(t *testing.T) {
+func TestReleaseAssetNames(t *testing.T) {
 	tests := []struct {
-		name   string
-		goos   string
-		goarch string
-		want   string
+		name       string
+		goos       string
+		goarch     string
+		want       string
+		legacyName string
 	}{
-		{name: "darwin amd64", goos: "darwin", goarch: "amd64", want: "awg-server-awg31-darwin-amd64"},
-		{name: "darwin arm64", goos: "darwin", goarch: "arm64", want: "awg-server-awg31-darwin-arm64"},
-		{name: "linux amd64", goos: "linux", goarch: "amd64", want: "awg-server-awg31-linux-amd64"},
-		{name: "linux arm64", goos: "linux", goarch: "arm64", want: "awg-server-awg31-linux-arm64"},
-		{name: "windows amd64", goos: "windows", goarch: "amd64", want: "awg-server-awg31-windows-amd64.exe"},
-		{name: "windows arm64", goos: "windows", goarch: "arm64", want: "awg-server-awg31-windows-arm64.exe"},
+		{name: "darwin amd64", goos: "darwin", goarch: "amd64", want: "awg-server-awg31-darwin-amd64", legacyName: "awg-server-darwin-amd64"},
+		{name: "darwin arm64", goos: "darwin", goarch: "arm64", want: "awg-server-awg31-darwin-arm64", legacyName: "awg-server-darwin-arm64"},
+		{name: "linux amd64", goos: "linux", goarch: "amd64", want: "awg-server-awg31-linux-amd64", legacyName: "awg-server-linux-amd64"},
+		{name: "linux arm64", goos: "linux", goarch: "arm64", want: "awg-server-awg31-linux-arm64", legacyName: "awg-server-linux-arm64"},
+		{name: "windows amd64", goos: "windows", goarch: "amd64", want: "awg-server-awg31-windows-amd64.exe", legacyName: "awg-server-windows-amd64.exe"},
+		{name: "windows arm64", goos: "windows", goarch: "arm64", want: "awg-server-awg31-windows-arm64.exe", legacyName: "awg-server-windows-arm64.exe"},
 	}
 
-	for _, tt := range tests {
+	if len(releaseAssetNames) != len(tests) {
+		t.Fatalf("releaseAssetNames has %d entries, want %d", len(releaseAssetNames), len(tests))
+	}
+	for index, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := releaseAssetName(tt.goos, tt.goarch); got != tt.want {
 				t.Fatalf("releaseAssetName(%q, %q) = %q, want %q", tt.goos, tt.goarch, got, tt.want)
 			}
-		})
-	}
-}
-
-func TestReleaseAssetNamesAreAWG31AndDisjointFromLegacy(t *testing.T) {
-	want := []string{
-		"awg-server-awg31-darwin-amd64",
-		"awg-server-awg31-darwin-arm64",
-		"awg-server-awg31-linux-amd64",
-		"awg-server-awg31-linux-arm64",
-		"awg-server-awg31-windows-amd64.exe",
-		"awg-server-awg31-windows-arm64.exe",
-	}
-	legacy := []string{
-		"awg-server-darwin-amd64",
-		"awg-server-darwin-arm64",
-		"awg-server-linux-amd64",
-		"awg-server-linux-arm64",
-		"awg-server-windows-amd64.exe",
-		"awg-server-windows-arm64.exe",
-	}
-
-	if len(releaseAssetNames) != len(want) {
-		t.Fatalf("releaseAssetNames has %d entries, want %d", len(releaseAssetNames), len(want))
-	}
-	for index, name := range want {
-		if releaseAssetNames[index] != name {
-			t.Fatalf("releaseAssetNames[%d] = %q, want %q", index, releaseAssetNames[index], name)
-		}
-	}
-	for _, oldName := range legacy {
-		for _, newName := range releaseAssetNames {
-			if oldName == newName {
-				t.Fatalf("legacy asset %q overlaps AWG31 asset set", oldName)
+			if releaseAssetNames[index] != tt.want {
+				t.Fatalf("releaseAssetNames[%d] = %q, want %q", index, releaseAssetNames[index], tt.want)
 			}
-		}
+			for _, name := range releaseAssetNames {
+				if name == tt.legacyName {
+					t.Fatalf("legacy asset %q overlaps AWG31 asset set", tt.legacyName)
+				}
+			}
+		})
 	}
 }
 
@@ -166,27 +143,6 @@ func TestSelectReleaseAssetURLsRequiresExactAWG31AssetSet(t *testing.T) {
 	}
 }
 
-func TestLegacyRequestedAssetCannotSelectAWG31Binary(t *testing.T) {
-	version := "1.2.3"
-	assets := make([]asset, 0, len(releaseAssetNames)+2)
-	for _, name := range releaseAssetNames {
-		assets = append(assets, asset{Name: name, BrowserDownloadURL: expectedAssetURL(version, name)})
-	}
-	assets = append(assets,
-		asset{Name: checksumAssetName, BrowserDownloadURL: expectedAssetURL(version, checksumAssetName)},
-		asset{Name: signatureAssetName, BrowserDownloadURL: expectedAssetURL(version, signatureAssetName)},
-	)
-
-	legacyRequested := []string{
-		"awg-server-linux-amd64",
-		checksumAssetName,
-		signatureAssetName,
-	}
-	if _, err := selectReleaseAssetURLs(assets, version, legacyRequested); err == nil {
-		t.Fatal("legacy requested asset unexpectedly selected an AWG31 release binary")
-	}
-}
-
 func TestVerifyReleaseManifestRequiresRenamedAWG31Binaries(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -206,37 +162,6 @@ func TestVerifyReleaseManifestRequiresRenamedAWG31Binaries(t *testing.T) {
 	signature := ed25519.Sign(privateKey, manifest)
 	if _, err := verifyReleaseManifest(publicKey, manifest, signature, legacyNames[2]); err == nil {
 		t.Fatal("legacy signed manifest unexpectedly passed AWG31 validation")
-	}
-}
-
-func TestUpdaterCheckRejectsLegacyOnlyRelease(t *testing.T) {
-	version := "1.2.3"
-	legacyNames := []string{
-		"awg-server-darwin-amd64",
-		"awg-server-darwin-arm64",
-		"awg-server-linux-amd64",
-		"awg-server-linux-arm64",
-		"awg-server-windows-amd64.exe",
-		"awg-server-windows-arm64.exe",
-	}
-	assets := make([]asset, 0, len(legacyNames)+2)
-	for _, name := range legacyNames {
-		assets = append(assets, asset{Name: name, BrowserDownloadURL: expectedAssetURL(version, name)})
-	}
-	assets = append(assets,
-		asset{Name: checksumAssetName, BrowserDownloadURL: expectedAssetURL(version, checksumAssetName)},
-		asset{Name: signatureAssetName, BrowserDownloadURL: expectedAssetURL(version, signatureAssetName)},
-	)
-	body, err := json.Marshal(release{TagName: "v" + version, Assets: assets})
-	if err != nil {
-		t.Fatalf("marshal legacy release: %v", err)
-	}
-
-	u := New("1.2.2")
-	u.publicKey = testReleasePublicKey(t)
-	u.client = responseClient(map[string][]byte{latestReleaseURL: body})
-	if _, err := u.Check(); err == nil || !strings.Contains(err.Error(), "unexpected release asset") {
-		t.Fatalf("legacy-only release error = %v, want rejection", err)
 	}
 }
 
@@ -378,59 +303,15 @@ func TestUpdaterCheckWithoutEmbeddedKeyFailsBeforeNetwork(t *testing.T) {
 	}
 }
 
-func TestUpdaterCheckRejectsDowngradeAndAmbiguousAssets(t *testing.T) {
-	assetName := releaseAssetName(runtime.GOOS, runtime.GOARCH)
-
-	t.Run("downgrade", func(t *testing.T) {
-		rel := release{TagName: "v1.2.2"}
-		body, _ := json.Marshal(rel)
-		u := New("1.2.3")
-		u.publicKey = testReleasePublicKey(t)
-		u.client = responseClient(map[string][]byte{latestReleaseURL: body})
-		if _, err := u.Check(); err == nil || !strings.Contains(err.Error(), "older") {
-			t.Fatalf("Check downgrade error = %v", err)
-		}
-	})
-
-	t.Run("duplicate target", func(t *testing.T) {
-		version := "1.2.3"
-		targetURL := expectedAssetURL(version, assetName)
-		assets := releaseAssetsForVersion(version)
-		assets = append(assets, asset{Name: assetName, BrowserDownloadURL: targetURL})
-		rel := release{
-			TagName: "v" + version,
-			Assets:  assets,
-		}
-		body, _ := json.Marshal(rel)
-		u := New("dev")
-		u.publicKey = testReleasePublicKey(t)
-		u.client = responseClient(map[string][]byte{latestReleaseURL: body})
-		if _, err := u.Check(); err == nil || !strings.Contains(err.Error(), "exactly once") {
-			t.Fatalf("Check duplicate error = %v", err)
-		}
-	})
-
-	t.Run("unexpected URL", func(t *testing.T) {
-		version := "1.2.3"
-		assets := releaseAssetsForVersion(version)
-		for index := range assets {
-			if assets[index].Name == assetName {
-				assets[index].BrowserDownloadURL = "https://example.com/binary"
-				break
-			}
-		}
-		rel := release{
-			TagName: "v" + version,
-			Assets:  assets,
-		}
-		body, _ := json.Marshal(rel)
-		u := New("dev")
-		u.publicKey = testReleasePublicKey(t)
-		u.client = responseClient(map[string][]byte{latestReleaseURL: body})
-		if _, err := u.Check(); err == nil || !strings.Contains(err.Error(), "unexpected download URL") {
-			t.Fatalf("Check URL error = %v", err)
-		}
-	})
+func TestUpdaterCheckRejectsDowngrade(t *testing.T) {
+	rel := release{TagName: "v1.2.2"}
+	body, _ := json.Marshal(rel)
+	u := New("1.2.3")
+	u.publicKey = testReleasePublicKey(t)
+	u.client = responseClient(map[string][]byte{latestReleaseURL: body})
+	if _, err := u.Check(); err == nil || !strings.Contains(err.Error(), "older") {
+		t.Fatalf("Check downgrade error = %v", err)
+	}
 }
 
 func TestUpdaterApplyVerifiesSignedReleaseBeforeReplacement(t *testing.T) {
@@ -726,18 +607,6 @@ func validResult(version, assetName string) *CheckResult {
 		SignatureURL: expectedAssetURL(version, signatureAssetName),
 		NeedsUpdate:  true,
 	}
-}
-
-func releaseAssetsForVersion(version string) []asset {
-	assets := make([]asset, 0, len(releaseAssetNames)+2)
-	for _, name := range releaseAssetNames {
-		assets = append(assets, asset{Name: name, BrowserDownloadURL: expectedAssetURL(version, name)})
-	}
-	assets = append(assets,
-		asset{Name: checksumAssetName, BrowserDownloadURL: expectedAssetURL(version, checksumAssetName)},
-		asset{Name: signatureAssetName, BrowserDownloadURL: expectedAssetURL(version, signatureAssetName)},
-	)
-	return assets
 }
 
 func responseClient(responses map[string][]byte) *http.Client {

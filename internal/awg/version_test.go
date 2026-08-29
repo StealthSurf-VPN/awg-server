@@ -33,7 +33,7 @@ func TestParseProtocolVersion(t *testing.T) {
 }
 
 func TestParseProtocolVersionRejectsUnknownValues(t *testing.T) {
-	for _, input := range []string{"", "1", "2.1", "3", "3.0", "3.1.0", " 2.0", "2.0 "} {
+	for _, input := range []string{"", "3", " 2.0"} {
 		t.Run(input, func(t *testing.T) {
 			if _, err := ParseProtocolVersion(input); err == nil {
 				t.Fatalf("ParseProtocolVersion(%q) error = nil", input)

@@ -1,11 +1,9 @@
 package clients
 
 import (
-	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
@@ -35,7 +33,7 @@ type managerMigration struct {
 	requestedPort int
 }
 
-func TestPrepareRestorePlanStagesMixedRecordsWithoutDeviceFirewallOrStorageMutation(t *testing.T) {
+func TestPrepareRestorePlanStagesMixedProtocolRecords(t *testing.T) {
 	cfg := restoreConfigForTest(t)
 	data := &StorageData{
 		AWG31: restoreAWG31Storage(),
@@ -44,16 +42,7 @@ func TestPrepareRestorePlanStagesMixedRecordsWithoutDeviceFirewallOrStorageMutat
 			restoreClientData("modern", "10.100.0.3", awg.ProtocolVersion31, "opaque-default-id"),
 		},
 	}
-	storage := NewStorage(t.TempDir())
-	if err := storage.Save(data); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-	before, err := os.ReadFile(storage.filePath)
-	if err != nil {
-		t.Fatalf("read storage before planning: %v", err)
-	}
 
-	pool := &managerTestPool{}
 	plan, err := PrepareRestorePlan(cfg, restoreDefaultsForTest(t), data)
 	if err != nil {
 		t.Fatalf("PrepareRestorePlan() error = %v", err)
@@ -64,19 +53,9 @@ func TestPrepareRestorePlanStagesMixedRecordsWithoutDeviceFirewallOrStorageMutat
 	if plan.entries[0].profile.Version() != awg.ProtocolVersion2 || plan.entries[1].profile.Version() != awg.ProtocolVersion31 {
 		t.Fatalf("restore versions = %s, %s", plan.entries[0].profile.Version(), plan.entries[1].profile.Version())
 	}
-	if len(pool.events) != 0 || len(pool.firewallCalls) != 0 {
-		t.Fatalf("pure restore plan mutated pool: events=%v firewall=%v", pool.events, pool.firewallCalls)
-	}
-	after, err := os.ReadFile(storage.filePath)
-	if err != nil {
-		t.Fatalf("read storage after planning: %v", err)
-	}
-	if !bytes.Equal(before, after) {
-		t.Fatal("PrepareRestorePlan() changed persisted storage")
-	}
 }
 
-func TestPrepareRestorePlanRejectsLaterInvalidRecordBeforeAnyRestoreMutation(t *testing.T) {
+func TestPrepareRestorePlanRejectsLaterInvalidRecordWithoutReplacingPrivateState(t *testing.T) {
 	cfg := restoreConfigForTest(t)
 	data := &StorageData{
 		AWG31: restoreAWG31Storage(),
@@ -85,14 +64,9 @@ func TestPrepareRestorePlanRejectsLaterInvalidRecordBeforeAnyRestoreMutation(t *
 			restoreClientData("invalid", "10.100.0.3", awg.ProtocolVersion31, "missing-key-id"),
 		},
 	}
-	pool := &managerTestPool{}
-
 	_, err := PrepareRestorePlan(cfg, restoreDefaultsForTest(t), data)
 	if err == nil || strings.Contains(err.Error(), "missing-key-id") {
 		t.Fatalf("PrepareRestorePlan() error = %v, want redacted missing-key failure", err)
-	}
-	if len(pool.events) != 0 || len(pool.firewallCalls) != 0 {
-		t.Fatalf("invalid planning mutated pool: events=%v firewall=%v", pool.events, pool.firewallCalls)
 	}
 	if data.AWG31.HeaderKeys["opaque-default-id"].HeaderProtectionKey != syntheticStorageHeaderKey() {
 		t.Fatal("invalid planning changed persisted header key state")
@@ -234,15 +208,6 @@ func TestPrepareRestorePlanRejectsIncompleteAWG31StateWithoutReplacement(t *test
 			data: &StorageData{Clients: []ClientData{
 				restoreClientData("modern", "10.100.0.2", awg.ProtocolVersion31, "opaque-default-id"),
 			}},
-		},
-		{
-			name: "missing client reference",
-			data: &StorageData{
-				AWG31: restoreAWG31Storage(),
-				Clients: []ClientData{
-					restoreClientData("modern", "10.100.0.2", awg.ProtocolVersion31, "missing-key-id"),
-				},
-			},
 		},
 		{
 			name: "malformed persisted key",

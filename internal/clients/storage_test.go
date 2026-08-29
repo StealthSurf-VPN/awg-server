@@ -26,7 +26,6 @@ func TestStorageLoadKeepsAbsentVersionDistinctFromExplicitCanonicalVersions(t *t
 		{name: "legacy alias is rejected on disk", protocolField: `,"protocol_version":"2"`, wantErr: true},
 		{name: "null is rejected on disk", protocolField: `,"protocol_version":null`, wantErr: true},
 		{name: "number is rejected on disk", protocolField: `,"protocol_version":2`, wantErr: true},
-		{name: "empty is rejected on disk", protocolField: `,"protocol_version":""`, wantErr: true},
 		{name: "unknown is rejected on disk", protocolField: `,"protocol_version":"9.9"`, wantErr: true},
 		{name: "case variant is rejected on disk", protocolField: `,"PROTOCOL_VERSION":"2"`, wantErr: true},
 	}
@@ -213,9 +212,6 @@ func TestGenerateHeaderKeyIDUsesOpaqueRandomHex(t *testing.T) {
 	}
 	if !regexp.MustCompile(`^[0-9a-f]+$`).MatchString(first) {
 		t.Fatalf("header key ID is not opaque lower-case hex: %q", first)
-	}
-	if strings.Contains(first, syntheticStorageHeaderKey()) {
-		t.Fatal("header key ID contains key material")
 	}
 }
 

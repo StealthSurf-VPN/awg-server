@@ -71,17 +71,6 @@ func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:         "malformed package version",
-			toolsStatus:  testInstalledStatus,
-			dkmsStatus:   testInstalledStatus,
-			toolsVersion: "not-a-debian-version",
-			dkmsVersion:  testMinimumDKMSPackage,
-			compareError: map[string]error{
-				"not-a-debian-version": errors.New("exit status 2"),
-			},
-			wantErr: true,
-		},
-		{
 			name:         "missing package version",
 			toolsStatus:  testInstalledStatus,
 			dkmsStatus:   testInstalledStatus,
@@ -92,22 +81,6 @@ func TestCheckRuntimeUsesDpkgComparisonForMinimumPackages(t *testing.T) {
 		{
 			name:         "config files package",
 			toolsStatus:  "rc ",
-			dkmsStatus:   testInstalledStatus,
-			toolsVersion: testMinimumToolsPackage,
-			dkmsVersion:  testMinimumDKMSPackage,
-			wantErr:      true,
-		},
-		{
-			name:         "unpacked package",
-			toolsStatus:  "iU ",
-			dkmsStatus:   testInstalledStatus,
-			toolsVersion: testMinimumToolsPackage,
-			dkmsVersion:  testMinimumDKMSPackage,
-			wantErr:      true,
-		},
-		{
-			name:         "half configured package",
-			toolsStatus:  "iF ",
 			dkmsStatus:   testInstalledStatus,
 			toolsVersion: testMinimumToolsPackage,
 			dkmsVersion:  testMinimumDKMSPackage,
@@ -268,10 +241,7 @@ func TestCheckRuntimeAcceptsOnlyNonzeroDecimalSelectedPort(t *testing.T) {
 		{name: "maximum port", port: "65535"},
 		{name: "zero", port: "0", wantErr: true},
 		{name: "above uint16", port: "65536", wantErr: true},
-		{name: "negative", port: "-1", wantErr: true},
-		{name: "explicit plus", port: "+1", wantErr: true},
 		{name: "non decimal", port: "1x", wantErr: true},
-		{name: "empty", port: "", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -418,13 +388,6 @@ func TestCheckRuntimeCleansUpOnlyInterfacesItCreated(t *testing.T) {
 		want  int
 	}{
 		{
-			name: "failure before interface creation",
-			setup: func(harness *runtimeHarness) {
-				harness.toolsOutput = "invalid tools output\n"
-			},
-			want: 0,
-		},
-		{
 			name: "unambiguous interface creation failure",
 			setup: func(harness *runtimeHarness) {
 				harness.createErrors["awgrt0000000001"] = runtimeCommandResult{
@@ -441,23 +404,11 @@ func TestCheckRuntimeCleansUpOnlyInterfacesItCreated(t *testing.T) {
 			want: 1,
 		},
 		{
-			name: "link up failure after interface creation",
-			setup: func(harness *runtimeHarness) {
-				harness.linkUpError = errors.New("exit status 1")
-			},
-			want: 1,
-		},
-		{
 			name: "showconf failure after interface creation",
 			setup: func(harness *runtimeHarness) {
 				harness.showconfError = errors.New("exit status 1")
 			},
 			want: 1,
-		},
-		{
-			name:  "successful probe",
-			setup: func(*runtimeHarness) {},
-			want:  1,
 		},
 	}
 

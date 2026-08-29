@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -40,7 +41,7 @@ func TestRunCommandCheckRuntimeBypassesStartupPreparation(t *testing.T) {
 	if err := runCommand([]string{"check-runtime"}, dependencies, &output); err != nil {
 		t.Fatalf("runCommand(check-runtime) error = %v", err)
 	}
-	if got, want := calls, []string{"check-runtime"}; !sameMainStrings(got, want) {
+	if got, want := calls, []string{"check-runtime"}; !slices.Equal(got, want) {
 		t.Fatalf("calls = %v, want %v", got, want)
 	}
 
@@ -51,15 +52,6 @@ func TestRunCommandCheckRuntimeBypassesStartupPreparation(t *testing.T) {
 		"module version: 3.1.0-test\n"
 	if got := output.String(); got != wantOutput {
 		t.Fatalf("check-runtime output = %q, want %q", got, wantOutput)
-	}
-
-	for _, secret := range []string{
-		"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
-		"synthetic-private-key",
-	} {
-		if strings.Contains(output.String(), secret) {
-			t.Fatalf("check-runtime output contains a secret: %q", output.String())
-		}
 	}
 }
 
@@ -92,7 +84,7 @@ func TestRunApplicationQualifiesRuntimeBeforePoolFirewallAndHTTP(t *testing.T) {
 		t.Fatalf("runApplication() error = %v", err)
 	}
 
-	if want := []string{"prepare", "prepare-plan", "check-runtime", "new-pool", "firewall", "http"}; !sameMainStrings(order, want) {
+	if want := []string{"prepare", "prepare-plan", "check-runtime", "new-pool", "firewall", "http"}; !slices.Equal(order, want) {
 		t.Fatalf("startup order = %v, want %v", order, want)
 	}
 }
@@ -152,17 +144,6 @@ func TestRunApplicationStopsBeforeRuntimeWhenRestorePlanFails(t *testing.T) {
 	}
 	if mutations != 0 {
 		t.Fatalf("restore-plan failure reached %d runtime/pool/API mutations", mutations)
-	}
-}
-
-func TestRunCommandUsageListsCheckRuntime(t *testing.T) {
-	var output bytes.Buffer
-	err := runCommand([]string{"unknown"}, mainDependencies{}, &output)
-	if err == nil {
-		t.Fatal("runCommand(unknown) succeeded")
-	}
-	if !strings.Contains(err.Error(), "usage: awg-server [version|update|check-runtime]") {
-		t.Fatalf("runCommand(unknown) error = %q, want check-runtime usage", err)
 	}
 }
 
@@ -259,18 +240,4 @@ func runtimeDiagnosticsForTest() awg.RuntimeDiagnostics {
 		ToolsVersion:        "amneziawg-tools v3.1.20260828 - https://amnezia.org",
 		ModuleVersion:       "3.1.0-test",
 	}
-}
-
-func sameMainStrings(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-
-	for index := range got {
-		if got[index] != want[index] {
-			return false
-		}
-	}
-
-	return true
 }

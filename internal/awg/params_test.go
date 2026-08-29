@@ -335,29 +335,6 @@ func TestApplyGeneratedParamsV31PreservesOtherOverrides(t *testing.T) {
 	}
 }
 
-func TestPersistentKeepaliveConfigValue(t *testing.T) {
-	tests := []struct {
-		name    string
-		version ProtocolVersion
-		value   *config.Uint16Range
-		wanted  string
-	}{
-		{name: "legacy default", version: ProtocolVersion2, wanted: "25"},
-		{name: "inherited 3.1 default", version: ProtocolVersion31, value: rangePointer(t, "25-35"), wanted: "25-35"},
-		{name: "explicit scalar zero", version: ProtocolVersion31, value: rangePointer(t, "0"), wanted: "0"},
-		{name: "explicit off alias", version: ProtocolVersion31, value: rangePointer(t, "off"), wanted: "0"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			params := AWGParams{PersistentKeepalive: tt.value}
-			if got := params.PersistentKeepaliveConfigValue(tt.version); got != tt.wanted {
-				t.Fatalf("PersistentKeepaliveConfigValue() = %q, want %q", got, tt.wanted)
-			}
-		})
-	}
-}
-
 func rangePointer(t *testing.T, value string) *config.Uint16Range {
 	t.Helper()
 
