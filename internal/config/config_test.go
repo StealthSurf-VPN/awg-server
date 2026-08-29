@@ -85,7 +85,7 @@ func TestLoadAWG31EnvironmentOverridesAndNormalizesProtocolAlias(t *testing.T) {
 		{name: "rekey timeout", value: cfg.AWG31RekeyTimeout, want: "4-5"},
 		{name: "reject after time", value: cfg.AWG31RejectAfterTime, want: "6"},
 		{name: "keepalive timeout", value: cfg.AWG31KeepaliveTimeout, want: "7-8"},
-		{name: "max handshake attempts", value: cfg.AWG31MaxHandshakeAttempts, want: "off"},
+		{name: "max handshake attempts", value: cfg.AWG31MaxHandshakeAttempts, want: "0"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.value.String(); got != tt.want {

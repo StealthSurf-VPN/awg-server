@@ -97,6 +97,7 @@ func Base64ToHeaderProtectionKey(encoded string) (HeaderProtectionKey, error) {
 
 func newProfile(version ProtocolVersion, params AWGParams, headerProtectionKey HeaderProtectionKey, hasHeaderProtectionKey bool) Profile {
 	clonedParams := cloneAWGParams(&params)
+	canonicalizeUnsignedRanges(clonedParams)
 
 	profile := Profile{
 		version:                version,

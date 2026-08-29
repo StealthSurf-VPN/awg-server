@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stealthsurf-vpn/awg-server/internal/config"
 )
 
 func TestLegacyProfileRejectsAWG31State(t *testing.T) {
@@ -151,6 +153,69 @@ func TestProfileKeyCanonicalizesHeaderRanges(t *testing.T) {
 	}
 	if other.Key() != profile.Key() {
 		t.Fatal("ProfileKey changed for equivalent header range values")
+	}
+}
+
+func TestProfileKeyCanonicalizesUint16RangeSyntax(t *testing.T) {
+	setters := []struct {
+		name string
+		set  func(*AWGParams, *config.Uint16Range)
+	}{
+		{name: "content padding addition", set: func(params *AWGParams, value *config.Uint16Range) { params.ContentPaddingAddition = value }},
+		{name: "rekey after time", set: func(params *AWGParams, value *config.Uint16Range) { params.RekeyAfterTime = value }},
+		{name: "rekey timeout", set: func(params *AWGParams, value *config.Uint16Range) { params.RekeyTimeout = value }},
+		{name: "reject after time", set: func(params *AWGParams, value *config.Uint16Range) { params.RejectAfterTime = value }},
+		{name: "keepalive timeout", set: func(params *AWGParams, value *config.Uint16Range) { params.KeepaliveTimeout = value }},
+		{name: "max handshake attempts", set: func(params *AWGParams, value *config.Uint16Range) { params.MaxHandshakeAttempts = value }},
+	}
+	headerKey := syntheticHeaderProtectionKey()
+
+	for _, setter := range setters {
+		t.Run(setter.name, func(t *testing.T) {
+			for _, aliases := range []struct {
+				name   string
+				first  string
+				second string
+			}{
+				{name: "equal range", first: "25", second: "25-25"},
+				{name: "off", first: "0", second: "off"},
+			} {
+				t.Run(aliases.name, func(t *testing.T) {
+					firstParams := validAWG31ProfileParams(t)
+					setter.set(&firstParams, rangePointer(t, aliases.first))
+					secondParams := *cloneAWGParams(&firstParams)
+					setter.set(&secondParams, rangePointer(t, aliases.second))
+
+					first, err := NewAWG31Profile(firstParams, headerKey)
+					if err != nil {
+						t.Fatalf("NewAWG31Profile(first) error = %v", err)
+					}
+					second, err := NewAWG31Profile(secondParams, headerKey)
+					if err != nil {
+						t.Fatalf("NewAWG31Profile(second) error = %v", err)
+					}
+					if first.Key() != second.Key() {
+						t.Fatal("ProfileKey differs for equivalent unsigned-16 ranges")
+					}
+				})
+			}
+		})
+	}
+
+	firstParams := validAWG31ProfileParams(t)
+	firstParams.ContentPaddingAddition = rangePointer(t, "25")
+	secondParams := *cloneAWGParams(&firstParams)
+	secondParams.ContentPaddingAddition = rangePointer(t, "25-26")
+	first, err := NewAWG31Profile(firstParams, headerKey)
+	if err != nil {
+		t.Fatalf("NewAWG31Profile(first distinct) error = %v", err)
+	}
+	second, err := NewAWG31Profile(secondParams, headerKey)
+	if err != nil {
+		t.Fatalf("NewAWG31Profile(second distinct) error = %v", err)
+	}
+	if first.Key() == second.Key() {
+		t.Fatal("ProfileKey is equal for different unsigned-16 ranges")
 	}
 }
 

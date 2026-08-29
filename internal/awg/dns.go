@@ -187,6 +187,7 @@ func NormalizeOverridesForVersion(version ProtocolVersion, params *AWGParams) (*
 	if err := ValidateOverridesForVersion(version, normalized); err != nil {
 		return nil, err
 	}
+	canonicalizeUnsignedRanges(normalized)
 
 	normalized.dnsSet = false
 	normalized.dnsModeSet = false
@@ -197,6 +198,25 @@ func NormalizeOverridesForVersion(version ProtocolVersion, params *AWGParams) (*
 	}
 
 	return normalized, nil
+}
+
+func canonicalizeUnsignedRanges(params *AWGParams) {
+	for _, value := range []**config.Uint16Range{
+		&params.PersistentKeepalive,
+		&params.ContentPaddingAddition,
+		&params.RekeyAfterTime,
+		&params.RekeyTimeout,
+		&params.RejectAfterTime,
+		&params.KeepaliveTimeout,
+		&params.MaxHandshakeAttempts,
+	} {
+		if *value == nil {
+			continue
+		}
+
+		canonical := (*value).Canonical()
+		*value = &canonical
+	}
 }
 
 func cloneUint16Range(value *config.Uint16Range) *config.Uint16Range {

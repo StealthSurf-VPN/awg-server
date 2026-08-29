@@ -53,12 +53,25 @@ func ParseUint16Range(value string) (Uint16Range, error) {
 	if start > end {
 		return Uint16Range{}, fmt.Errorf("parse unsigned 16-bit range: start must not exceed end")
 	}
-
 	return Uint16Range{kind: uint16RangeSpan, start: start, end: end}, nil
 }
 
 func (value Uint16Range) IsScalar() bool {
+	// Keep the input form distinct until version-specific validation rejects
+	// range syntax and the off alias for legacy protocol clients.
 	return value.kind == uint16RangeScalar
+}
+
+func (value Uint16Range) IsCanonical() bool {
+	return value.kind == uint16RangeScalar || value.kind == uint16RangeSpan && value.start != value.end
+}
+
+func (value Uint16Range) Canonical() Uint16Range {
+	if value.IsCanonical() {
+		return value
+	}
+
+	return Uint16Range{kind: uint16RangeScalar, start: value.start, end: value.start}
 }
 
 func (value Uint16Range) Scalar() (uint16, bool) {
@@ -70,22 +83,23 @@ func (value Uint16Range) Scalar() (uint16, bool) {
 }
 
 func (value Uint16Range) String() string {
-	switch value.kind {
-	case uint16RangeOff:
-		return "off"
+	canonical := value.Canonical()
+
+	switch canonical.kind {
 	case uint16RangeSpan:
-		return fmt.Sprintf("%d-%d", value.start, value.end)
+		return fmt.Sprintf("%d-%d", canonical.start, canonical.end)
 	default:
-		return strconv.FormatUint(uint64(value.start), 10)
+		return strconv.FormatUint(uint64(canonical.start), 10)
 	}
 }
 
 func (value Uint16Range) MarshalJSON() ([]byte, error) {
-	if value.IsScalar() {
-		return []byte(value.String()), nil
+	canonical := value.Canonical()
+	if canonical.IsScalar() {
+		return []byte(canonical.String()), nil
 	}
 
-	return json.Marshal(value.String())
+	return json.Marshal(canonical.String())
 }
 
 func (value *Uint16Range) UnmarshalJSON(data []byte) error {

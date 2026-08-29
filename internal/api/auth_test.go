@@ -228,7 +228,7 @@ func TestAPIProtocolVersionErrorDoesNotReflectSecretLikeInput(t *testing.T) {
 
 func TestAPIAWG31OverridesResolveAgainstTargetProtocol(t *testing.T) {
 	t.Run("POST and omitted-version PATCH accept AWG 3.1 ranges and toggles", func(t *testing.T) {
-		handler, _, _ := newAuthorizedAPISmoke(t)
+		handler, _, _, storage := newAuthorizedAPISmokeWithStorage(t)
 
 		created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{
 			"id":"v31",
@@ -251,12 +251,36 @@ func TestAPIAWG31OverridesResolveAgainstTargetProtocol(t *testing.T) {
 		updated := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/v31", `{
 			"awg_params":{
 				"persistent_keepalive":"off",
-				"content_padding_addition":"11-12",
+				"content_padding_addition":"off",
 				"random_trailers":"on"
 			}
 		}`)
 		assertAPIStatus(t, updated, http.StatusOK)
 		assertPublicClientPayload(t, updated.Body.Bytes(), "3.1")
+
+		var response struct {
+			AWGParams map[string]json.RawMessage `json:"awg_params"`
+		}
+		decodeAPIResponse(t, updated, &response)
+		for _, field := range []string{"persistent_keepalive", "content_padding_addition"} {
+			if got := string(response.AWGParams[field]); got != "0" {
+				t.Fatalf("%s response = %s, want canonical 0", field, got)
+			}
+		}
+
+		persisted, err := storage.Load()
+		if err != nil {
+			t.Fatalf("Load() after canonical PATCH error = %v", err)
+		}
+		for field, value := range map[string]*config.Uint16Range{
+			"persistent_keepalive":     persisted.Clients[0].AWGParams.PersistentKeepalive,
+			"content_padding_addition": persisted.Clients[0].AWGParams.ContentPaddingAddition,
+		} {
+			scalar, ok := value.Scalar()
+			if !ok || scalar != 0 {
+				t.Fatalf("persisted %s = (%d, %t), want canonical (0, true)", field, scalar, ok)
+			}
+		}
 	})
 
 	t.Run("legacy rejects AWG 3.1-only values before mutation", func(t *testing.T) {
@@ -281,6 +305,32 @@ func TestAPIAWG31OverridesResolveAgainstTargetProtocol(t *testing.T) {
 			t.Fatalf("invalid legacy values created clients: %s", listed.Body.String())
 		}
 	})
+}
+
+func TestAPIOffAliasCanMigrateToLegacyWithoutRestart(t *testing.T) {
+	handler, _, pool := newAuthorizedAPISmoke(t)
+
+	created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{
+		"id":"canonical-migration",
+		"protocol_version":"3.1",
+		"awg_params":{"persistent_keepalive":"off"}
+	}`)
+	assertAPIStatus(t, created, http.StatusCreated)
+
+	updated := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/canonical-migration", `{"protocol_version":"2.0"}`)
+	assertAPIStatus(t, updated, http.StatusOK)
+	assertPublicClientPayload(t, updated.Body.Bytes(), "2.0")
+	if pool.migrations != 1 {
+		t.Fatalf("version migrations = %d, want 1", pool.migrations)
+	}
+
+	var response struct {
+		AWGParams map[string]json.RawMessage `json:"awg_params"`
+	}
+	decodeAPIResponse(t, updated, &response)
+	if got := string(response.AWGParams["persistent_keepalive"]); got != "0" {
+		t.Fatalf("persistent_keepalive response = %s, want canonical 0", got)
+	}
 }
 
 func TestAPIRejectsExplicitNestedAWGParamsNullBeforeMutation(t *testing.T) {

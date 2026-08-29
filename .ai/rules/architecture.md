@@ -55,7 +55,9 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - `DNSMode` / `DNSServers` — explicit client DNS selection: `default` inherits `AWG_DNS`, `custom` renders a normalized IPv4 list, and `system` omits the DNS line. Presence validation follows case-insensitive JSON field matching; all DNS fields stay outside CPS and interface grouping.
 - `PersistentKeepalive` — optional pointer-valued client `[Peer]` override.
   2.0 accepts a scalar 0-65535 (nil inherits 25); 3.1 accepts a strict
-  unsigned-16 scalar/range/`off`; it remains outside server profile identity.
+  unsigned-16 scalar/range plus `off` as an input alias for `0`; it remains
+  outside server profile identity. Output and persistence use canonical
+  numeric `0` for `off` and numeric `N` for an equal range `N-N`.
 - `Key()` remains a legacy H/S helper and is **not** pool identity. Use the
   immutable `Profile` / opaque `ProfileKey`, which includes protocol version,
   all server-applied J/H/S/3.1 fields, and private 3.1 header key while
@@ -87,6 +89,10 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - **ClientListenPort**: client-side `[Interface]` behavior; server does not reserve the port, pass it to `awg set`, or use it in `Endpoint`
 - **DNS**: client-side `[Interface]` behavior; server does not configure it on AWG interfaces
 - **PersistentKeepalive**: client-side `[Peer]` behavior; server does not set it on the peer
+- **Unsigned-16 canonicalization**: 3.1 accepts `off` as an input alias for
+  `0`; `off` and `0`, and `N-N` and `N`, render, persist, and hash identically.
+  Lexical form is retained through validation so 2.0 still rejects ranged and
+  `off` persistent keepalive input.
 
 Create and update operations validate raw overrides and the effective profile
 before key generation, IP allocation, peer migration, or persistence.

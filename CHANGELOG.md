@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protocol migration, canonical protocol metadata, and 3.1-by-default creates.
 - Added private persisted 3.1 header-protection-key state, version-aware
   profile grouping, response redaction, and fail-closed restore validation.
+- Canonicalized AWG 3.1 unsigned ranges so `off` is safely emitted as `0` and
+  semantically equal scalar/range inputs share one interface profile.
 - Added required AWG 3.1 package/runtime qualification and a transactional
   installer outage with an authenticated client-list gate and manual recovery
   boundary that remains stopped and disabled across reboot on failure when

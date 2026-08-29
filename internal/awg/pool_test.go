@@ -32,6 +32,41 @@ func TestPoolSharesOneInterfaceForSameProfile(t *testing.T) {
 	}
 }
 
+func TestPoolSharesOneInterfaceForEquivalentAWG31RangeSyntax(t *testing.T) {
+	operations := &poolTestOperations{}
+	pool := newPoolTestSubject(operations)
+	pool.cfg.MaxInterfaces = 1
+
+	firstParams := validAWG31ProfileParams(t)
+	firstParams.ContentPaddingAddition = rangePointer(t, "25")
+	secondParams := *cloneAWGParams(&firstParams)
+	secondParams.ContentPaddingAddition = rangePointer(t, "25-25")
+	headerKey := syntheticHeaderProtectionKey()
+
+	first, err := NewAWG31Profile(firstParams, headerKey)
+	if err != nil {
+		t.Fatalf("NewAWG31Profile(first) error = %v", err)
+	}
+	second, err := NewAWG31Profile(secondParams, headerKey)
+	if err != nil {
+		t.Fatalf("NewAWG31Profile(second) error = %v", err)
+	}
+
+	if err := pool.AddPeer(first, 0, poolTestKey(1), nil, "10.77.0.2"); err != nil {
+		t.Fatalf("AddPeer(first) error = %v", err)
+	}
+	if err := pool.AddPeer(second, 0, poolTestKey(2), nil, "10.77.0.3"); err != nil {
+		t.Fatalf("AddPeer(second) error = %v", err)
+	}
+
+	if len(pool.ifaces) != 1 {
+		t.Fatalf("interface count = %d, want 1", len(pool.ifaces))
+	}
+	if operations.addCalls != 2 {
+		t.Fatalf("peer add calls = %d, want 2", operations.addCalls)
+	}
+}
+
 func TestPoolSeparatesDifferentProfileKeys(t *testing.T) {
 	operations := &poolTestOperations{}
 	pool := newPoolTestSubject(operations)

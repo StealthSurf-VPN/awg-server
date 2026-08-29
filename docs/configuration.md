@@ -40,21 +40,23 @@ It remains a 2.0 value and is not reinterpreted as 3.1 state.
 | --- | --- | --- |
 | `AWG_DEFAULT_PROTOCOL_VERSION` | `3.1` | `2`, `2.0`, or `3.1`; `2` normalizes to `2.0`. |
 | `AWG31_MTU` | `1280` | Decimal integer 1280–1420. |
-| `AWG31_PERSISTENT_KEEPALIVE` | `25-35` | Unsigned 16-bit scalar, range, or `off`. |
-| `AWG31_CONTENT_PADDING_ADDITION` | `10-100` | Unsigned 16-bit scalar, range, or `off`. |
-| `AWG31_REKEY_AFTER_TIME` | `100-120` | Unsigned 16-bit scalar, range, or `off`. |
-| `AWG31_REKEY_TIMEOUT` | `3-7` | Unsigned 16-bit scalar, range, or `off`. |
-| `AWG31_REJECT_AFTER_TIME` | `150-180` | Unsigned 16-bit scalar, range, or `off`. |
-| `AWG31_KEEPALIVE_TIMEOUT` | `5-15` | Unsigned 16-bit scalar, range, or `off`. |
-| `AWG31_MAX_HANDSHAKE_ATTEMPTS` | `15-20` | Unsigned 16-bit scalar, range, or `off`. |
+| `AWG31_PERSISTENT_KEEPALIVE` | `25-35` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_CONTENT_PADDING_ADDITION` | `10-100` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_REKEY_AFTER_TIME` | `100-120` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_REKEY_TIMEOUT` | `3-7` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_REJECT_AFTER_TIME` | `150-180` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_KEEPALIVE_TIMEOUT` | `5-15` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_MAX_HANDSHAKE_ATTEMPTS` | `15-20` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
 | `AWG31_RANDOM_TRAILERS` | `on` | Exactly `on` or `off`. |
 | `AWG31_DISABLE_COOKIES` | `off` | Exactly `on` or `off`. |
 
-The unsigned-range grammar is ASCII decimal `N`, `N-M`, or `off`; it rejects
-whitespace, signed values, floats, exponent notation, empty values, reversed
-ranges, and overflow. API JSON accepts a scalar as a number or a string; a
-range or `off` is a string. Scalars marshal as numbers, while range/off marshal
-as strings.
+The unsigned-range grammar is ASCII decimal `N` or `N-M`; the compatibility
+input alias `off` means `0`. It rejects whitespace, signed values, floats,
+exponent notation, empty values, reversed ranges, and overflow. API JSON
+accepts a scalar as a number or string, while a range or `off` is a string.
+Canonical API and persisted output uses numeric `0` for `off`, numeric `N` for
+an equal range `N-N`, and a string for every other range. The same canonical
+values are passed to AWG tools and used for interface profile identity.
 
 `AWG_DEFAULT_PROTOCOL_VERSION` affects only new `POST /api/clients` requests
 and an omitted `protocol_version` generator query. It never changes an existing
@@ -152,8 +154,9 @@ startup fails closed; it never invents replacement state or falls back to 2.0.
 The restore plan validates all clients, profiles, ports, and interface limits
 before it changes a client-owned device. After a successful restore it writes
 one normalization save for pending state, explicit legacy versions, and other
-canonical values. A failed normalization save aborts API startup and closes the
-pool best-effort. A mutation stages garbage collection of unreferenced
+canonical values, including persisted `off` and equal-range aliases. A failed
+normalization save aborts API startup and closes the pool best-effort. A
+mutation stages garbage collection of unreferenced
 non-default 3.1 header keys in prospective state before Save; the new key map
 becomes authoritative only after a successful Save. Default and still-referenced
 keys remain.

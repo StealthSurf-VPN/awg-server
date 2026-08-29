@@ -119,6 +119,41 @@ func TestAWGParamsV31WireRepresentations(t *testing.T) {
 	}
 }
 
+func TestAWGParamsCanonicalizesUnsignedRangeWireValues(t *testing.T) {
+	params := AWGParams{
+		ContentPaddingAddition: rangePointer(t, "off"),
+		RekeyAfterTime:         rangePointer(t, "25-25"),
+		RekeyTimeout:           rangePointer(t, "off"),
+		RejectAfterTime:        rangePointer(t, "25-25"),
+		KeepaliveTimeout:       rangePointer(t, "off"),
+		MaxHandshakeAttempts:   rangePointer(t, "25-25"),
+	}
+
+	wantArgs := []string{
+		"s3", "0", "s4", "0",
+		"content-padding-addition", "0",
+		"rekey-after-time", "25",
+		"rekey-timeout", "0",
+		"reject-after-time", "25",
+		"keepalive-timeout", "0",
+		"max-handshake-attempts", "25",
+	}
+	if got := params.CLIArgs(); !reflect.DeepEqual(got, wantArgs) {
+		t.Fatalf("CLIArgs() = %v, want %v", got, wantArgs)
+	}
+
+	wantLines := "\nS3 = 0\nS4 = 0" +
+		"\nContentPaddingAddition = 0" +
+		"\nRekeyAfterTime = 25" +
+		"\nRekeyTimeout = 0" +
+		"\nRejectAfterTime = 25" +
+		"\nKeepaliveTimeout = 0" +
+		"\nMaxHandshakeAttempts = 25"
+	if got := params.ConfigLines(); got != wantLines {
+		t.Fatalf("ConfigLines() = %q, want %q", got, wantLines)
+	}
+}
+
 func TestGenerateParamsInvariants(t *testing.T) {
 	tiers := []struct {
 		name  string
@@ -310,7 +345,7 @@ func TestPersistentKeepaliveConfigValue(t *testing.T) {
 		{name: "legacy default", version: ProtocolVersion2, wanted: "25"},
 		{name: "inherited 3.1 default", version: ProtocolVersion31, value: rangePointer(t, "25-35"), wanted: "25-35"},
 		{name: "explicit scalar zero", version: ProtocolVersion31, value: rangePointer(t, "0"), wanted: "0"},
-		{name: "explicit off", version: ProtocolVersion31, value: rangePointer(t, "off"), wanted: "off"},
+		{name: "explicit off alias", version: ProtocolVersion31, value: rangePointer(t, "off"), wanted: "0"},
 	}
 
 	for _, tt := range tests {

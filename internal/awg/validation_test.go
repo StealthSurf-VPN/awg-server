@@ -103,6 +103,7 @@ func TestValidateOverridesForVersion(t *testing.T) {
 		{name: "random trailers", params: AWGParams{RandomTrailers: "on"}, wantField: "random_trailers"},
 		{name: "disable cookies", params: AWGParams{DisableCookies: "off"}, wantField: "disable_cookies"},
 		{name: "ranged keepalive", params: AWGParams{PersistentKeepalive: rangePointer(t, "25-35")}, wantField: "persistent_keepalive"},
+		{name: "equal ranged keepalive", params: AWGParams{PersistentKeepalive: rangePointer(t, "25-25")}, wantField: "persistent_keepalive"},
 		{name: "off keepalive", params: AWGParams{PersistentKeepalive: rangePointer(t, "off")}, wantField: "persistent_keepalive"},
 	}
 

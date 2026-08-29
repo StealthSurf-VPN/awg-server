@@ -65,7 +65,8 @@
 - Legacy per-client `dns` accepts an empty string for `AWG_DNS` inheritance or one IPv4 address. Mode-based DNS accepts `default`, `system`, or `custom`; custom mode requires one or more plain IPv4 values in `dns_servers`. URLs, hostnames, CIDRs, IPv6 addresses, and mixed legacy/mode fields are rejected.
 - 2.0 per-client persistent keepalive accepts a scalar 0 to disable or through
   65535; omission inherits 25. 3.1 accepts only the strict unsigned-16
-  scalar/range/`off` grammar.
+  scalar/range grammar plus `off` as an input alias for numeric `0`. Canonical
+  output and persistence never retain `off` for an unsigned range.
 - The 3.1-only range fields (content padding and rekey/timeout controls) use
   the same strict grammar; `random_trailers` and `disable_cookies` are exactly
   `on` or `off`. Every 3.1-only value is rejected for 2.0 before mutation.

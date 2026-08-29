@@ -102,6 +102,58 @@ func TestStorageRoundTripKeepsPrivateHeaderReferenceOutOfPublicClientJSON(t *tes
 	}
 }
 
+func TestStorageSaveCanonicalizesUnsignedRangeAliases(t *testing.T) {
+	storage := NewStorage(t.TempDir())
+	fixture := `{"clients":[{"id":"v31","protocol_version":"3.1","private_key":"","public_key":"","address":"10.10.0.2","lan_group_id":"peer:v31","created_at":"2026-08-29T00:00:00Z","awg_params":{"persistent_keepalive":"off","content_padding_addition":"25-25","rekey_after_time":"off","rekey_timeout":"25-25","reject_after_time":"off","keepalive_timeout":"25-25","max_handshake_attempts":"off"}}]}`
+	if err := os.WriteFile(storage.filePath, []byte(fixture), 0600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	data, err := storage.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !data.needsNormalization {
+		t.Fatal("Load() did not mark non-canonical unsigned ranges for deferred persistence")
+	}
+	if err := storage.Save(data); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	encoded, err := os.ReadFile(storage.filePath)
+	if err != nil {
+		t.Fatalf("read canonical storage: %v", err)
+	}
+	if bytes.Contains(encoded, []byte(`"off"`)) || bytes.Contains(encoded, []byte(`"25-25"`)) {
+		t.Fatalf("Save() retained non-canonical unsigned range aliases: %s", encoded)
+	}
+
+	loaded, err := storage.Load()
+	if err != nil {
+		t.Fatalf("Load() canonical storage error = %v", err)
+	}
+	if loaded.needsNormalization {
+		t.Fatal("canonical storage still requires unsigned range normalization")
+	}
+	for field, tt := range map[string]struct {
+		value *config.Uint16Range
+		want  uint16
+	}{
+		"persistent_keepalive":     {value: loaded.Clients[0].AWGParams.PersistentKeepalive, want: 0},
+		"content_padding_addition": {value: loaded.Clients[0].AWGParams.ContentPaddingAddition, want: 25},
+		"rekey_after_time":         {value: loaded.Clients[0].AWGParams.RekeyAfterTime, want: 0},
+		"rekey_timeout":            {value: loaded.Clients[0].AWGParams.RekeyTimeout, want: 25},
+		"reject_after_time":        {value: loaded.Clients[0].AWGParams.RejectAfterTime, want: 0},
+		"keepalive_timeout":        {value: loaded.Clients[0].AWGParams.KeepaliveTimeout, want: 25},
+		"max_handshake_attempts":   {value: loaded.Clients[0].AWGParams.MaxHandshakeAttempts, want: 0},
+	} {
+		value, ok := tt.value.Scalar()
+		if !ok || value != tt.want {
+			t.Fatalf("canonical %s = (%d, %t), want (%d, true)", field, value, ok, tt.want)
+		}
+	}
+}
+
 func TestCloneStorageDataDoesNotAliasNestedMutableState(t *testing.T) {
 	rangeValue, err := config.ParseUint16Range("25-35")
 	if err != nil {

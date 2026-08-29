@@ -251,10 +251,10 @@ func envMTU(key string, fallback uint16) (int, error) {
 func envUint16Range(key, fallback string) (Uint16Range, error) {
 	value, err := ParseUint16Range(envDefault(key, fallback))
 	if err != nil {
-		return Uint16Range{}, fmt.Errorf("%s must be an unsigned 16-bit scalar, range, or off: %w", key, err)
+		return Uint16Range{}, fmt.Errorf("%s must be an unsigned 16-bit scalar, range, or off alias: %w", key, err)
 	}
 
-	return value, nil
+	return value.Canonical(), nil
 }
 
 func envToggle(key, fallback string) (string, error) {

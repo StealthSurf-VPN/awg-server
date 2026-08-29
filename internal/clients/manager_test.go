@@ -187,6 +187,30 @@ func TestPrepareRestorePlanRejectsInterfaceConflictsAndLimitsBeforePoolConstruct
 	})
 }
 
+func TestPrepareRestorePlanSharesEquivalentAWG31RangesAtInterfaceLimit(t *testing.T) {
+	cfg := restoreConfigForTest(t)
+	cfg.MaxInterfaces = 1
+	first := restoreClientData("first", "10.100.0.2", awg.ProtocolVersion31, "opaque-default-id")
+	first.AWGParams = &awg.AWGParams{ContentPaddingAddition: managerRangePointer(t, "25")}
+	second := restoreClientData("second", "10.100.0.3", awg.ProtocolVersion31, "opaque-default-id")
+	second.AWGParams = &awg.AWGParams{ContentPaddingAddition: managerRangePointer(t, "25-25")}
+	data := &StorageData{
+		AWG31:   restoreAWG31Storage(),
+		Clients: []ClientData{first, second},
+	}
+
+	plan, err := PrepareRestorePlan(cfg, restoreDefaultsForTest(t), data)
+	if err != nil {
+		t.Fatalf("PrepareRestorePlan() error = %v", err)
+	}
+	if len(plan.entries) != 2 {
+		t.Fatalf("restore entries = %d, want 2", len(plan.entries))
+	}
+	if plan.entries[0].profile.Key() != plan.entries[1].profile.Key() {
+		t.Fatal("equivalent AWG 3.1 ranges produced different restore profile keys")
+	}
+}
+
 func TestPrepareRestorePlanRejectsDuplicatePeerKeyBeforePoolMutation(t *testing.T) {
 	cfg := restoreConfigForTest(t)
 	first := restoreClientData("first", "10.100.0.2", awg.ProtocolVersion2, "")
@@ -1023,7 +1047,8 @@ func TestRenderClientConfigUsesCanonicalPersistentKeepalive(t *testing.T) {
 		{name: "legacy default", want: "25"},
 		{name: "scalar zero", value: "0", want: "0"},
 		{name: "range", value: "25-35", want: "25-35"},
-		{name: "off", value: "off", want: "off"},
+		{name: "equal range", value: "25-25", want: "25"},
+		{name: "off", value: "off", want: "0"},
 	}
 
 	for _, tt := range tests {

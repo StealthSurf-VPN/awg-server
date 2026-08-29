@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stealthsurf-vpn/awg-server/internal/config"
 )
 
 func TestNormalizeOverridesForVersionClonesRangesAndDNSServers(t *testing.T) {
@@ -50,6 +52,49 @@ func TestNormalizeOverridesForVersionClonesRangesAndDNSServers(t *testing.T) {
 	for _, tt := range ranges {
 		if tt.got == tt.want {
 			t.Fatalf("NormalizeOverridesForVersion() did not clone %s", tt.name)
+		}
+	}
+}
+
+func TestNormalizeOverridesForVersionCanonicalizesRangesAfterValidation(t *testing.T) {
+	params := &AWGParams{
+		PersistentKeepalive:    rangePointer(t, "off"),
+		ContentPaddingAddition: rangePointer(t, "25-25"),
+		RekeyAfterTime:         rangePointer(t, "off"),
+		RekeyTimeout:           rangePointer(t, "25-25"),
+		RejectAfterTime:        rangePointer(t, "off"),
+		KeepaliveTimeout:       rangePointer(t, "25-25"),
+		MaxHandshakeAttempts:   rangePointer(t, "off"),
+	}
+
+	if _, err := NormalizeOverridesForVersion(ProtocolVersion2, params); err == nil {
+		t.Fatal("NormalizeOverridesForVersion(2.0) accepted non-scalar input syntax")
+	}
+	if params.PersistentKeepalive.IsCanonical() || params.ContentPaddingAddition.IsCanonical() {
+		t.Fatal("failed legacy normalization mutated the input")
+	}
+
+	normalized, err := NormalizeOverridesForVersion(ProtocolVersion31, params)
+	if err != nil {
+		t.Fatalf("NormalizeOverridesForVersion(3.1) error = %v", err)
+	}
+	for name, tt := range map[string]struct {
+		value *config.Uint16Range
+		want  uint16
+	}{
+		"persistent keepalive":   {value: normalized.PersistentKeepalive, want: 0},
+		"content padding":        {value: normalized.ContentPaddingAddition, want: 25},
+		"rekey after time":       {value: normalized.RekeyAfterTime, want: 0},
+		"rekey timeout":          {value: normalized.RekeyTimeout, want: 25},
+		"reject after time":      {value: normalized.RejectAfterTime, want: 0},
+		"keepalive timeout":      {value: normalized.KeepaliveTimeout, want: 25},
+		"max handshake attempts": {value: normalized.MaxHandshakeAttempts, want: 0},
+	} {
+		if !tt.value.IsCanonical() || !tt.value.IsScalar() {
+			t.Fatalf("normalized %s retained non-canonical syntax", name)
+		}
+		if scalar, _ := tt.value.Scalar(); scalar != tt.want {
+			t.Fatalf("normalized %s = %d, want %d", name, scalar, tt.want)
 		}
 	}
 }

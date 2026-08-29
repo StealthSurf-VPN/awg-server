@@ -197,23 +197,50 @@ func (data *StorageData) UnmarshalJSON(encoded []byte) error {
 	}
 
 	clients := make([]ClientData, 0, len(raw.Clients))
+	needsNormalization := false
 	for index, encodedClient := range raw.Clients {
 		client, err := decodeStoredClient(encodedClient)
 		if err != nil {
 			return fmt.Errorf("decode client %d: %w", index, err)
+		}
+		if storedRangesNeedNormalization(client.AWGParams) {
+			needsNormalization = true
 		}
 
 		clients = append(clients, client)
 	}
 
 	*data = StorageData{
-		ServerPrivateKey: raw.ServerPrivateKey,
-		GeneratedParams:  raw.GeneratedParams,
-		Clients:          clients,
-		AWG31:            raw.AWG31,
+		ServerPrivateKey:   raw.ServerPrivateKey,
+		GeneratedParams:    raw.GeneratedParams,
+		Clients:            clients,
+		AWG31:              raw.AWG31,
+		needsNormalization: needsNormalization,
 	}
 
 	return nil
+}
+
+func storedRangesNeedNormalization(params *awg.AWGParams) bool {
+	if params == nil {
+		return false
+	}
+
+	for _, value := range []*config.Uint16Range{
+		params.PersistentKeepalive,
+		params.ContentPaddingAddition,
+		params.RekeyAfterTime,
+		params.RekeyTimeout,
+		params.RejectAfterTime,
+		params.KeepaliveTimeout,
+		params.MaxHandshakeAttempts,
+	} {
+		if value != nil && !value.IsCanonical() {
+			return true
+		}
+	}
+
+	return false
 }
 
 func decodeStoredClient(encoded []byte) (ClientData, error) {

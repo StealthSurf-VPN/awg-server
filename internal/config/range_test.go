@@ -16,9 +16,10 @@ func TestParseUint16Range(t *testing.T) {
 	}{
 		{name: "zero", input: "0", want: "0", wantScalar: 0, isScalar: true},
 		{name: "scalar", input: "25", want: "25", wantScalar: 25, isScalar: true},
+		{name: "equal range", input: "25-25", want: "25"},
 		{name: "range", input: "25-35", want: "25-35"},
 		{name: "maximum scalar", input: "65535", want: "65535", wantScalar: 65535, isScalar: true},
-		{name: "off", input: "off", want: "off"},
+		{name: "off alias", input: "off", want: "0"},
 	}
 
 	for _, tt := range tests {
@@ -51,8 +52,9 @@ func TestUint16RangeJSON(t *testing.T) {
 	}{
 		{name: "integer scalar", input: "0", want: "0", json: "0"},
 		{name: "quoted scalar", input: `"25"`, want: "25", json: "25"},
+		{name: "quoted equal range", input: `"25-25"`, want: "25", json: "25"},
 		{name: "quoted range", input: `"25-35"`, want: "25-35", json: `"25-35"`},
-		{name: "off", input: `"off"`, want: "off", json: `"off"`},
+		{name: "off alias", input: `"off"`, want: "0", json: "0"},
 	}
 
 	for _, tt := range tests {
@@ -71,6 +73,34 @@ func TestUint16RangeJSON(t *testing.T) {
 			}
 			if string(encoded) != tt.json {
 				t.Fatalf("json.Marshal() = %s, want %s", encoded, tt.json)
+			}
+		})
+	}
+}
+
+func TestUint16RangeCanonicalizationPreservesValidationProvenance(t *testing.T) {
+	tests := []struct {
+		input string
+		want  uint16
+	}{
+		{input: "off", want: 0},
+		{input: "25-25", want: 25},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			parsed, err := ParseUint16Range(tt.input)
+			if err != nil {
+				t.Fatalf("ParseUint16Range(%q) error = %v", tt.input, err)
+			}
+			if parsed.IsScalar() || parsed.IsCanonical() {
+				t.Fatalf("ParseUint16Range(%q) lost non-scalar input provenance", tt.input)
+			}
+
+			canonical := parsed.Canonical()
+			got, ok := canonical.Scalar()
+			if !canonical.IsCanonical() || !ok || got != tt.want {
+				t.Fatalf("Canonical(%q) = (%d, %t, canonical=%t), want (%d, true, true)", tt.input, got, ok, canonical.IsCanonical(), tt.want)
 			}
 		})
 	}
