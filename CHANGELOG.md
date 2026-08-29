@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both systemd states can be confirmed.
 - Renamed major-release binaries to the `awg-server-awg31-*` asset set so older
   updaters fail closed instead of crossing an unqualified host-runtime bridge.
+- Deduplicated overlapping Go and installer-harness scenarios while retaining
+  the migration, persistence, runtime cleanup, secret-handling, rollback, and
+  fail-stopped recovery contracts.
 
 ## [1.0.5] - 2026-07-22
 

@@ -28,6 +28,11 @@ The bearer check runs before a matched protected handler. A missing `Authorizati
 
 `POST /api/clients`, `PATCH /api/clients/lan-group`, and `PATCH /api/clients/{id}` read at most 1 MiB and require exactly one JSON value. Empty, malformed, oversized, trailing-garbage, and multiple-value bodies return `400` before manager mutation. Unknown JSON fields are ignored; consequently, a PATCH containing no recognized top-level field still returns the empty-update `400`. The server does not require a request `Content-Type`, although clients should send `application/json`. All other handlers ignore the request body, including the two POST action endpoints.
 
+Top-level `"awg_params":null` resets all stored overrides on PATCH. Inside an
+`awg_params` object, however, explicit JSON `null` is rejected for
+`persistent_keepalive`, every 3.1 range field, `random_trailers`, and
+`disable_cookies`; omit a nested field to inherit its default.
+
 ## Health Check
 
 ```http
@@ -611,7 +616,7 @@ DELETE /api/clients/{id}
 
 **Response** `204 No Content`
 
-Deletion first installs the DROP-only LAN chain, removes the AWG peer and its `/32` route, destroys the interface when it becomes empty, saves a prospective `clients.json`, removes the in-memory client and its usage entry, and rebuilds same-group allows. Route deletion or final interface destruction failure attempts to restore the peer and route and returns a generic `500`. If persistence fails after device removal, the server attempts to add the peer back. A final firewall failure occurs after the deletion is committed and leaves LAN traffic blocked. Rollback is best-effort; a second failure can leave live kernel state requiring operator inspection.
+Deletion first installs the DROP-only LAN chain, removes the AWG peer and its `/32` route, destroys the interface when it becomes empty, saves a prospective `clients.json`, removes the in-memory client, and rebuilds same-group allows. Only after those manager steps succeed does the handler remove the client's usage entry from collector memory. Route deletion or final interface destruction failure attempts to restore the peer and route and returns a generic `500`. If persistence fails after device removal, the server attempts to add the peer back. A final firewall failure occurs after the deletion is committed, leaves the usage entry untouched by that request, and leaves LAN traffic blocked. Rollback is best-effort; a second failure can leave live kernel state requiring operator inspection.
 
 **Errors:**
 
@@ -667,6 +672,11 @@ inheritance and validation. Unless documented otherwise below, zero integer
 values and empty strings inherit the corresponding target-version default.
 Validation runs both on the raw override and the effective profile before key
 generation, address allocation, device work, or persistence.
+
+Nested `null` is not an inheritance shorthand for the range and toggle fields:
+`persistent_keepalive`, the six 3.1 range fields, `random_trailers`, and
+`disable_cookies` reject it. Omit those fields to inherit them. This is distinct
+from top-level `"awg_params":null` in PATCH, which resets the complete object.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |

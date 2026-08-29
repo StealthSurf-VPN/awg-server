@@ -31,6 +31,11 @@ behavior.
 | `AWG_I1`–`AWG_I5` | empty | Client-only CPS signature packets. |
 | `AWG_MAX_INTERFACES` | `0` | Maximum interfaces; zero is unlimited. |
 
+`/data` is the direct binary default for `AWG_DATA_DIR`. On a fresh host, the
+installer writes `/var/lib/awg-server` explicitly; it preserves `/data` when it
+finds an existing `/data/clients.json`, and an explicit operator setting takes
+precedence over both choices.
+
 The existing top-level `generated_params` stores 2.0 H1-H4 and S1/S2 defaults.
 It remains a 2.0 value and is not reinterpreted as 3.1 state.
 
@@ -55,12 +60,15 @@ input alias `off` means `0`. It rejects whitespace, signed values, floats,
 exponent notation, empty values, reversed ranges, and overflow. API JSON
 accepts a scalar as a number or string, while a range or `off` is a string.
 Canonical API and persisted output uses numeric `0` for `off`, numeric `N` for
-an equal range `N-N`, and a string for every other range. The same canonical
-values are passed to AWG tools and used for interface profile identity.
+an equal range `N-N`, and a string for every other range. The six
+server-applied 3.1 ranges are passed to AWG tools and participate in interface
+profile identity. `persistent_keepalive` is rendered only in the client
+`[Peer]` section and remains outside profile identity.
 
 `AWG_DEFAULT_PROTOCOL_VERSION` affects only new `POST /api/clients` requests
 and an omitted `protocol_version` generator query. It never changes an existing
-client. Setting it to `2.0` is an operator-controlled phased-rollout fallback.
+client. Setting it to `2.0` is an operator-controlled phased-rollout fallback;
+it does not bypass the mandatory AWG 3.1 runtime qualifier.
 
 3.1 defaults combine the environment values with persisted generated H1-H4 and
 S1-S4. Fresh 3.1 generation uses four fixed unique H values, S1/S2 in 15–150,
@@ -83,6 +91,9 @@ key, address, interface, or persistence mutation.
 - The 3.1-only fields are `content_padding_addition`, `rekey_after_time`,
   `rekey_timeout`, `reject_after_time`, `keepalive_timeout`,
   `max_handshake_attempts`, `random_trailers`, and `disable_cookies`.
+- Inside an `awg_params` object, `persistent_keepalive`, all six 3.1 range
+  fields, and both toggles reject explicit JSON `null`; omission inherits the
+  target default. Top-level `awg_params:null` on PATCH resets the whole object.
 - `port` is kept separate for interface allocation. Client listen port, MTU,
   DNS, persistent keepalive, I1-I5, routing, and peer PSKs are client-side or
   per-peer state and do not participate in interface identity.

@@ -1,113 +1,118 @@
 # Testing Rules
 
-Use these rules when adding or changing Go tests. Prefer table-driven `*_test.go` files next to their source, in the same package, using `testing.T` and subtests via `t.Run`.
+Use risk-based tests to protect externally meaningful behavior and dangerous
+state transitions with the smallest clear suite. Coverage percentage and test
+count are diagnostics, not goals. There is no requirement to add one test for
+every pure function, helper, error return, or input cross-product.
 
-## When to Use
+## Test Layers
 
-- The task adds tests for a named file, function, or behavior
-- The target source file contains logic that can run without host networking or AmneziaWG kernel state
-- Function under test is pure (no `exec.Command`, network, files, kernel calls)
+Choose the lowest layer that proves the contract. Duplicate a scenario at a
+higher layer only when the boundary itself is important.
 
-**Do NOT use when:**
-- Test file already exists — extend it instead of overwriting it
-- The target only shells out and exposes no injectable command/filesystem
-  dependency. Use a fake runner for deterministic unit tests of code such as
-  `runtime.go`; reserve real kernel/module behavior for external qualification.
-- A function uses real network sockets or unredirectable `/data/` paths
+| Layer | Use it for | It does not prove |
+| --- | --- | --- |
+| Pure unit | Parsing, validation, canonicalization, profile identity, routing math, and generated-value invariants | Manager, HTTP, process, or host integration |
+| Component with fakes/temp files | Manager transactions, persistence, API status/redaction, command construction, and runtime orchestration | Real systemd, packages, kernel state, or client traffic |
+| Stubbed shell harness | Installer/release ordering, deadlines, failure postconditions, cleanup, and recovery guidance | Real systemd jobs, DKMS reload, kernel sockets, reboot behavior, or networking |
+| Disposable Ubuntu 22.04 host | Package/module migration, actual runtime qualification, reboot state, client handshakes, and traffic | Other architectures or fleet-wide rollout health unless separately exercised |
+
+Critical seams may intentionally have layered coverage: API-to-persistence
+version handling, secret redaction, migration rollback, runtime-probe cleanup,
+and installer fail-stopped recovery. Do not copy a complete parser or
+validation matrix into API, manager, and storage tests when one source-of-truth
+matrix plus a representative boundary case proves the same behavior.
+
+## What Deserves a Test
+
+- A changed public API, persistence, configuration, release, or installer
+  contract.
+- A fixed regression, especially one involving migration, rollback, cleanup,
+  authentication, secret handling, concurrency, or fail-closed behavior.
+- A transaction with materially different pre-mutation, commit, and rollback
+  outcomes.
+- A pure helper whose behavior is non-trivial and is not already exercised
+  clearly through its owning contract.
+
+Usually omit or remove tests that only freeze an unexported representation,
+repeat the same happy path at several layers, assert incidental helper call
+counts, verify non-contractual usage prose, or exhaustively repeat syntax/error
+partitions already owned by a lower layer. Keep a call-order assertion only
+when ordering is itself a safety property.
+
+## Required High-Risk Contracts
+
+Keep distinct coverage for these areas when their implementation changes:
+
+- API aliases and defaults versus canonical persisted protocol versions;
+  missing disk versions remain legacy 2.0.
+- Unsigned-range canonicalization (`off` to `0`, `N-N` to `N`) and rejection of
+  3.1-only syntax for effective 2.0 clients.
+- `ProfileKey` separation by protocol, server-applied fields, and private 3.1
+  header key, while client-only fields and requested ports remain excluded.
+- Private-key, PSK, and header-key handling through stdin/storage/config only,
+  with public responses, argv, logs, and errors redacted.
+- Restore preflight, usage snapshots, interface migration, persistence commit,
+  rollback, and private header-key garbage collection.
+- Runtime package/tool qualification, kernel-selected probe port, complete 3.1
+  readback, bounded execution, collision handling, and cleanup using a fresh
+  bounded context after an ambiguous create.
+- Installer stop/disable ordering, bounded staged qualification, backup
+  boundary, authenticated health/client-list gate, signal handling, and honest
+  fail-stopped recovery after ambiguous systemd results.
+- Signed release asset naming, manifest verification, downgrade refusal, and
+  replacement only after verification.
+
+## Test Design
+
+1. Name the contract or regression before choosing cases.
+2. Partition inputs by distinct behavior and select representative boundaries;
+   avoid Cartesian products unless field interaction is the defect.
+3. For stateful operations, assert the relevant state before mutation, after
+   commit, and after each materially different rollback boundary.
+4. For randomized generators and keys, assert invariants over enough attempts
+   to exercise the behavior reliably; never assert an exact random value.
+5. Reuse an existing `*_test.go` and its helpers when they express the same
+   layer. Delete superseded cases and helpers rather than accumulating both.
+6. Prefer an injected runner, temp directory, `httptest`, or fake executable to
+   a test that depends on root, `/data`, host networking, or a loaded module.
 
 ## Project Conventions
 
-Follow `.ai/rules/code-style.md`:
+- Co-locate Go tests with their source and use the same package when access to
+  unexported behavior is necessary.
+- Prefer table-driven subtests when the cases share setup and assertions; a
+  single direct test is clearer for a unique transaction.
+- Use the standard library only; do not add testify, gomega, or similar
+  dependencies.
+- Keep tests serial when they mutate environment variables, process-wide
+  hooks, command paths, or shared files.
+- Use synthetic keys, tokens, URLs, and client data. Never put operational
+  secrets in fixtures or failure messages.
+- Follow `.ai/rules/code-style.md`; comments should explain only non-obvious
+  safety setup or why a regression boundary must remain.
 
-| Convention | Example |
-|---|---|
-| Co-located, same package | `params.go` → `params_test.go`, `package awg` |
-| Table-driven with subtests | `for _, tt := range tests { t.Run(tt.name, ...) }` |
-| stdlib only | `import "testing"` — no testify, gomega, etc. |
-| Vertical spacing between vars | blank lines between top-level decls |
-| No comments unless non-obvious | trust the test name |
+## Verification
 
-## Test Template
+Run the narrowest relevant package first, then the gates proportional to the
+change:
 
-```go
-package awg
-
-import "testing"
-
-func TestKey(t *testing.T) {
-	tests := []struct {
-		name   string
-		params AWGParams
-		want   string
-	}{
-		{
-			name: "all fields populated",
-			params: AWGParams{
-				H1: "1-2", H2: "3-4", H3: "5-6", H4: "7-8",
-				S1: 10, S2: 20, S3: 30, S4: 40,
-			},
-			want: "h1=1-2,h2=3-4,h3=5-6,h4=7-8,s1=10,s2=20,s3=30,s4=40",
-		},
-		{
-			name:   "empty params",
-			params: AWGParams{},
-			want:   "h1=,h2=,h3=,h4=,s1=0,s2=0,s3=0,s4=0",
-		},
-		{
-			name:   "Jc/Jmin/Jmax not in legacy helper key",
-			params: AWGParams{Jc: 5, Jmin: 50, Jmax: 1000},
-			want:   "h1=,h2=,h3=,h4=,s1=0,s2=0,s3=0,s4=0",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.params.Key()
-			if got != tt.want {
-				t.Errorf("Key() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
+```bash
+go test ./internal/<package>/...
+go test ./...
+go test -race -count=1 ./...
+go vet ./...
+go build -o awg-server .
 ```
 
-## Workflow
+Run `bash scripts/install_test.sh` for installer transaction changes and the
+three `scripts/release-*_test.sh` harnesses for release automation changes.
+Remove the generated `awg-server` binary before handoff; it is ignored build
+output, not source.
 
-1. **Read source file** — list exported funcs/methods and identify pure ones
-2. **For each pure function**, generate a `Test<Name>` with cases:
-   - Happy path
-   - Empty/zero/nil input
-   - Boundary values (numeric ranges, string lengths)
-   - Each error branch (if function returns `error`)
-3. **For randomized funcs** (`GenerateParams`, `GenerateParamsV31`,
-   `GeneratePrivateKey`), assert invariants over N≥100 iterations rather than
-   exact values. For 3.1, verify fixed unique H values, S3 15-63, S4 12, and
-   all S values at least 12.
-4. **Place** as `<basename>_test.go` in the same directory
-5. **Verify** — `go test ./<package>/...` passes; `go vet ./...` clean. For
-   installer changes also run `bash scripts/install_test.sh`.
-
-## Per-Package Hints
-
-| File | Functions | Key invariants to assert |
-|------|-----------|--------------------------|
-| `internal/awg/keygen.go` | `GeneratePrivateKey`, `PublicKeyFromPrivate`, `Base64ToKey`, `KeyToBase64` | Roundtrip: `Base64ToKey(KeyToBase64(k)) == k`; private key clamping |
-| `internal/awg/params.go` | `Key`, `ConfigLines`, `GenerateParams`, `GenerateParamsV31` | `Key` is a legacy helper, S3/S4 emitted, version-specific generated invariants and strict range/toggle rendering |
-| `internal/awg/profile.go` | `NewLegacyProfile`, `NewAWG31Profile`, `Profile.Key` | Profile identity changes for version, server-applied fields, or header key only; client-only fields stay excluded; secrets do not serialize |
-| `internal/awg/runtime.go` | `checkRuntime` with injected dependencies | Package minima, strict tools output, complete readback, collision safety, cleanup, and no secret in argv/error |
-| `internal/clients/manager.go` | version-aware effective profile/update/restore helpers | Missing persisted version is legacy 2.0; omitted create uses default; migrations/snapshots/GC preserve rollback state |
-| `internal/clients/storage.go` | storage decoding/cloning | Disk accepts canonical versions only; header key map deep-copy and invalid 3.1 state fail closed |
-| `internal/awg/pool.go` | `resolvePort`, profile pool operations | Port range/shared-profile rules and `ProfileKey` separation |
-| `internal/usage/collector.go` | parser for `awg show dump` output | Counter reset detection (current < previous → use current as delta) |
-
-## Common Mistakes
-
-- **External test package** (`package awg_test`) — this project uses internal tests for access to unexported helpers (`generateHRange`, `randIntRange`)
-- **Asserting exact random output** — for `GenerateParams` and
-  `GenerateParamsV31`, test invariants over many iterations (for example,
-  `s1+56 != s2` always) instead.
-- **Forgot `t.Parallel()`** is *not* a mistake here — project does not use it; matches existing style of leaving runs serial
-- **Calling real `exec.Command` when an injected dependency exists** — unit
-  tests must use the fake runner. A real Linux host with module and supported
-  clients is still required for module reload, handshakes, and throughput.
-- **Importing testify/gomega** — stdlib only; use `t.Errorf` / `t.Fatalf` directly
+Passing fake-runner Go tests or `scripts/install_test.sh` is local evidence
+only. For a host-runtime or installer migration claim, report that a real
+Ubuntu 22.04 qualification is still missing unless it was run separately. Even
+`awg-server check-runtime` on the target proves package/tool/module and
+temporary-interface behavior, not a client handshake, traffic, reboot
+persistence, or fleet rollout.

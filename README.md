@@ -9,6 +9,19 @@ version remain AmneziaWG 2.0 until an authenticated caller explicitly migrates
 them. A host can therefore serve 2.0 and 3.1 clients at the same time on
 separate profile-matched interfaces.
 
+## Installer release gate
+
+A source checkout alone is not an installable AWG 3.1 release. Do not use the
+one-line command until this AWG 3.1 installer is present on `main`. Before
+running it on an existing 2.0 host, also verify that the
+[latest stable GitHub release](https://github.com/StealthSurf-VPN/awg-server/releases/latest)
+contains the complete signed AWG 3.1 bundle: all six
+`awg-server-awg31-*` binaries, `SHA256SUMS`, and `SHA256SUMS.sig`. If the latest
+release still exposes the legacy asset set, the AWG 3.1 installer fails staging
+before it disables or stops `awg-server.service`. Package installation and
+version gates run before staging, however, so the host's packages may already
+have changed.
+
 ## Quick install
 
 The supported host is a root-controlled Ubuntu 22.04 host or VM, not a
@@ -114,9 +127,10 @@ awg-server-awg31-windows-arm64.exe
 ```
 
 `SHA256SUMS` and `SHA256SUMS.sig` accompany the six binaries in an official
-release. The CI workflow runs deterministic Go, installer-harness, release, and
-lint checks; it does not prove a Ubuntu kernel module, real handshakes, or
-physical-client import/throughput.
+release. The CI workflow runs formatting and module checks, race-enabled Go
+package tests, installer and release shell harnesses, `go vet`, workflow and
+shell linting, and a build. Those checks do not prove an Ubuntu kernel module,
+real handshakes, or physical-client import/throughput.
 
 ## API overview
 
@@ -186,6 +200,8 @@ persistent keepalive, client listen port, I1-I5, routing, and peer PSKs. See
 [configuration](docs/configuration.md) for persistence and interface details.
 
 The service requires a kernel module and a compatible client runtime. Local
-tests validate contracts and transaction handling only. Before production use,
-qualify Ubuntu 22.04 amd64 and arm64 hosts, module build/load, runtime probe,
-authenticated API gate, client import, handshake, and throughput.
+tests cover selected parsing, API, persistence, runtime/pool transaction, and
+installer/release contracts; they do not emulate a real kernel or client.
+Before production use, qualify Ubuntu 22.04 amd64 and arm64 hosts, module
+build/load, runtime probe, authenticated API gate, client import, handshake,
+and throughput.

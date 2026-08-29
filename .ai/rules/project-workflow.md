@@ -29,3 +29,5 @@ Before handoff:
 - Confirm no generated binary or `dist/` file appears in the diff.
 - Review the final diff for accidental contract or documentation drift.
 - Report the exact commands run and any verification that could not be completed locally.
+- Distinguish deterministic fake/stub evidence from real Ubuntu systemd,
+  package/module, kernel, reboot, handshake, and traffic qualification.

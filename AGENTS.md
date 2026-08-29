@@ -26,7 +26,11 @@ The StealthSurf NestJS backend uses this API to create, update, inspect, and del
 - Format changed Go files: `gofmt -w <files>`
 - Build all release targets: `make build-all VERSION=1.0.0`
 
-Before considering a code change complete, `go build -o awg-server .` and `go vet ./...` must pass. Run the relevant tests whenever testable behavior changes.
+Before considering a code change complete, `go build -o awg-server .` and
+`go vet ./...` must pass. Run the relevant tests whenever testable behavior
+changes. Testing is risk-based: preserve each important contract at the lowest
+useful layer, and do not require one test per function, error branch, or input
+combination.
 
 ## Always-On Conventions
 
@@ -57,6 +61,10 @@ Before considering a code change complete, `go build -o awg-server .` and `go ve
 - Normal startup and `awg-server check-runtime` require the AWG 3.1 qualifier.
   Host migration is installer-only because a binary self-update cannot update
   and reload the package/module runtime.
+- Fake runners and the stubbed installer harness verify deterministic command,
+  transaction, and recovery behavior only. They do not prove real systemd job
+  completion, DKMS/module reload, kernel socket behavior, reboot state, client
+  handshakes, or traffic on an Ubuntu host.
 
 ## Key Files
 

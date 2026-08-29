@@ -24,14 +24,28 @@ Rules:
 - `CHANGELOG.md` must contain exactly one non-empty `## [X.Y.Z] - YYYY-MM-DD` section.
 - Release notes must contain that exact section followed by a clickable `Full Changelog` range from the previous stable release when one exists.
 
-Test marker behavior locally:
+Run the deterministic source, release, and installer gates locally:
 
 ```bash
+test -z "$(gofmt -l .)"
+go mod verify
 bash scripts/release-marker_test.sh
 bash scripts/release-notes_test.sh
 bash scripts/release-previous-tag_test.sh
 bash scripts/install_test.sh
+go test -race -count=1 ./...
+go vet ./...
+go build -trimpath -o /tmp/awg-server .
+git diff --check
+test -z "$(git status --porcelain --untracked-files=no)"
 ```
+
+The installer harness is a deterministic stubbed-host contract matrix. It uses
+orthogonal representative cases instead of an exhaustive cross-product of
+failure phases and initial states. Passing it does not qualify package
+installation, the loaded module, systemd, or a real client handshake on an
+Ubuntu host. CI also runs the pinned actionlint and ShellCheck containers in the
+workflow.
 
 ## Automated Gates
 
@@ -69,12 +83,13 @@ The workflow stops after GitHub Release publication and verification. It must no
 
 Official Linux and macOS release binaries embed the same public key and use it
 for `awg-server update`. Self-update is strictly upgrade-only and validates the
-canonical version-bound AWG31 asset URLs, interprocess update lock, actual
-on-disk version, Ed25519 signature, canonical six-asset manifest, checksum,
-64 MiB limit, and downloaded binary version before replacement. Ordinary source
-builds and Windows self-update fail closed before network access. Legacy
-updaters request the disjoint old asset names and must fail closed against this
-major release; the installer is the supported package/module migration bridge.
+exact eight-asset release set and canonical version-bound URLs, interprocess
+update lock, actual on-disk version, Ed25519 signature, canonical six-binary
+manifest, checksum, 64 MiB limit, and downloaded binary version before
+replacement. Ordinary source builds and Windows self-update fail closed before
+network access. Legacy updaters request the disjoint old asset names and must
+fail closed against this major release; the installer is the supported
+package/module migration bridge.
 Key rotation requires the reviewed bridge process documented in
 `docs/ci-cd.md`; never replace only one key value.
 

@@ -107,6 +107,15 @@ Files: `main.go`, `internal/usage/collector.go`, `internal/api/server.go`.
 - <path>:<line> — <one-sentence issue>. Fix: <one-sentence>.
 ```
 
-Skip nitpicks. Skip generic "consider adding tests" unless the change introduces a clear test gap (e.g. new pure function in `internal/awg/`). If a category is clean, omit it. If everything is clean, say so in one line and stop.
+Skip nitpicks. Skip generic "consider adding tests" unless the change leaves a
+specific risk-bearing contract or regression unprotected; a new pure function
+does not require its own test when existing contract coverage is clear. Do not
+request exhaustive error-branch or cross-product coverage without a distinct
+failure mode. If a category is clean, omit it. If everything is clean, say so
+in one line and stop.
+
+For runtime or installer changes, state the evidence boundary: fake runners
+and stubbed shell commands do not qualify real systemd jobs, packages, DKMS,
+kernel interfaces, reboot state, handshakes, or traffic.
 
 Do NOT dump the whole codebase audit — review only the in-scope changes plus their immediate dependencies.

@@ -16,6 +16,21 @@ those external gates.
 
 ## Recommended installer
 
+The one-line command always fetches whatever installer is currently on `main`
+and resolves GitHub's
+[current latest stable Release](https://github.com/StealthSurf-VPN/awg-server/releases/latest);
+it pins neither source nor server version. Use it for this migration only after
+the AWG 3.1 installer has landed on `main`. Before running it on a host, also
+confirm that the latest Release is the intended AWG31 version and has the exact
+eight-file bundle listed under
+[Migrating a legacy host](#migrating-a-legacy-host). If it is still legacy or
+incomplete, postpone the migration. During staging, the installer verifies the
+signed canonical six-line manifest and downloads only the selected Linux host
+binary; it does not independently prove that every platform asset is present.
+A legacy manifest or missing selected binary fails before the installer disables
+or stops the service, but package installation and minimum-version checks happen
+first and may already update host packages.
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/StealthSurf-VPN/awg-server/main/scripts/install.sh)
 ```
@@ -87,6 +102,12 @@ The installer intentionally creates a controlled service outage. Its order is:
 10. Enable the unit only after those qualification gates pass, then confirm
     systemd reports it enabled.
 
+A successful transaction reloads the module for the running kernel, so a
+routine upgrade does not require a reboot. If the module reload or runtime
+qualification fails, the installer stops at the fail-stopped boundary instead
+of treating a reboot as part of the transaction. Never reboot when
+automatic-start disablement could not be confirmed.
+
 The API token is placed in a root-only curl configuration file for that gate;
 it is not put in a curl command-line argument. Values containing CR or LF are
 rejected before the environment or auth configuration is written.
@@ -115,7 +136,7 @@ It preserves `clients.json`; the server restores records without a
 restore succeeds. Existing 2.0 client configurations continue to work until an
 authenticated API caller explicitly migrates each client.
 
-This major release accepts only the signed AWG31 asset set:
+This major release accepts only the exact signed AWG31 release bundle:
 
 ```text
 awg-server-awg31-darwin-amd64
@@ -124,7 +145,13 @@ awg-server-awg31-linux-amd64
 awg-server-awg31-linux-arm64
 awg-server-awg31-windows-amd64.exe
 awg-server-awg31-windows-arm64.exe
+SHA256SUMS
+SHA256SUMS.sig
 ```
+
+`SHA256SUMS` contains the six binary names in that canonical order, and
+`SHA256SUMS.sig` authenticates the complete manifest. The installer downloads
+only its selected Linux binary after validating the full manifest.
 
 An older updater requests the disjoint legacy asset names and therefore fails
 closed instead of selecting a 3.1 binary. Do not bypass that bridge with an

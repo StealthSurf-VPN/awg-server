@@ -185,3 +185,8 @@ discarded.
   reboot-time disablement state; a post-replacement failure repeats the bounded
   stop and disable checks. Do not add automatic rollback/restart after a failed
   post-replacement gate.
+- `scripts/install_test.sh` uses command stubs to verify transaction ordering,
+  deadlines, recovery branches, permissions, and secret handling. It does not
+  execute real systemd jobs, reload the host DKMS module, bind an AmneziaWG
+  kernel socket, reboot the host, or prove a client handshake/traffic path; use
+  a disposable supported Ubuntu 22.04 host for that qualification.
