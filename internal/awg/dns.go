@@ -1,12 +1,15 @@
 package awg
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"reflect"
 	"strings"
+
+	"github.com/stealthsurf-vpn/awg-server/internal/config"
 )
 
 const (
@@ -29,6 +32,9 @@ func (params *AWGParams) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
+	if err := rejectExplicitNullAWGParams(fields); err != nil {
+		return err
+	}
 
 	*params = AWGParams(decoded)
 
@@ -40,6 +46,28 @@ func (params *AWGParams) UnmarshalJSON(data []byte) error {
 			params.dnsModeSet = true
 		case strings.EqualFold(field, "dns_servers"):
 			params.dnsServersSet = true
+		}
+	}
+
+	return nil
+}
+
+func rejectExplicitNullAWGParams(fields map[string]json.RawMessage) error {
+	for _, restricted := range []string{
+		"persistent_keepalive",
+		"content_padding_addition",
+		"rekey_after_time",
+		"rekey_timeout",
+		"reject_after_time",
+		"keepalive_timeout",
+		"max_handshake_attempts",
+		"random_trailers",
+		"disable_cookies",
+	} {
+		for field, value := range fields {
+			if strings.EqualFold(field, restricted) && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return invalidParam(restricted, "must not be null")
+			}
 		}
 	}
 
@@ -70,10 +98,13 @@ func cloneAWGParams(params *AWGParams) *AWGParams {
 		copy(clone.DNSServers, params.DNSServers)
 	}
 
-	if params.PersistentKeepalive != nil {
-		keepalive := *params.PersistentKeepalive
-		clone.PersistentKeepalive = &keepalive
-	}
+	clone.PersistentKeepalive = cloneUint16Range(params.PersistentKeepalive)
+	clone.ContentPaddingAddition = cloneUint16Range(params.ContentPaddingAddition)
+	clone.RekeyAfterTime = cloneUint16Range(params.RekeyAfterTime)
+	clone.RekeyTimeout = cloneUint16Range(params.RekeyTimeout)
+	clone.RejectAfterTime = cloneUint16Range(params.RejectAfterTime)
+	clone.KeepaliveTimeout = cloneUint16Range(params.KeepaliveTimeout)
+	clone.MaxHandshakeAttempts = cloneUint16Range(params.MaxHandshakeAttempts)
 
 	return &clone
 }
@@ -123,6 +154,10 @@ func validateDNSSettings(params *AWGParams) error {
 }
 
 func NormalizeOverrides(params *AWGParams) (*AWGParams, error) {
+	return NormalizeOverridesForVersion(ProtocolVersion2, params)
+}
+
+func NormalizeOverridesForVersion(version ProtocolVersion, params *AWGParams) (*AWGParams, error) {
 	if params == nil {
 		return nil, nil
 	}
@@ -149,9 +184,10 @@ func NormalizeOverrides(params *AWGParams) (*AWGParams, error) {
 		normalized.DNSServers = servers
 	}
 
-	if err := ValidateOverrides(normalized); err != nil {
+	if err := ValidateOverridesForVersion(version, normalized); err != nil {
 		return nil, err
 	}
+	canonicalizeUnsignedRanges(normalized)
 
 	normalized.dnsSet = false
 	normalized.dnsModeSet = false
@@ -162,6 +198,35 @@ func NormalizeOverrides(params *AWGParams) (*AWGParams, error) {
 	}
 
 	return normalized, nil
+}
+
+func canonicalizeUnsignedRanges(params *AWGParams) {
+	for _, value := range []**config.Uint16Range{
+		&params.PersistentKeepalive,
+		&params.ContentPaddingAddition,
+		&params.RekeyAfterTime,
+		&params.RekeyTimeout,
+		&params.RejectAfterTime,
+		&params.KeepaliveTimeout,
+		&params.MaxHandshakeAttempts,
+	} {
+		if *value == nil {
+			continue
+		}
+
+		canonical := (*value).Canonical()
+		*value = &canonical
+	}
+}
+
+func cloneUint16Range(value *config.Uint16Range) *config.Uint16Range {
+	if value == nil {
+		return nil
+	}
+
+	clone := *value
+
+	return &clone
 }
 
 func ResolveDNS(params *AWGParams, defaultDNS string) (string, bool) {

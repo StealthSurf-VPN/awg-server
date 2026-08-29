@@ -1,0 +1,1869 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+installer="$script_dir/install.sh"
+temp_dir=$(mktemp -d)
+original_path=$PATH
+
+trap 'rm -rf -- "$temp_dir"' EXIT
+
+fail() {
+    printf 'install test failed: %s\n' "$1" >&2
+    exit 1
+}
+
+assert_file_contains() {
+    local file=$1
+    local expected=$2
+
+    grep -Fq -- "$expected" "$file" \
+        || fail "$file does not contain expected content"
+}
+
+assert_file_not_contains() {
+    local file=$1
+    local unexpected=$2
+
+    if grep -Fq -- "$unexpected" "$file"; then
+        fail "$file contains sensitive or unexpected content"
+    fi
+}
+
+file_mode() {
+    local path=$1
+
+    if stat -c '%a' -- "$path" 2>/dev/null; then
+        return
+    fi
+
+    stat -f '%Lp' "$path"
+}
+
+assert_mode() {
+    local path=$1
+    local expected=$2
+    local actual
+
+    actual=$(file_mode "$path") || fail "could not read mode for $path"
+    [ "$actual" = "$expected" ] \
+        || fail "$path mode is $actual, want $expected"
+}
+
+assert_before() {
+    local file=$1
+    local first=$2
+    local second=$3
+    local first_line
+    local second_line
+
+    first_line=$(grep -n -F -- "$first" "$file" | head -n 1 | cut -d: -f1) \
+        || fail "$first is absent from $file"
+    second_line=$(grep -n -F -- "$second" "$file" | head -n 1 | cut -d: -f1) \
+        || fail "$second is absent from $file"
+    [ "$first_line" -lt "$second_line" ] \
+        || fail "$first did not precede $second"
+}
+
+assert_stopped() {
+    local state_file=$1
+
+    [ "$(<"$state_file")" = inactive ] \
+        || fail 'service was not left stopped'
+}
+
+backup_dir() {
+    local root=$1
+    local directories
+
+    directories=$(find "$root" -mindepth 1 -maxdepth 1 -type d -print) \
+        || fail 'could not find backup directory'
+    [ "$(printf '%s\n' "$directories" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] \
+        || fail 'expected exactly one completed backup directory'
+    printf '%s\n' "$directories"
+}
+
+reset_settings() {
+    local key
+
+    for key in "${ENVIRONMENT_KEYS[@]}"; do
+        unset "$key" || true
+    done
+
+    AWG_SERVER_VERSION=''
+    PROCESS_ENV_PRESENT=()
+    PROCESS_ENV_VALUES=()
+    LOADED_CONFIG_PRESENT=()
+    LOADED_CONFIG_VALUES=()
+    INSTALL_TEMP_PATHS=()
+    INSTALLER_BACKUP_DIR=''
+    INSTALLER_STAGED_BINARY=''
+    INSTALLER_AUTOSTART_DISABLE_ATTEMPTED=0
+    INSTALLER_AUTOSTART_DISABLE_CONFIRMED=0
+    INSTALLER_SERVICE_STOP_ATTEMPTED=0
+    INSTALLER_SERVICE_STOP_CONFIRMED=0
+    INSTALLER_REPLACEMENT_BEGUN=0
+    unset STUB_MANIFEST_MODE
+}
+
+write_stubs() {
+    local stub_dir=$1
+    local command
+
+    tee "$stub_dir/stub-command" >/dev/null <<'STUB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+name=${0##*/}
+
+log() {
+    printf '%s\n' "$*" >> "${STUB_TRACE:?}"
+}
+
+mode_for_path() {
+    local path=$1
+
+    if stat -c '%a' -- "$path" 2>/dev/null; then
+        return
+    fi
+
+    stat -f '%Lp' "$path"
+}
+
+case "$name" in
+    apt-get)
+        log "apt-get $*"
+        [ "${STUB_FAIL_PHASE:-}" != apt ] || exit 1
+        ;;
+    add-apt-repository)
+        log "add-apt-repository $*"
+        [ "${STUB_FAIL_PHASE:-}" != ppa ] || exit 1
+        ;;
+    awg)
+        log "awg $*"
+        printf '%s\n' 'amneziawg-tools v3.1.20260828 - https://amnezia.org'
+        ;;
+    dpkg-query)
+        package=${!#}
+        case "$package" in
+            amneziawg-tools) version=${STUB_TOOLS_VERSION:?} ;;
+            amneziawg-dkms) version=${STUB_DKMS_VERSION:?} ;;
+            *) exit 1 ;;
+        esac
+        case "${STUB_PACKAGE_STATUS_MODE:-installed}" in
+            installed) ;;
+            missing) exit 1 ;;
+            malformed)
+                printf '%s\n' 'not-a-package-status'
+                exit 0
+                ;;
+            not-installed)
+                printf 'rc \t%s\n' "$version"
+                exit 0
+                ;;
+            *) exit 1 ;;
+        esac
+        case "${STUB_PACKAGE_VERSION_MODE:-exact}" in
+            exact) ;;
+            newer) version="9.9.9-0~synthetic" ;;
+            older) version="0.0.0-0~synthetic" ;;
+            *) exit 1 ;;
+        esac
+        printf 'ii \t%s\n' "$version"
+        ;;
+    dpkg)
+        log "dpkg $*"
+        [ "${STUB_FAIL_PHASE:-}" != package-compare ] || exit 1
+        [ "${STUB_PACKAGE_VERSION_MODE:-exact}" != older ] || exit 1
+        ;;
+    curl)
+        config_file=''
+        output_file=''
+        url=''
+        arguments=("$@")
+        for index in "${!arguments[@]}"; do
+            argument=${arguments[index]}
+            case "$argument" in
+                --config)
+                    config_file=${arguments[index + 1]}
+                    ;;
+                -o)
+                    output_file=${arguments[index + 1]}
+                    ;;
+                http://* | https://*)
+                    url=$argument
+                    ;;
+            esac
+        done
+        printf '%q ' "$@" >> "${STUB_CURL_ARGUMENTS:?}"
+        printf '\n' >> "${STUB_CURL_ARGUMENTS:?}"
+        case "$url" in
+            'https://github.com/StealthSurf-VPN/awg-server/releases/latest/download/SHA256SUMS')
+                log 'curl latest-manifest'
+                printf '%s\n' 'HTTP/2 302' \
+                    'location: https://github.com/StealthSurf-VPN/awg-server/releases/download/v1.2.3/SHA256SUMS'
+                ;;
+            */SHA256SUMS)
+                log 'curl checksum-manifest'
+                case "${STUB_MANIFEST_MODE:-exact}" in
+                    exact)
+                        printf '%064d  awg-server-awg31-darwin-amd64\n' 0
+                        printf '%064d  awg-server-awg31-darwin-arm64\n' 0
+                        printf '%064d  awg-server-awg31-linux-amd64\n' 0
+                        printf '%064d  awg-server-awg31-linux-arm64\n' 0
+                        printf '%064d  awg-server-awg31-windows-amd64.exe\n' 0
+                        printf '%064d  awg-server-awg31-windows-arm64.exe\n' 0
+                        ;;
+                    legacy)
+                        printf '%064d  awg-server-darwin-amd64\n' 0
+                        printf '%064d  awg-server-darwin-arm64\n' 0
+                        printf '%064d  awg-server-linux-amd64\n' 0
+                        printf '%064d  awg-server-linux-arm64\n' 0
+                        printf '%064d  awg-server-windows-amd64.exe\n' 0
+                        printf '%064d  awg-server-windows-arm64.exe\n' 0
+                        ;;
+                    missing)
+                        printf '%064d  awg-server-awg31-darwin-amd64\n' 0
+                        printf '%064d  awg-server-awg31-darwin-arm64\n' 0
+                        printf '%064d  awg-server-awg31-linux-amd64\n' 0
+                        printf '%064d  awg-server-awg31-linux-arm64\n' 0
+                        printf '%064d  awg-server-awg31-windows-amd64.exe\n' 0
+                        ;;
+                    duplicate)
+                        printf '%064d  awg-server-awg31-darwin-amd64\n' 0
+                        printf '%064d  awg-server-awg31-darwin-amd64\n' 0
+                        printf '%064d  awg-server-awg31-linux-amd64\n' 0
+                        printf '%064d  awg-server-awg31-linux-arm64\n' 0
+                        printf '%064d  awg-server-awg31-windows-amd64.exe\n' 0
+                        printf '%064d  awg-server-awg31-windows-arm64.exe\n' 0
+                        ;;
+                    extra)
+                        printf '%064d  awg-server-awg31-darwin-amd64\n' 0
+                        printf '%064d  awg-server-awg31-darwin-arm64\n' 0
+                        printf '%064d  awg-server-awg31-linux-amd64\n' 0
+                        printf '%064d  awg-server-awg31-linux-arm64\n' 0
+                        printf '%064d  awg-server-awg31-windows-amd64.exe\n' 0
+                        printf '%064d  awg-server-awg31-windows-arm64.exe\n' 0
+                        printf '%064d  awg-server-awg31-linux-ppc64\n' 0
+                        ;;
+                    *) exit 1 ;;
+                esac > "$output_file"
+                ;;
+            */SHA256SUMS.sig)
+                log 'curl checksum-signature'
+                printf 'synthetic-signature' > "$output_file"
+                ;;
+            */awg-server-awg31-linux-amd64)
+                log 'curl release-binary'
+                printf '%s\n' \
+                    '#!/usr/bin/env bash' \
+                    'set -Eeuo pipefail' \
+                    'case "${1:-}" in' \
+                    'version)' \
+                    '    printf "awg-server %s\\n" "${STUB_VERSION:?}"' \
+                    '    ;;' \
+                    'check-runtime)' \
+                    '    printf "%s\\n" staged-check-runtime >> "${STUB_TRACE:?}"' \
+                    '    enablement=$(<"${STUB_STATE_DIR:?}/service-enablement")' \
+                    '    state=$(<"${STUB_STATE_DIR:?}/service-state")' \
+                    '    if [ "$enablement" != not-found ]; then' \
+                    '        case "$enablement:$state" in' \
+                    '            disabled:inactive | disabled:failed | masked:inactive | masked:failed) ;;' \
+                    '            *) printf "%s\\n" staged-runtime-observed-unsafe-service-state >> "${STUB_TRACE:?}"; exit 1 ;;' \
+                    '        esac' \
+                    '    fi' \
+                    '    if grep -Fqx -- old-binary "${STUB_BINARY_PATH:?}"; then' \
+                    '        printf "%s\\n" old-binary-present-at-check >> "${STUB_TRACE:?}"' \
+                    '    fi' \
+                    '    [ "${STUB_FAIL_PHASE:-}" != check-runtime-timeout ] || exit 124' \
+                    '    [ "${STUB_FAIL_PHASE:-}" != check-runtime ] || exit 1' \
+                    '    printf "%s\\n" qualified' \
+                    '    ;;' \
+                    '*) exit 1 ;;' \
+                    'esac' > "$output_file"
+                chmod 0755 "$output_file"
+                ;;
+            */health)
+                log 'curl health'
+                [ "${STUB_FAIL_PHASE:-}" != health ] || exit 1
+                printf '%s' "${STUB_HEALTH_RESPONSE:-{\"status\":\"ok\"}}"
+                ;;
+            */api/clients)
+                log 'curl clients'
+                [ -n "$config_file" ] || exit 1
+                mode=$(mode_for_path "$config_file")
+                printf '%s\n' "$mode" > "${STUB_CURL_CONFIG_MODE:?}"
+                printf '%s\n' "$config_file" > "${STUB_CURL_CONFIG_PATH:?}"
+                grep -Fq -- "Authorization: Bearer ${STUB_EXPECTED_TOKEN:?}" "$config_file" \
+                    || exit 1
+                case "${STUB_FAIL_PHASE:-}" in
+                    clients | auth-transport) exit 1 ;;
+                esac
+                if [ "${STUB_FAIL_PHASE:-}" = clients-json ]; then
+                    printf '%s' '{}'
+                else
+                    printf '%s' "${STUB_CLIENTS_RESPONSE:-[]}"
+                fi
+                ;;
+            *)
+                exit 1
+                ;;
+        esac
+        ;;
+    openssl)
+        log "openssl $*"
+        case " $* " in
+            *' base64 -d -A '*) printf 'synthetic-public-key' ;;
+            *' pkey -pubin '* ) printf '%s\n' 'ED25519 Public-Key:' ;;
+            *' pkeyutl -verify '*)
+                [ "${STUB_FAIL_PHASE:-}" != signature ] || exit 1
+                ;;
+            *) exit 1 ;;
+        esac
+        ;;
+    sha256sum)
+        log "sha256sum $*"
+        [ "${STUB_FAIL_PHASE:-}" != checksum ] || exit 1
+        ;;
+    systemctl)
+        action=''
+        for argument in "$@"; do
+            case "$argument" in
+                is-active | stop | daemon-reload | disable | enable | start | show | is-enabled)
+                    action=$argument
+                    break
+                    ;;
+            esac
+        done
+        log "systemctl ${action:-unknown}"
+        case "$action" in
+            is-active)
+                if [ -n "${STUB_SYSTEMCTL_STATUS:-}" ]; then
+                    exit "$STUB_SYSTEMCTL_STATUS"
+                fi
+                if [ "$(<"${STUB_STATE_DIR:?}/service-state")" = active ]; then
+                    exit 0
+                fi
+                exit 3
+                ;;
+            stop)
+                stop_count=0
+                if [ -e "${STUB_STATE_DIR:?}/stop-count" ]; then
+                    stop_count=$(<"${STUB_STATE_DIR:?}/stop-count")
+                fi
+                stop_count=$((stop_count + 1))
+                printf '%s\n' "$stop_count" > "${STUB_STATE_DIR:?}/stop-count"
+                if [ "$stop_count" -gt 1 ]; then
+                    case "${STUB_RECOVERY_STOP_MODE:-}" in
+                        '') ;;
+                        error) exit 1 ;;
+                        active) exit 0 ;;
+                        *) exit 1 ;;
+                    esac
+                fi
+                case "${STUB_INITIAL_STOP_MODE:-}" in
+                    '') ;;
+                    delayed-error)
+                        printf '%s\n' deactivating \
+                            > "${STUB_STATE_DIR:?}/service-state"
+                        exit 124
+                        ;;
+                    active) exit 0 ;;
+                    deactivating)
+                        printf '%s\n' deactivating \
+                            > "${STUB_STATE_DIR:?}/service-state"
+                        exit 0
+                        ;;
+                    *) exit 1 ;;
+                esac
+                [ "${STUB_FAIL_PHASE:-}" != stop ] || exit 1
+                [ "${STUB_STOP_LEAVES_ACTIVE:-0}" != 1 ] || exit 0
+                printf '%s\n' inactive > "${STUB_STATE_DIR:?}/service-state"
+                ;;
+            daemon-reload)
+                [ "${STUB_FAIL_PHASE:-}" != daemon-reload ] || exit 1
+                if [ "$(<"${STUB_STATE_DIR:?}/service-enablement")" = not-found ] \
+                    && [ -e "${STUB_UNIT_PATH:?}" ]; then
+                    printf '%s\n' disabled \
+                        > "${STUB_STATE_DIR:?}/service-enablement"
+                fi
+                ;;
+            disable)
+                case "${STUB_FAIL_PHASE:-}" in
+                    disable) exit 1 ;;
+                    disable-stale) exit 0 ;;
+                esac
+                if [ "$(<"${STUB_STATE_DIR:?}/service-enablement")" = not-found ]; then
+                    exit 1
+                fi
+                printf '%s\n' disabled > "${STUB_STATE_DIR:?}/service-enablement"
+                if [ "${STUB_SIGNAL_PHASE:-}" = disable ] \
+                    && [ ! -e "${STUB_STATE_DIR:?}/disable-signal-sent" ]; then
+                    : > "${STUB_STATE_DIR:?}/disable-signal-sent"
+                    log "signal ${STUB_SIGNAL_PHASE}"
+                    log "signal target=${STUB_SIGNAL_TARGET:?}"
+                    kill -TERM "${STUB_SIGNAL_TARGET:?}"
+                fi
+                ;;
+            enable)
+                [ "${STUB_FAIL_PHASE:-}" != enable ] || exit 1
+                printf '%s\n' enabled > "${STUB_STATE_DIR:?}/service-enablement"
+                [ "${STUB_FAIL_PHASE:-}" != enable-partial ] || exit 1
+                ;;
+            start)
+                [ "${STUB_FAIL_PHASE:-}" != start ] || exit 1
+                printf '%s\n' active > "${STUB_STATE_DIR:?}/service-state"
+                if [ "${STUB_SAME_INVOCATION:-0}" = 1 ]; then
+                    printf '%s\n' old-invocation > "${STUB_STATE_DIR:?}/invocation"
+                else
+                    printf '%s\n' new-invocation > "${STUB_STATE_DIR:?}/invocation"
+                fi
+                if [ "${STUB_MUTATE_JSON:-0}" = 1 ]; then
+                    printf '%s\n' '{"state":"new-normalized"}' > "${STUB_CLIENTS_FILE:?}"
+                fi
+                if [ "${STUB_SIGNAL_PHASE:-}" = start ]; then
+                    log "signal ${STUB_SIGNAL_PHASE}"
+                    log "signal target=${STUB_SIGNAL_TARGET:?}"
+                    kill -TERM "${STUB_SIGNAL_TARGET:?}"
+                fi
+                ;;
+            show)
+                case " $* " in
+                    *' --property=LoadState --property=ActiveState '*)
+                        [ -z "${STUB_SYSTEMCTL_STATUS:-}" ] \
+                            || exit "$STUB_SYSTEMCTL_STATUS"
+                        if [ "$(<"${STUB_STATE_DIR:?}/service-enablement")" = not-found ]; then
+                            printf '%s\n' 'LoadState=not-found'
+                        else
+                            printf '%s\n' 'LoadState=loaded'
+                        fi
+                        printf 'ActiveState=%s\n' \
+                            "$(<"${STUB_STATE_DIR:?}/service-state")"
+                        ;;
+                    *' --property=LoadState '*)
+                        [ "${STUB_FAIL_PHASE:-}" != load-state ] || exit 1
+                        if [ "$(<"${STUB_STATE_DIR:?}/service-enablement")" = not-found ]; then
+                            printf '%s\n' not-found
+                        else
+                            printf '%s\n' loaded
+                        fi
+                        ;;
+                    *) cat "${STUB_STATE_DIR:?}/invocation" ;;
+                esac
+                ;;
+            is-enabled)
+                enablement=$(<"${STUB_STATE_DIR:?}/service-enablement")
+                if [ "${STUB_SIGNAL_PHASE:-}" = enabled-state ] \
+                    && [ "$enablement" = enabled ]; then
+                    log "signal ${STUB_SIGNAL_PHASE}"
+                    log "signal target=${STUB_SIGNAL_TARGET:?}"
+                    kill -TERM "${STUB_SIGNAL_TARGET:?}"
+                fi
+                if [ "${STUB_FAIL_PHASE:-}" = enabled-state ] \
+                    && [ "$enablement" = enabled ]; then
+                    exit 1
+                fi
+                if [ "$enablement" != not-found ]; then
+                    case " $* " in
+                        *' --quiet '*) ;;
+                        *) printf '%s\n' "$enablement" ;;
+                    esac
+                fi
+                [ "$enablement" = enabled ]
+                ;;
+            *) exit 1 ;;
+        esac
+        ;;
+    modprobe)
+        if [ "${1:-}" = -r ]; then
+            log 'modprobe unload'
+            [ "${STUB_FAIL_PHASE:-}" != module-unload ] || exit 1
+            if [ "${STUB_SIGNAL_PHASE:-}" = module-unload ]; then
+                log "signal ${STUB_SIGNAL_PHASE}"
+                log "signal target=${STUB_SIGNAL_TARGET:?}"
+                kill -TERM "${STUB_SIGNAL_TARGET:?}"
+            fi
+        else
+            log 'modprobe load'
+            [ "${STUB_FAIL_PHASE:-}" != module-load ] || exit 1
+        fi
+        ;;
+    modinfo)
+        log 'modinfo module'
+        [ "${STUB_FAIL_PHASE:-}" != module-info ] || exit 1
+        ;;
+    ip)
+        log "ip $*"
+        if [ "${STUB_FOREIGN_INTERFACE:-0}" = 1 ]; then
+            printf '%s\n' '7: foreign-awg: <POINTOPOINT> mtu 1420 qdisc noop state DOWN mode DEFAULT group default'
+        fi
+        ;;
+    install)
+        log "install $*"
+        destination=${!#}
+        if [ "$destination" = "${STUB_BINARY_PATH:?}" ] \
+            && [ "${STUB_FAIL_PHASE:-}" = binary-install ]; then
+            exit 1
+        fi
+        source=${@: -2:1}
+        cp -- "$source" "$destination"
+        chmod 0755 "$destination"
+        if [ "$destination" = "${STUB_BINARY_PATH:?}" ] \
+            && [ "${STUB_SIGNAL_PHASE:-}" = binary-install ]; then
+            log "signal ${STUB_SIGNAL_PHASE}"
+            log "signal target=${STUB_SIGNAL_TARGET:?}"
+            kill -TERM "${STUB_SIGNAL_TARGET:?}"
+        fi
+        ;;
+    cp)
+        log "backup-copy $*"
+        [ "${STUB_FAIL_PHASE:-}" != backup ] || exit 1
+        /bin/cp "$@"
+        ;;
+    chown)
+        log "chown $*"
+        target=${!#}
+        if [ "${STUB_FAIL_PHASE:-}" = backup-chown ] \
+            && [[ $target == "${STUB_BACKUP_ROOT:?}"/.pending.*/* ]]; then
+            exit 1
+        fi
+        ;;
+    chmod)
+        log "chmod $*"
+        target=${!#}
+        if [ "${STUB_FAIL_PHASE:-}" = backup-chmod ] \
+            && [[ $target == "${STUB_BACKUP_ROOT:?}"/.pending.*/* ]]; then
+            exit 1
+        fi
+        /bin/chmod "$@"
+        ;;
+    mv)
+        log "mv $*"
+        target=${!#}
+        if [ "${STUB_FAIL_PHASE:-}" = backup-mv ] \
+            && [[ $target == "${STUB_BACKUP_ROOT:?}"/upgrade.* ]]; then
+            exit 1
+        fi
+        /bin/mv "$@"
+        ;;
+    sysctl)
+        log "sysctl $*"
+        [ "${STUB_FAIL_PHASE:-}" != sysctl ] || exit 1
+        ;;
+    timeout)
+        log "timeout $*"
+        while [[ ${1:-} == --* ]]; do
+            shift
+        done
+        shift
+        exec "$@"
+        ;;
+    sleep)
+        if [ "${STUB_COMPLETE_STOP_ON_POLL:-0}" = 1 ] \
+            && [ "$(<"${STUB_STATE_DIR:?}/service-state")" = deactivating ]; then
+            printf '%s\n' inactive > "${STUB_STATE_DIR:?}/service-state"
+            exit 0
+        fi
+        exit 1
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+STUB
+    chmod 0755 "$stub_dir/stub-command"
+
+    for command in \
+        add-apt-repository apt-get awg chmod chown cp curl dpkg dpkg-query install ip \
+        modinfo modprobe mv openssl sha256sum sleep sysctl systemctl timeout; do
+        ln -s stub-command "$stub_dir/$command"
+    done
+}
+
+setup_base_case() {
+    local name=$1
+
+    case_dir="$temp_dir/$name"
+    mkdir -p "$case_dir" "$case_dir/stubs" "$case_dir/state" "$case_dir/data"
+    write_stubs "$case_dir/stubs"
+
+    PATH="$case_dir/stubs:$original_path"
+    export PATH
+
+    export STUB_TRACE="$case_dir/trace"
+    export STUB_CURL_ARGUMENTS="$case_dir/curl-arguments"
+    export STUB_CURL_CONFIG_MODE="$case_dir/curl-config-mode"
+    export STUB_CURL_CONFIG_PATH="$case_dir/curl-config-path"
+    export STUB_STATE_DIR="$case_dir/state"
+    export STUB_BINARY_PATH="$case_dir/bin/awg-server"
+    export STUB_CLIENTS_FILE="$case_dir/data/clients.json"
+    export STUB_BACKUP_ROOT="$case_dir/backups"
+    export STUB_EXPECTED_TOKEN='synthetic-test-bearer-token'
+    export STUB_VERSION=1.2.3
+    export STUB_TOOLS_VERSION='1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1'
+    export STUB_DKMS_VERSION='1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1'
+    unset STUB_FAIL_PHASE STUB_FOREIGN_INTERFACE STUB_HEALTH_RESPONSE \
+        STUB_CLIENTS_RESPONSE STUB_MUTATE_JSON STUB_SAME_INVOCATION \
+        STUB_PACKAGE_STATUS_MODE STUB_PACKAGE_VERSION_MODE \
+        STUB_RECOVERY_STOP_MODE STUB_SIGNAL_PHASE STUB_SIGNAL_TARGET STUB_STOP_LEAVES_ACTIVE \
+        STUB_INITIAL_STOP_MODE STUB_COMPLETE_STOP_ON_POLL \
+        STUB_SYSTEMCTL_STATUS || true
+
+    printf '%s\n' active > "$case_dir/state/service-state"
+    printf '%s\n' enabled > "$case_dir/state/service-enablement"
+    printf '%s\n' old-invocation > "$case_dir/state/invocation"
+    : > "$STUB_TRACE"
+    : > "$STUB_CURL_ARGUMENTS"
+    : > "$case_dir/state/stop-count"
+
+    mkdir -p "$case_dir/bin" "$case_dir/etc" "$case_dir/sysctl" "$case_dir/systemd"
+    printf '%s\n' old-binary > "$STUB_BINARY_PATH"
+    chmod 0755 "$STUB_BINARY_PATH"
+
+    INSTALLER_BINARY_PATH=$STUB_BINARY_PATH
+    INSTALLER_ENV_PATH="$case_dir/etc/awg-server.env"
+    INSTALLER_SYSCTL_PATH="$case_dir/sysctl/99-awg-server.conf"
+    INSTALLER_UNIT_PATH="$case_dir/systemd/awg-server.service"
+    export STUB_UNIT_PATH=$INSTALLER_UNIT_PATH
+    INSTALLER_STAGE_ROOT="$case_dir/stage"
+    INSTALLER_BACKUP_ROOT="$case_dir/backups"
+    INSTALLER_BACKUP_DIR=''
+    INSTALLER_STAGED_BINARY=''
+    INSTALLER_SERVICE_GATE_SECONDS=5
+    INSTALLER_RUNTIME_GATE_SECONDS=5
+
+    reset_settings
+    export AWG_API_TOKEN=$STUB_EXPECTED_TOKEN
+    export AWG_ADDRESS=10.0.0.1/24
+    export AWG_ENDPOINT=vpn.example.test
+    export AWG_DATA_DIR="$case_dir/data"
+}
+
+resolve_case_settings() {
+    resolve_installer_settings
+    AWG_SERVER_VERSION=1.2.3
+}
+
+test_release_asset_bridge() {
+    local mode
+
+    setup_base_case asset-names
+    [ "$(release_asset_name x86_64)" = awg-server-awg31-linux-amd64 ] \
+        || fail 'x86_64 did not select the AWG31 release asset'
+    [ "$(release_asset_name aarch64)" = awg-server-awg31-linux-arm64 ] \
+        || fail 'aarch64 did not select the AWG31 release asset'
+    [ "$(release_asset_name x86_64)" != awg-server-linux-amd64 ] \
+        || fail 'legacy x86_64 asset name still selected'
+
+    setup_base_case legacy-only
+    export STUB_MANIFEST_MODE=legacy
+    resolve_case_settings
+    if stage_verified_release awg-server-awg31-linux-amd64; then
+        fail 'legacy-only checksum manifest unexpectedly passed the AWG31 gate'
+    fi
+
+    for mode in missing duplicate extra; do
+        setup_base_case "manifest-$mode"
+        export STUB_MANIFEST_MODE=$mode
+        resolve_case_settings
+        if stage_verified_release awg-server-awg31-linux-amd64; then
+            fail "$mode checksum manifest unexpectedly passed the exact asset gate"
+        fi
+    done
+
+    setup_base_case exact-manifest
+    resolve_case_settings
+    stage_verified_release awg-server-awg31-linux-amd64 \
+        || fail 'exact AWG31 checksum manifest was rejected'
+
+    setup_base_case legacy-request
+    resolve_case_settings
+    if stage_verified_release awg-server-linux-amd64; then
+        fail 'legacy requested asset selected an AWG31 release binary'
+    fi
+}
+
+run_transaction() {
+    local output_file=$1
+    local error_file=$2
+
+    if (install_release_transaction awg-server-awg31-linux-amd64) >"$output_file" 2>"$error_file"; then
+        return 0
+    fi
+
+    return 1
+}
+
+assert_recovery_message() {
+    local error_file=$1
+
+    assert_file_contains "$error_file" 'RECOVERY: awg-server remains stopped.'
+    assert_file_contains "$error_file" 'Automatic startup is disabled'
+    assert_file_not_contains "$error_file" "$STUB_EXPECTED_TOKEN"
+}
+
+assert_unconfirmed_recovery_message() {
+    local error_file=$1
+
+    assert_file_contains "$error_file" \
+        'RECOVERY: awg-server stop could not be confirmed.'
+    assert_file_contains "$error_file" 'Automatic startup is disabled'
+    assert_file_not_contains "$error_file" 'RECOVERY: awg-server remains stopped.'
+    assert_file_not_contains "$error_file" "$STUB_EXPECTED_TOKEN"
+}
+
+assert_unconfirmed_autostart_recovery_message() {
+    local error_file=$1
+
+    assert_file_contains "$error_file" \
+        'automatic-start disablement could not be confirmed'
+    assert_file_contains "$error_file" 'Do not reboot'
+    assert_file_not_contains "$error_file" 'Automatic startup is disabled'
+    assert_file_not_contains "$error_file" "$STUB_EXPECTED_TOKEN"
+}
+
+assert_retained_backup_reported() {
+    local error_file=$1
+    local backup_root=$2
+    local completed_backup
+
+    completed_backup=$(backup_dir "$backup_root")
+    assert_file_contains "$error_file" "Backup retained at: $completed_backup"
+}
+
+assert_no_completed_backup_reported() {
+    local error_file=$1
+
+    assert_file_contains "$error_file" 'RECOVERY: no completed backup was created.'
+    assert_file_not_contains "$error_file" 'Backup retained at:'
+    assert_file_not_contains "$error_file" 'root-only backup'
+}
+
+assert_autostart_disabled() {
+    local state_dir=$1
+    local enablement
+
+    enablement=$(<"$state_dir/service-enablement")
+    case "$enablement" in
+        disabled | masked | not-found) ;;
+        *) fail "service automatic startup remained $enablement" ;;
+    esac
+}
+
+assert_simulated_reboot_stays_stopped() {
+    local state_dir=$1
+
+    printf '%s\n' inactive > "$state_dir/service-state"
+    if [ "$(<"$state_dir/service-enablement")" = enabled ]; then
+        printf '%s\n' active > "$state_dir/service-state"
+    fi
+    assert_stopped "$state_dir/service-state"
+}
+
+trace_count() {
+    local trace_file=$1
+    local entry=$2
+
+    grep -c -Fx -- "$entry" "$trace_file" || true
+}
+
+trace_first_line() {
+    local trace_file=$1
+    local entry=$2
+
+    awk -v entry="$entry" '$0 == entry { print NR; exit }' "$trace_file"
+}
+
+trace_last_line() {
+    local trace_file=$1
+    local entry=$2
+
+    awk -v entry="$entry" '$0 == entry { line = NR } END { if (line) print line }' \
+        "$trace_file"
+}
+
+test_config_parser_rejects_executable_and_unknown_input() {
+    local config_file
+    local original_stage_root
+
+    setup_base_case config-parser-unsafe
+    config_file="$case_dir/unsafe.env"
+    original_stage_root=$INSTALLER_STAGE_ROOT
+    export STUB_PARSER_EXECUTED="$case_dir/parser-executed"
+    tee "$config_file" >/dev/null <<'EOF'
+AWG_API_TOKEN="synthetic-file-token"
+AWG_ADDRESS="10.0.0.1/24"
+AWG_ENDPOINT="vpn.example.test"
+AWG_MTU="$(printf owned > "${STUB_PARSER_EXECUTED:?}")"
+EOF
+    chmod 0600 "$config_file"
+
+    if load_config_file "$config_file"; then
+        fail 'config parser accepted a command substitution'
+    fi
+    [ ! -e "$STUB_PARSER_EXECUTED" ] \
+        || fail 'config parser executed a command substitution'
+    [ "$INSTALLER_STAGE_ROOT" = "$original_stage_root" ] \
+        || fail 'config parser changed an internal installer path'
+
+    tee "$config_file" >/dev/null <<'EOF'
+AWG_API_TOKEN="synthetic-file-token"
+AWG_ADDRESS="10.0.0.1/24"
+AWG_ENDPOINT="vpn.example.test"
+INSTALLER_STAGE_ROOT="/unsafe"
+EOF
+    if load_config_file "$config_file"; then
+        fail 'config parser accepted an unknown assignment'
+    fi
+    [ "$INSTALLER_STAGE_ROOT" = "$original_stage_root" ] \
+        || fail 'unknown config assignment changed an internal installer path'
+
+    tee "$config_file" >/dev/null <<'EOF'
+AWG_API_TOKEN="synthetic-file-token"
+AWG_ADDRESS="10.0.0.1/24"
+AWG_ENDPOINT=unquoted
+EOF
+    if load_config_file "$config_file"; then
+        fail 'config parser accepted malformed syntax'
+    fi
+}
+
+test_config_parser_round_trips_rendered_values() {
+    local config_file
+    local special_token='synthetic token with spaces "quotes" \ slash $ dollar ` tick'
+    local special_endpoint='vpn example "quoted" \ path $ value ` value'
+
+    setup_base_case config-parser-round-trip
+    config_file="$case_dir/round-trip.env"
+    AWG_API_TOKEN=$special_token
+    AWG_ADDRESS=10.0.0.1/24
+    AWG_ENDPOINT=$special_endpoint
+    AWG_DNS='dns value with spaces "quotes" \ slash $ dollar ` tick'
+    render_environment > "$config_file" || fail 'could not render round-trip environment'
+
+    reset_settings
+    load_config_file "$config_file" || fail 'parser rejected rendered environment'
+    apply_loaded_config_environment
+    [ "$AWG_API_TOKEN" = "$special_token" ] \
+        || fail 'parser did not preserve token round-trip bytes'
+    [ "$AWG_ENDPOINT" = "$special_endpoint" ] \
+        || fail 'parser did not preserve endpoint round-trip bytes'
+    [ "$AWG_DNS" = 'dns value with spaces "quotes" \ slash $ dollar ` tick' ] \
+        || fail 'parser did not preserve DNS round-trip bytes'
+}
+
+test_package_minimum_versions() {
+    local version_mode
+
+    for version_mode in exact newer older; do
+        setup_base_case "packages-$version_mode"
+        export STUB_PACKAGE_VERSION_MODE=$version_mode
+
+        if [ "$version_mode" = older ]; then
+            if install_amneziawg >"$case_dir/output" 2>"$case_dir/error"; then
+                fail 'older packages unexpectedly passed the minimum gate'
+            fi
+        else
+            install_amneziawg >"$case_dir/output" 2>"$case_dir/error" \
+                || fail "$version_mode package versions failed the minimum gate"
+        fi
+
+        case "$version_mode" in
+            exact)
+                assert_file_contains "$STUB_TRACE" \
+                    "dpkg --compare-versions $STUB_TOOLS_VERSION ge $STUB_TOOLS_VERSION"
+                ;;
+            newer)
+                assert_file_contains "$STUB_TRACE" \
+                    'dpkg --compare-versions 9.9.9-0~synthetic ge'
+                ;;
+        esac
+    done
+}
+
+test_package_status_rejection() {
+    local status_mode
+
+    for status_mode in missing malformed not-installed; do
+        setup_base_case "package-status-$status_mode"
+        export STUB_PACKAGE_STATUS_MODE=$status_mode
+
+        if install_amneziawg >"$case_dir/output" 2>"$case_dir/error"; then
+            fail "$status_mode package status unexpectedly passed"
+        fi
+        assert_file_contains "$STUB_TRACE" 'apt-get install -y amneziawg amneziawg-tools amneziawg-dkms'
+    done
+}
+
+test_settings_precedence_and_rerun() {
+    local setting
+    local key
+    local expected
+    local -a rerun_settings=(
+        'AWG_DEFAULT_PROTOCOL_VERSION=2.0'
+        'AWG31_MTU=1300'
+        'AWG31_PERSISTENT_KEEPALIVE=30-40'
+        'AWG31_CONTENT_PADDING_ADDITION=20-30'
+        'AWG31_REKEY_AFTER_TIME=40-50'
+        'AWG31_REKEY_TIMEOUT=6-8'
+        'AWG31_REJECT_AFTER_TIME=160-170'
+        'AWG31_KEEPALIVE_TIMEOUT=8-12'
+        'AWG31_MAX_HANDSHAKE_ATTEMPTS=18-19'
+        'AWG31_RANDOM_TRAILERS=off'
+        'AWG31_DISABLE_COOKIES=on'
+    )
+
+    setup_base_case fresh-settings
+    resolve_case_settings
+
+    for setting in \
+        'AWG_DEFAULT_PROTOCOL_VERSION=3.1' \
+        'AWG31_MTU=1280' \
+        'AWG31_PERSISTENT_KEEPALIVE=25-35' \
+        'AWG31_CONTENT_PADDING_ADDITION=10-100' \
+        'AWG31_REKEY_AFTER_TIME=100-120' \
+        'AWG31_REKEY_TIMEOUT=3-7' \
+        'AWG31_REJECT_AFTER_TIME=150-180' \
+        'AWG31_KEEPALIVE_TIMEOUT=5-15' \
+        'AWG31_MAX_HANDSHAKE_ATTEMPTS=15-20' \
+        'AWG31_RANDOM_TRAILERS=on' \
+        'AWG31_DISABLE_COOKIES=off'; do
+        key=${setting%%=*}
+        expected=${setting#*=}
+        [ "${!key}" = "$expected" ] \
+            || fail "fresh setting $key did not use its default"
+    done
+
+    setup_base_case rerun-settings
+    tee "$INSTALLER_ENV_PATH" >/dev/null <<EOF
+AWG_API_TOKEN="synthetic-file-token"
+AWG_ADDRESS="10.0.0.1/24"
+AWG_ENDPOINT="vpn.example.test"
+AWG_DATA_DIR="$case_dir/data"
+AWG_DEFAULT_PROTOCOL_VERSION="2.0"
+AWG31_MTU="1300"
+AWG31_PERSISTENT_KEEPALIVE="30-40"
+AWG31_CONTENT_PADDING_ADDITION="20-30"
+AWG31_REKEY_AFTER_TIME="40-50"
+AWG31_REKEY_TIMEOUT="6-8"
+AWG31_REJECT_AFTER_TIME="160-170"
+AWG31_KEEPALIVE_TIMEOUT="8-12"
+AWG31_MAX_HANDSHAKE_ATTEMPTS="18-19"
+AWG31_RANDOM_TRAILERS="off"
+AWG31_DISABLE_COOKIES="on"
+EOF
+    chmod 0600 "$INSTALLER_ENV_PATH"
+    export AWG31_MTU=1400
+    resolve_case_settings
+    write_host_configuration || fail 'could not write rerun configuration'
+
+    for setting in "${rerun_settings[@]}"; do
+        key=${setting%%=*}
+        expected=${setting#*=}
+        if [ "$key" = AWG31_MTU ]; then
+            expected=1400
+        fi
+        [ "${!key}" = "$expected" ] \
+            || fail "rerun setting $key did not preserve the selected value"
+        assert_file_contains "$INSTALLER_ENV_PATH" "$key=\"$expected\""
+    done
+}
+
+test_success_enables_only_after_qualification() {
+    local clients_line
+    local completed_backup
+    local disable_line
+    local enable_line
+    local health_line
+    local initial_enablement
+    local runtime_line
+    local start_line
+    local stop_line
+    local verified_enabled_line
+
+    for initial_enablement in enabled disabled not-found; do
+        setup_base_case "enable-after-qualification-$initial_enablement"
+        printf '%s\n' "$initial_enablement" \
+            > "$case_dir/state/service-enablement"
+        if [ "$initial_enablement" = not-found ]; then
+            printf '%s\n' inactive > "$case_dir/state/service-state"
+        fi
+        resolve_case_settings
+        if ! run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$initial_enablement successful transaction failed"
+        fi
+
+        [ "$(<"$case_dir/state/service-state")" = active ] \
+            || fail "$initial_enablement successful service was not active"
+        [ "$(<"$case_dir/state/service-enablement")" = enabled ] \
+            || fail "$initial_enablement successful service was not enabled"
+
+        if [ "$initial_enablement" = enabled ]; then
+            completed_backup=$(backup_dir "$INSTALLER_BACKUP_ROOT")
+            assert_mode "$INSTALLER_STAGE_ROOT" 700
+            assert_mode "$INSTALLER_BACKUP_ROOT" 700
+            assert_mode "$completed_backup" 700
+            [ ! -e "$completed_backup/environment" ] \
+                || fail 'fresh backup copied an absent environment file'
+            [ ! -e "$completed_backup/clients.json" ] \
+                || fail 'fresh backup copied an absent clients file'
+            [ ! -e "$completed_backup/usage.json" ] \
+                || fail 'fresh backup copied an absent usage file'
+        fi
+
+        disable_line=$(trace_first_line "$STUB_TRACE" 'systemctl disable')
+        stop_line=$(trace_first_line "$STUB_TRACE" 'systemctl stop')
+        runtime_line=$(trace_first_line "$STUB_TRACE" 'staged-check-runtime')
+        start_line=$(trace_first_line "$STUB_TRACE" 'systemctl start')
+        health_line=$(trace_first_line "$STUB_TRACE" 'curl health')
+        clients_line=$(trace_first_line "$STUB_TRACE" 'curl clients')
+        enable_line=$(trace_first_line "$STUB_TRACE" 'systemctl enable')
+        verified_enabled_line=$(trace_last_line "$STUB_TRACE" 'systemctl is-enabled')
+        if [ "$initial_enablement" = not-found ]; then
+            [ -z "$stop_line" ] && [ "$disable_line" -lt "$runtime_line" ] \
+                || fail 'not-found service unexpectedly received a stop request'
+        else
+            [ -n "$stop_line" ] && [ "$disable_line" -lt "$stop_line" ] \
+                && [ "$stop_line" -lt "$runtime_line" ] \
+                || fail "$initial_enablement stop order was not fail-closed"
+        fi
+        [ "$runtime_line" -lt "$start_line" ] \
+            && [ "$start_line" -lt "$health_line" ] \
+            && [ "$health_line" -lt "$clients_line" ] \
+            && [ "$clients_line" -lt "$enable_line" ] \
+            && [ "$enable_line" -lt "$verified_enabled_line" ] \
+            || fail "$initial_enablement enablement order was not fail-closed"
+    done
+}
+
+test_not_found_service_must_have_a_stopped_active_state() {
+    local active_state
+    local deadline
+
+    for active_state in active deactivating; do
+        setup_base_case "not-found-$active_state"
+        printf '%s\n' not-found > "$case_dir/state/service-enablement"
+        printf '%s\n' "$active_state" > "$case_dir/state/service-state"
+        deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") \
+            || fail "could not create $active_state service-state deadline"
+
+        if service_stopped_before_deadline "$deadline"; then
+            fail "not-found unit with ActiveState=$active_state was accepted as stopped"
+        fi
+    done
+
+    for active_state in inactive failed; do
+        setup_base_case "not-found-$active_state"
+        printf '%s\n' not-found > "$case_dir/state/service-enablement"
+        printf '%s\n' "$active_state" > "$case_dir/state/service-state"
+        deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") \
+            || fail "could not create $active_state service-state deadline"
+
+        service_stopped_before_deadline "$deadline" \
+            || fail "not-found unit with ActiveState=$active_state was not accepted as stopped"
+    done
+}
+
+test_stop_backup_module_order_and_permissions() {
+    local completed_backup
+    local post_runtime_interface_check
+    local runtime_line
+
+    setup_base_case rerun-success
+    tee "$INSTALLER_ENV_PATH" >/dev/null <<EOF
+AWG_API_TOKEN="$STUB_EXPECTED_TOKEN"
+AWG_ADDRESS="10.0.0.1/24"
+AWG_ENDPOINT="vpn.example.test"
+AWG_DATA_DIR="$case_dir/data"
+EOF
+    chmod 0600 "$INSTALLER_ENV_PATH"
+    printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
+    printf '%s\n' '{"usage":"original"}' > "$case_dir/data/usage.json"
+    chmod 0600 "$case_dir/data/clients.json" "$case_dir/data/usage.json"
+    resolve_case_settings
+    if ! run_transaction "$case_dir/output" "$case_dir/error"; then
+        fail 'rerun transaction failed'
+    fi
+
+    completed_backup=$(backup_dir "$INSTALLER_BACKUP_ROOT")
+    assert_before "$STUB_TRACE" 'systemctl disable' 'systemctl stop'
+    assert_before "$STUB_TRACE" 'systemctl stop' 'backup-copy'
+    assert_before "$STUB_TRACE" 'backup-copy' 'modprobe unload'
+    assert_before "$STUB_TRACE" 'modprobe unload' 'staged-check-runtime'
+    assert_before "$STUB_TRACE" 'staged-check-runtime' 'systemctl start'
+    assert_before "$STUB_TRACE" 'curl health' 'curl clients'
+    assert_file_contains "$STUB_TRACE" \
+        'systemctl stop --no-block awg-server.service'
+    assert_file_contains "$STUB_TRACE" \
+        'systemctl show --property=LoadState --property=ActiveState awg-server.service'
+    assert_file_contains "$STUB_TRACE" 'old-binary-present-at-check'
+    runtime_line=$(trace_first_line "$STUB_TRACE" 'staged-check-runtime')
+    post_runtime_interface_check=$(trace_last_line \
+        "$STUB_TRACE" 'ip -o link show type amneziawg')
+    [ "$(trace_count "$STUB_TRACE" 'ip -o link show type amneziawg')" = 2 ] \
+        && [ "$runtime_line" -lt "$post_runtime_interface_check" ] \
+        || fail 'staged runtime was not followed by an AWG interface assertion'
+    assert_mode "$completed_backup" 700
+    assert_mode "$completed_backup/environment" 600
+    assert_mode "$completed_backup/clients.json" 600
+    assert_mode "$completed_backup/usage.json" 600
+    assert_file_contains "$completed_backup/clients.json" '{"state":"original"}'
+    assert_file_contains "$completed_backup/usage.json" '{"usage":"original"}'
+}
+
+test_foreign_interface_refusal() {
+    setup_base_case foreign-interface
+    export STUB_FOREIGN_INTERFACE=1
+    printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
+    resolve_case_settings
+    if run_transaction "$case_dir/output" "$case_dir/error"; then
+        fail 'foreign interface did not abort the upgrade'
+    fi
+
+    assert_file_contains "$STUB_BINARY_PATH" old-binary
+    assert_stopped "$case_dir/state/service-state"
+    assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
+    assert_file_not_contains "$STUB_TRACE" 'ip link del'
+    assert_recovery_message "$case_dir/error"
+    assert_autostart_disabled "$case_dir/state"
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
+    assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
+}
+
+test_before_backup_failures() {
+    local phase
+
+    for phase in apt signature checksum; do
+        setup_base_case "before-backup-$phase"
+        export STUB_FAIL_PHASE=$phase
+        resolve_case_settings
+        if run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$phase unexpectedly passed"
+        fi
+
+        assert_file_contains "$STUB_BINARY_PATH" old-binary
+        [ "$(<"$case_dir/state/service-state")" = active ] \
+            || fail "$phase stopped an existing service before a completed stage"
+        [ ! -d "$INSTALLER_BACKUP_ROOT" ] \
+            || fail "$phase created a backup before the graceful stop boundary"
+        assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
+    done
+
+    setup_base_case before-backup-copy
+    export STUB_FAIL_PHASE=backup
+    printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
+    resolve_case_settings
+    if run_transaction "$case_dir/output" "$case_dir/error"; then
+        fail 'backup copy failure unexpectedly passed'
+    fi
+
+    assert_file_contains "$STUB_BINARY_PATH" old-binary
+    assert_stopped "$case_dir/state/service-state"
+    assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
+    assert_recovery_message "$case_dir/error"
+    assert_autostart_disabled "$case_dir/state"
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
+}
+
+test_backup_failures_report_no_completed_backup() {
+    local phase
+    local completed
+
+    for phase in backup backup-chown backup-chmod backup-mv; do
+        setup_base_case "backup-failure-$phase"
+        export STUB_FAIL_PHASE=$phase
+        tee "$INSTALLER_ENV_PATH" >/dev/null <<EOF
+AWG_API_TOKEN="$STUB_EXPECTED_TOKEN"
+AWG_ADDRESS="10.0.0.1/24"
+AWG_ENDPOINT="vpn.example.test"
+AWG_DATA_DIR="$case_dir/data"
+EOF
+        chmod 0600 "$INSTALLER_ENV_PATH"
+        printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
+        printf '%s\n' '{"usage":"original"}' > "$case_dir/data/usage.json"
+        resolve_case_settings
+        if run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$phase backup failure unexpectedly passed"
+        fi
+
+        assert_file_contains "$STUB_BINARY_PATH" old-binary
+        assert_stopped "$case_dir/state/service-state"
+        assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
+        assert_recovery_message "$case_dir/error"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
+        assert_no_completed_backup_reported "$case_dir/error"
+        completed=$(find "$INSTALLER_BACKUP_ROOT" -mindepth 1 -maxdepth 1 \
+            -type d -name 'upgrade.*' -print)
+        [ -z "$completed" ] \
+            || fail "$phase reported no completed backup but left $completed"
+    done
+}
+
+test_unreadable_service_state_refusal() {
+    setup_base_case unreadable-service-state
+    export STUB_SYSTEMCTL_STATUS=5
+    resolve_case_settings
+    if run_transaction "$case_dir/output" "$case_dir/error"; then
+        fail 'unknown systemctl state unexpectedly allowed a module transaction'
+    fi
+
+    assert_file_contains "$STUB_BINARY_PATH" old-binary
+    assert_autostart_disabled "$case_dir/state"
+    [ ! -d "$INSTALLER_BACKUP_ROOT" ] \
+        || fail 'unknown systemctl state crossed the backup boundary'
+    assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
+    assert_file_not_contains "$STUB_TRACE" 'systemctl start'
+    assert_unconfirmed_recovery_message "$case_dir/error"
+    assert_no_completed_backup_reported "$case_dir/error"
+}
+
+test_ambiguous_stop_failures_are_recovered_fail_closed() {
+    local recovery_mode
+    local stop_mode
+    local starts
+
+    for stop_mode in command active deactivating; do
+        setup_base_case "early-stop-$stop_mode"
+        case "$stop_mode" in
+            command)
+                export STUB_FAIL_PHASE=stop
+                ;;
+            active | deactivating)
+                export STUB_INITIAL_STOP_MODE=$stop_mode
+                ;;
+        esac
+        resolve_case_settings
+        if run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$stop_mode early stop failure unexpectedly passed"
+        fi
+
+        assert_file_contains "$STUB_BINARY_PATH" old-binary
+        case "$stop_mode:$(<"$case_dir/state/service-state")" in
+            command:active | active:active | deactivating:deactivating) ;;
+            *) fail "$stop_mode early stop failure had an unexpected final state" ;;
+        esac
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
+        [ ! -d "$INSTALLER_BACKUP_ROOT" ] \
+            || fail "$stop_mode early stop failure crossed the backup boundary"
+        assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
+        assert_file_not_contains "$STUB_TRACE" 'staged-check-runtime'
+        assert_file_not_contains "$STUB_TRACE" 'systemctl start'
+        assert_unconfirmed_recovery_message "$case_dir/error"
+        assert_no_completed_backup_reported "$case_dir/error"
+        [ "$(trace_count "$STUB_TRACE" 'systemctl stop')" = 2 ] \
+            || fail "$stop_mode ambiguous stop was not retried"
+        starts=$(trace_count "$STUB_TRACE" 'systemctl start')
+        [ "$starts" = 0 ] \
+            || fail "$stop_mode early stop failure started a transaction service"
+    done
+
+    setup_base_case delayed-stop-completion
+    export STUB_INITIAL_STOP_MODE=delayed-error
+    export STUB_COMPLETE_STOP_ON_POLL=1
+    resolve_case_settings
+    if run_transaction "$case_dir/output" "$case_dir/error"; then
+        fail 'ambiguous delayed stop unexpectedly resumed the transaction'
+    fi
+
+    assert_file_contains "$STUB_BINARY_PATH" old-binary
+    assert_stopped "$case_dir/state/service-state"
+    assert_autostart_disabled "$case_dir/state"
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
+    [ ! -d "$INSTALLER_BACKUP_ROOT" ] \
+        || fail 'delayed stop completion crossed the backup boundary'
+    assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
+    assert_file_not_contains "$STUB_TRACE" 'staged-check-runtime'
+    assert_file_not_contains "$STUB_TRACE" 'systemctl start'
+    assert_recovery_message "$case_dir/error"
+    assert_no_completed_backup_reported "$case_dir/error"
+    [ "$(trace_count "$STUB_TRACE" 'systemctl stop')" = 2 ] \
+        || fail 'delayed stop completion was not retried before recovery'
+
+    for recovery_mode in error active; do
+        setup_base_case "recovery-stop-$recovery_mode"
+        export STUB_FAIL_PHASE=health
+        export STUB_RECOVERY_STOP_MODE=$recovery_mode
+        resolve_case_settings
+        if run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$recovery_mode failed recovery stop unexpectedly passed"
+        fi
+
+        assert_file_contains "$STUB_BINARY_PATH" 'staged-check-runtime'
+        [ "$(<"$case_dir/state/service-state")" = active ] \
+            || fail "$recovery_mode failed recovery stop was not observable as active"
+        assert_autostart_disabled "$case_dir/state"
+        assert_unconfirmed_recovery_message "$case_dir/error"
+        assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
+        starts=$(trace_count "$STUB_TRACE" 'systemctl start')
+        [ "$starts" = 1 ] \
+            || fail "$recovery_mode failure triggered an automatic restart"
+    done
+}
+
+test_disable_failure_does_not_claim_reboot_safety() {
+    local disables
+    local phase
+
+    for phase in disable disable-stale; do
+        setup_base_case "pre-replacement-$phase"
+        export STUB_FAIL_PHASE=$phase
+        resolve_case_settings
+        if run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$phase unexpectedly crossed the replacement boundary"
+        fi
+
+        assert_file_contains "$STUB_BINARY_PATH" old-binary
+        [ "$(<"$case_dir/state/service-state")" = active ] \
+            || fail "$phase stopped the service without verified boot safety"
+        [ "$(<"$case_dir/state/service-enablement")" = enabled ] \
+            || fail "$phase did not preserve the simulated unsafe boot state"
+        [ ! -d "$INSTALLER_BACKUP_ROOT" ] \
+            || fail "$phase crossed the backup boundary"
+        assert_file_not_contains "$STUB_TRACE" 'systemctl stop'
+        assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
+        assert_file_not_contains "$STUB_TRACE" 'staged-check-runtime'
+        assert_file_not_contains "$STUB_TRACE" 'systemctl start'
+        assert_file_not_contains "$case_dir/error" 'RECOVERY:'
+        disables=$(trace_count "$STUB_TRACE" 'systemctl disable')
+        [ "$disables" = 1 ] \
+            || fail "$phase disable attempts were $disables, want 1"
+    done
+}
+
+test_first_install_load_state_probe_fails_closed() {
+    setup_base_case first-install-load-state-error
+    printf '%s\n' not-found > "$case_dir/state/service-enablement"
+    printf '%s\n' inactive > "$case_dir/state/service-state"
+    export STUB_FAIL_PHASE=load-state
+    resolve_case_settings
+    if run_transaction "$case_dir/output" "$case_dir/error"; then
+        fail 'unreadable first-install LoadState crossed the replacement boundary'
+    fi
+
+    assert_file_contains "$STUB_BINARY_PATH" old-binary
+    assert_stopped "$case_dir/state/service-state"
+    assert_file_not_contains "$STUB_TRACE" 'systemctl stop'
+    assert_file_not_contains "$STUB_TRACE" 'systemctl start'
+    assert_file_not_contains "$case_dir/error" 'RECOVERY:'
+    [ ! -d "$INSTALLER_BACKUP_ROOT" ] \
+        || fail 'first-install LoadState failure crossed the backup boundary'
+}
+
+test_pre_replacement_failures() {
+    local phase
+
+    for phase in module-unload module-load module-info check-runtime; do
+        setup_base_case "pre-$phase"
+        export STUB_FAIL_PHASE=$phase
+        printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
+        resolve_case_settings
+        if run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$phase unexpectedly passed"
+        fi
+
+        assert_file_contains "$STUB_BINARY_PATH" old-binary
+        assert_stopped "$case_dir/state/service-state"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
+        backup_dir "$INSTALLER_BACKUP_ROOT" >/dev/null
+        assert_recovery_message "$case_dir/error"
+        assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
+    done
+}
+
+test_staged_runtime_timeout_is_bounded_and_fail_stopped() {
+    local interface_checks
+    local runtime_line
+    local post_runtime_interface_check
+
+    setup_base_case staged-runtime-timeout
+    export STUB_FAIL_PHASE=check-runtime-timeout
+    printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
+    resolve_case_settings
+    if run_transaction "$case_dir/output" "$case_dir/error"; then
+        fail 'timed-out staged runtime unexpectedly passed'
+    fi
+
+    assert_file_contains "$STUB_BINARY_PATH" old-binary
+    assert_stopped "$case_dir/state/service-state"
+    assert_autostart_disabled "$case_dir/state"
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
+    assert_file_not_contains "$STUB_TRACE" 'systemctl start'
+    assert_file_not_contains "$STUB_TRACE" 'systemctl enable'
+    assert_file_contains "$STUB_TRACE" '--foreground --signal=KILL'
+    assert_file_contains "$STUB_TRACE" \
+        "$INSTALLER_STAGED_BINARY check-runtime"
+    assert_recovery_message "$case_dir/error"
+    assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
+
+    interface_checks=$(trace_count \
+        "$STUB_TRACE" 'ip -o link show type amneziawg')
+    [ "$interface_checks" = 2 ] \
+        || fail "runtime timeout interface checks were $interface_checks, want 2"
+    runtime_line=$(trace_first_line "$STUB_TRACE" 'staged-check-runtime')
+    post_runtime_interface_check=$(trace_last_line \
+        "$STUB_TRACE" 'ip -o link show type amneziawg')
+    [ "$runtime_line" -lt "$post_runtime_interface_check" ] \
+        || fail 'runtime timeout was not followed by an interface assertion'
+    assert_file_not_contains "$STUB_TRACE" \
+        'staged-runtime-observed-unsafe-service-state'
+}
+
+test_failed_health_qualification_is_fail_stopped_across_reboot() {
+    local initial_enablement
+    local enables
+
+    for initial_enablement in enabled disabled not-found; do
+        prepare_post_replacement_case "reboot-safe-$initial_enablement-health"
+        printf '%s\n' "$initial_enablement" \
+            > "$case_dir/state/service-enablement"
+        if [ "$initial_enablement" = not-found ]; then
+            printf '%s\n' inactive > "$case_dir/state/service-state"
+        fi
+        export STUB_FAIL_PHASE=health
+
+        if run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$initial_enablement health failure unexpectedly passed"
+        fi
+
+        assert_stopped "$case_dir/state/service-state"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
+        enables=$(trace_count "$STUB_TRACE" 'systemctl enable')
+        [ "$enables" = 0 ] \
+            || fail "$initial_enablement health enabled before qualification"
+        assert_recovery_message "$case_dir/error"
+        assert_retained_backup_reported \
+            "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
+    done
+}
+
+prepare_post_replacement_case() {
+    local name=$1
+
+    setup_base_case "$name"
+    tee "$INSTALLER_ENV_PATH" >/dev/null <<EOF
+AWG_API_TOKEN="$STUB_EXPECTED_TOKEN"
+AWG_ADDRESS="10.0.0.1/24"
+AWG_ENDPOINT="vpn.example.test"
+AWG_DATA_DIR="$case_dir/data"
+AWG_MTU="1350"
+EOF
+    chmod 0600 "$INSTALLER_ENV_PATH"
+    printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
+    printf '%s\n' '{"usage":"original"}' > "$case_dir/data/usage.json"
+    chmod 0600 "$case_dir/data/clients.json" "$case_dir/data/usage.json"
+    export STUB_MUTATE_JSON=1
+    resolve_case_settings
+}
+
+test_post_replacement_failure_postconditions() {
+    local phase
+    local completed_backup
+    local expected_binary
+    local expected_config
+    local expected_json
+    local expected_starts
+    local config_path
+    local starts
+
+    for phase in \
+        binary-install sysctl daemon-reload enable enable-partial start enabled-state invocation \
+        health auth-transport clients clients-json; do
+        prepare_post_replacement_case "postconditions-$phase"
+        expected_binary=1
+        expected_config=1
+        expected_json=0
+        expected_starts=1
+
+        case "$phase" in
+            binary-install)
+                export STUB_FAIL_PHASE=binary-install
+                expected_binary=0
+                expected_config=0
+                expected_starts=0
+                ;;
+            sysctl | daemon-reload)
+                export STUB_FAIL_PHASE=$phase
+                expected_starts=0
+                ;;
+            enable)
+                export STUB_FAIL_PHASE=$phase
+                expected_json=1
+                ;;
+            enable-partial)
+                export STUB_FAIL_PHASE=$phase
+                expected_json=1
+                ;;
+            start)
+                export STUB_FAIL_PHASE=start
+                ;;
+            enabled-state)
+                export STUB_FAIL_PHASE=enabled-state
+                expected_json=1
+                ;;
+            invocation)
+                export STUB_SAME_INVOCATION=1
+                expected_json=1
+                ;;
+            health | auth-transport | clients | clients-json)
+                export STUB_FAIL_PHASE=$phase
+                expected_json=1
+                ;;
+            *) fail "unknown post-replacement phase $phase" ;;
+        esac
+
+        if run_transaction "$case_dir/output" "$case_dir/error"; then
+            fail "$phase post-replacement failure unexpectedly passed"
+        fi
+
+        completed_backup=$(backup_dir "$INSTALLER_BACKUP_ROOT")
+        assert_file_contains "$completed_backup/environment" 'AWG_MTU="1350"'
+        assert_file_contains "$completed_backup/clients.json" '{"state":"original"}'
+        assert_file_contains "$completed_backup/usage.json" '{"usage":"original"}'
+        assert_file_not_contains "$STUB_TRACE" \
+            "backup-copy -- $completed_backup/clients.json $case_dir/data/clients.json"
+        assert_stopped "$case_dir/state/service-state"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
+        assert_recovery_message "$case_dir/error"
+        assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
+
+        if [ "$expected_binary" = 1 ]; then
+            assert_file_contains "$STUB_BINARY_PATH" 'staged-check-runtime'
+        else
+            assert_file_contains "$STUB_BINARY_PATH" old-binary
+        fi
+        if [ "$expected_config" = 1 ]; then
+            assert_file_contains "$INSTALLER_ENV_PATH" \
+                'AWG_DEFAULT_PROTOCOL_VERSION="3.1"'
+        else
+            assert_file_not_contains "$INSTALLER_ENV_PATH" \
+                'AWG_DEFAULT_PROTOCOL_VERSION="3.1"'
+        fi
+        if [ "$expected_json" = 1 ]; then
+            assert_file_contains "$case_dir/data/clients.json" \
+                '{"state":"new-normalized"}'
+        else
+            assert_file_contains "$case_dir/data/clients.json" '{"state":"original"}'
+        fi
+
+        starts=$(trace_count "$STUB_TRACE" 'systemctl start')
+        [ "$starts" = "$expected_starts" ] \
+            || fail "$phase automatic restart count was $starts, want $expected_starts"
+
+        case "$phase" in
+            auth-transport | clients | clients-json)
+                [ "$(<"$STUB_CURL_CONFIG_MODE")" = 600 ] \
+                    || fail "$phase curl authorization config was not root-only"
+                config_path=$(<"$STUB_CURL_CONFIG_PATH")
+                [ ! -e "$config_path" ] \
+                    || fail "$phase retained a curl authorization config"
+                assert_file_not_contains "$STUB_CURL_ARGUMENTS" \
+                    "$STUB_EXPECTED_TOKEN"
+                ;;
+        esac
+    done
+}
+
+test_authenticated_gate_keeps_token_private() {
+    local config_path
+
+    setup_base_case authenticated-success
+    resolve_case_settings
+    if ! run_transaction "$case_dir/output" "$case_dir/error"; then
+        fail 'authenticated client-list gate failed'
+    fi
+
+    [ "$(<"$STUB_CURL_CONFIG_MODE")" = 600 ] \
+        || fail 'curl authorization config was not root-only'
+    config_path=$(<"$STUB_CURL_CONFIG_PATH")
+    [ ! -e "$config_path" ] || fail 'curl authorization config was retained'
+    assert_file_not_contains "$STUB_CURL_ARGUMENTS" "$STUB_EXPECTED_TOKEN"
+    assert_file_not_contains "$case_dir/output" "$STUB_EXPECTED_TOKEN"
+    assert_file_not_contains "$case_dir/error" "$STUB_EXPECTED_TOKEN"
+}
+
+test_exact_health_response_is_required() {
+    setup_base_case non-exact-health
+    export STUB_HEALTH_RESPONSE='{"status":"ok"} '
+    resolve_case_settings
+    if run_transaction "$case_dir/output" "$case_dir/error"; then
+        fail 'non-exact health response unexpectedly passed'
+    fi
+
+    assert_stopped "$case_dir/state/service-state"
+    assert_autostart_disabled "$case_dir/state"
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
+    assert_recovery_message "$case_dir/error"
+    assert_retained_backup_reported "$case_dir/error" "$INSTALLER_BACKUP_ROOT"
+}
+
+test_token_newlines_are_rejected_before_curl_config() {
+    setup_base_case token-newline
+    resolve_case_settings
+    AWG_API_TOKEN=$'synthetic-test-bearer-token\ninjected = true'
+
+    prepare_stage_directory || fail 'could not prepare stage for token validation'
+    if create_curl_auth_config >"$case_dir/curl-config"; then
+        fail 'token newline was written into the curl authorization config'
+    fi
+
+    [ ! -s "$case_dir/curl-config" ] \
+        || fail 'token validation returned a curl authorization config path'
+    [ -z "$(find "$INSTALLER_STAGE_ROOT" -maxdepth 1 -name 'curl-auth.*' -print)" ] \
+        || fail 'token validation created a curl authorization config'
+}
+
+test_curl_config_is_cleaned_on_parent_termination() {
+    local config_path
+
+    setup_base_case curl-config-cleanup
+    resolve_case_settings
+    export INSTALLER_TEST_SCRIPT=$installer
+    export TEST_CONFIG_PATH="$case_dir/curl-config-path"
+    export TEST_STAGE_ROOT=$INSTALLER_STAGE_ROOT
+    tee "$case_dir/cleanup-probe.sh" >/dev/null <<'PROBE'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+source "$INSTALLER_TEST_SCRIPT"
+INSTALLER_STAGE_ROOT=$TEST_STAGE_ROOT
+INSTALLER_STAGE_DIR=''
+INSTALL_TEMP_PATHS=()
+
+trap cleanup_temp_paths EXIT
+trap handle_interruption HUP INT TERM
+prepare_stage_directory
+config_path=$(create_curl_auth_config)
+printf '%s\n' "$config_path" > "$TEST_CONFIG_PATH"
+kill -TERM "$$"
+PROBE
+    chmod 0755 "$case_dir/cleanup-probe.sh"
+    if "$BASH" "$case_dir/cleanup-probe.sh"; then
+        fail 'controlled termination unexpectedly returned success'
+    fi
+    config_path=$(<"$case_dir/curl-config-path")
+    [ ! -e "$config_path" ] \
+        || fail 'curl authorization config survived parent termination cleanup'
+    assert_file_not_contains "$STUB_CURL_ARGUMENTS" "$STUB_EXPECTED_TOKEN"
+}
+
+test_interruption_during_autostart_disable_is_recovered() {
+    local disables
+    local signal_pid
+    local signal_state
+
+    setup_base_case interruption-disable
+    export STUB_SIGNAL_PHASE=disable
+    export INSTALLER_TEST_SCRIPT=$installer
+    export TEST_BINARY_PATH=$INSTALLER_BINARY_PATH
+    export TEST_ENV_PATH=$INSTALLER_ENV_PATH
+    export TEST_SYSCTL_PATH=$INSTALLER_SYSCTL_PATH
+    export TEST_UNIT_PATH=$INSTALLER_UNIT_PATH
+    export TEST_STAGE_ROOT=$INSTALLER_STAGE_ROOT
+    export TEST_BACKUP_ROOT=$INSTALLER_BACKUP_ROOT
+    export TEST_SIGNAL_PID_PATH="$case_dir/signal-pid"
+    export TEST_SIGNAL_STATE_PATH="$case_dir/signal-state"
+    tee "$case_dir/disable-interruption-probe.sh" >/dev/null <<'PROBE'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+source "$INSTALLER_TEST_SCRIPT"
+INSTALLER_BINARY_PATH=$TEST_BINARY_PATH
+INSTALLER_ENV_PATH=$TEST_ENV_PATH
+INSTALLER_SYSCTL_PATH=$TEST_SYSCTL_PATH
+INSTALLER_UNIT_PATH=$TEST_UNIT_PATH
+INSTALLER_STAGE_ROOT=$TEST_STAGE_ROOT
+INSTALLER_BACKUP_ROOT=$TEST_BACKUP_ROOT
+INSTALLER_SERVICE_GATE_SECONDS=5
+
+trap cleanup_temp_paths EXIT
+handle_test_interruption() {
+    printf '%s:%s:%s\n' \
+        "$INSTALLER_AUTOSTART_DISABLE_ATTEMPTED" \
+        "$INSTALLER_AUTOSTART_DISABLE_CONFIRMED" \
+        "$INSTALLER_SERVICE_STOP_ATTEMPTED" \
+        > "$TEST_SIGNAL_STATE_PATH"
+    handle_interruption
+}
+trap handle_test_interruption HUP INT TERM
+printf '%s\n' "$$" > "$TEST_SIGNAL_PID_PATH"
+export STUB_SIGNAL_TARGET=$$
+
+resolve_installer_settings
+AWG_SERVER_VERSION=1.2.3
+install_release_transaction awg-server-awg31-linux-amd64
+PROBE
+    chmod 0755 "$case_dir/disable-interruption-probe.sh"
+
+    if "$BASH" "$case_dir/disable-interruption-probe.sh" \
+        >"$case_dir/output" 2>"$case_dir/error"; then
+        fail 'disable interruption unexpectedly returned success'
+    fi
+
+    [ "$(<"$case_dir/state/service-state")" = active ] \
+        || fail 'disable interruption made a false stopped-state transition'
+    assert_autostart_disabled "$case_dir/state"
+    assert_file_contains "$STUB_BINARY_PATH" old-binary
+    assert_file_not_contains "$STUB_TRACE" 'systemctl stop'
+    assert_file_not_contains "$STUB_TRACE" 'backup-copy'
+    assert_file_not_contains "$STUB_TRACE" 'modprobe unload'
+    assert_file_not_contains "$STUB_TRACE" 'staged-check-runtime'
+    assert_file_not_contains "$STUB_TRACE" 'install -o root -g root -m 0755'
+    assert_file_not_contains "$STUB_TRACE" 'systemctl start'
+    assert_file_not_contains "$STUB_TRACE" 'systemctl enable'
+    signal_state=$(<"$case_dir/signal-state")
+    [ "$signal_state" = 1:0:0 ] \
+        || fail "disable interruption trap state was $signal_state, want 1:0:0"
+    assert_unconfirmed_recovery_message "$case_dir/error"
+    assert_no_completed_backup_reported "$case_dir/error"
+    signal_pid=$(<"$case_dir/signal-pid")
+    assert_file_contains "$STUB_TRACE" 'signal disable'
+    assert_file_contains "$STUB_TRACE" "signal target=$signal_pid"
+    disables=$(trace_count "$STUB_TRACE" 'systemctl disable')
+    [ "$disables" = 2 ] \
+        || fail "disable interruption recovery attempts were $disables, want 2"
+
+    assert_simulated_reboot_stays_stopped "$case_dir/state"
+}
+
+test_interruption_after_replacement_or_during_start_is_safe() {
+    local phase
+    local expected_binary
+    local expected_starts
+    local expected_client_state
+    local expected_stops
+    local starts
+    local stops
+    local completed_backup
+    local signal_pid
+    local remaining_stage
+
+    for phase in module-unload binary-install start enabled-state; do
+        setup_base_case "interruption-$phase"
+        export STUB_MUTATE_JSON=1
+        export STUB_SIGNAL_PHASE=$phase
+        export INSTALLER_TEST_SCRIPT=$installer
+        export TEST_BINARY_PATH=$INSTALLER_BINARY_PATH
+        export TEST_ENV_PATH=$INSTALLER_ENV_PATH
+        export TEST_SYSCTL_PATH=$INSTALLER_SYSCTL_PATH
+        export TEST_UNIT_PATH=$INSTALLER_UNIT_PATH
+        export TEST_STAGE_ROOT=$INSTALLER_STAGE_ROOT
+        export TEST_BACKUP_ROOT=$INSTALLER_BACKUP_ROOT
+        export TEST_SIGNAL_PID_PATH="$case_dir/signal-pid"
+        tee "$case_dir/interruption-probe.sh" >/dev/null <<'PROBE'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+source "$INSTALLER_TEST_SCRIPT"
+INSTALLER_BINARY_PATH=$TEST_BINARY_PATH
+INSTALLER_ENV_PATH=$TEST_ENV_PATH
+INSTALLER_SYSCTL_PATH=$TEST_SYSCTL_PATH
+INSTALLER_UNIT_PATH=$TEST_UNIT_PATH
+INSTALLER_STAGE_ROOT=$TEST_STAGE_ROOT
+INSTALLER_BACKUP_ROOT=$TEST_BACKUP_ROOT
+INSTALLER_SERVICE_GATE_SECONDS=5
+
+trap cleanup_temp_paths EXIT
+trap handle_interruption HUP INT TERM
+printf '%s\n' "$$" > "$TEST_SIGNAL_PID_PATH"
+export STUB_SIGNAL_TARGET=$$
+
+resolve_installer_settings
+AWG_SERVER_VERSION=1.2.3
+install_release_transaction awg-server-awg31-linux-amd64
+PROBE
+        chmod 0755 "$case_dir/interruption-probe.sh"
+        printf '%s\n' '{"state":"original"}' > "$case_dir/data/clients.json"
+
+        if "$BASH" "$case_dir/interruption-probe.sh" \
+            >"$case_dir/output" 2>"$case_dir/error"; then
+            fail "$phase interruption unexpectedly returned success"
+        fi
+
+        case "$phase" in
+            module-unload)
+                expected_binary=old-binary
+                expected_starts=0
+                expected_client_state='{"state":"original"}'
+                expected_stops=1
+                ;;
+            binary-install)
+                expected_binary='staged-check-runtime'
+                expected_starts=0
+                expected_client_state='{"state":"original"}'
+                expected_stops=1
+                ;;
+            start)
+                expected_binary='staged-check-runtime'
+                expected_starts=1
+                expected_client_state='{"state":"new-normalized"}'
+                expected_stops=2
+                ;;
+            enabled-state)
+                expected_binary='staged-check-runtime'
+                expected_starts=1
+                expected_client_state='{"state":"new-normalized"}'
+                expected_stops=2
+                ;;
+            *) fail "unknown interruption phase $phase" ;;
+        esac
+
+        assert_stopped "$case_dir/state/service-state"
+        assert_autostart_disabled "$case_dir/state"
+        assert_simulated_reboot_stays_stopped "$case_dir/state"
+        assert_file_contains "$STUB_TRACE" "signal $phase"
+        signal_pid=$(<"$case_dir/signal-pid")
+        assert_file_contains "$STUB_TRACE" "signal target=$signal_pid"
+        assert_file_contains "$STUB_BINARY_PATH" "$expected_binary"
+        assert_file_contains "$case_dir/data/clients.json" "$expected_client_state"
+        assert_recovery_message "$case_dir/error"
+        completed_backup=$(backup_dir "$INSTALLER_BACKUP_ROOT")
+        assert_file_contains "$case_dir/error" "Backup retained at: $completed_backup"
+        starts=$(trace_count "$STUB_TRACE" 'systemctl start')
+        [ "$starts" = "$expected_starts" ] \
+            || fail "$phase interruption start count was $starts, want $expected_starts"
+        stops=$(trace_count "$STUB_TRACE" 'systemctl stop')
+        [ "$stops" = "$expected_stops" ] \
+            || fail "$phase interruption stop count was $stops, want $expected_stops"
+        remaining_stage=$(find "$INSTALLER_STAGE_ROOT" -mindepth 1 -maxdepth 1 \
+            -type d -name 'stage.*' -print)
+        [ -z "$remaining_stage" ] \
+            || fail "$phase interruption left staged paths: $remaining_stage"
+    done
+}
+
+# shellcheck source=install.sh
+source "$installer"
+
+test_release_asset_bridge
+test_config_parser_rejects_executable_and_unknown_input
+test_config_parser_round_trips_rendered_values
+test_package_minimum_versions
+test_package_status_rejection
+test_settings_precedence_and_rerun
+test_success_enables_only_after_qualification
+test_not_found_service_must_have_a_stopped_active_state
+test_stop_backup_module_order_and_permissions
+test_foreign_interface_refusal
+test_before_backup_failures
+test_backup_failures_report_no_completed_backup
+test_unreadable_service_state_refusal
+test_ambiguous_stop_failures_are_recovered_fail_closed
+test_disable_failure_does_not_claim_reboot_safety
+test_first_install_load_state_probe_fails_closed
+test_pre_replacement_failures
+test_staged_runtime_timeout_is_bounded_and_fail_stopped
+test_failed_health_qualification_is_fail_stopped_across_reboot
+test_post_replacement_failure_postconditions
+test_authenticated_gate_keeps_token_private
+test_exact_health_response_is_required
+test_token_newlines_are_rejected_before_curl_config
+test_curl_config_is_cleaned_on_parent_termination
+test_interruption_during_autostart_disable_is_recovered
+test_interruption_after_replacement_or_during_start_is_safe
+
+printf 'install tests passed\n'

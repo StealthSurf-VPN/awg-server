@@ -8,22 +8,39 @@
 - `go mod verify`;
 - pinned `actionlint` and ShellCheck containers for workflow and shell automation;
 - release marker and release-note parser tests;
+- `bash scripts/install_test.sh`, a deterministic stubbed installer contract
+  harness whose orthogonal matrix covers ordering, bounded runtime
+  qualification, fail-stopped recovery, and representative enablement states
+  without repeating every failure-phase-by-state cross-product;
 - `go test -race -count=1 ./...`, including signed self-update success, tampering, RSA-key, exact-asset, version, and downgrade cases;
 - `go vet ./...`;
 - a clean `go build` outside the checkout;
 - `git diff --check` and tracked working-tree verification.
 
-Run the same deterministic checks locally:
+Run the repository-native deterministic gates locally:
 
 ```bash
+test -z "$(gofmt -l .)"
+go mod verify
 bash scripts/release-marker_test.sh
 bash scripts/release-notes_test.sh
 bash scripts/release-previous-tag_test.sh
+bash scripts/install_test.sh
 go test -race -count=1 ./...
 go vet ./...
 go build -trimpath -o /tmp/awg-server .
 git diff --check
+test -z "$(git status --porcelain --untracked-files=no)"
 ```
+
+CI additionally runs the pinned actionlint and ShellCheck containers listed in
+the workflow. These are deterministic source and stubbed-host checks. The
+installer harness intentionally uses representative orthogonal cases rather
+than an exhaustive Cartesian product, and its command/systemd stubs do not
+qualify a real Ubuntu 22.04 module/DKMS reload, `awg-server check-runtime`,
+systemd transaction, live 2.0/3.1 handshakes, or client import/throughput.
+Before a production release, qualify Ubuntu amd64 and arm64 hosts and physical
+Windows, macOS, iOS, and Android client builds separately.
 
 ## Automated Releases
 
@@ -83,12 +100,12 @@ After validation, the workflow:
 Release assets are:
 
 ```text
-awg-server-darwin-amd64
-awg-server-darwin-arm64
-awg-server-linux-amd64
-awg-server-linux-arm64
-awg-server-windows-amd64.exe
-awg-server-windows-arm64.exe
+awg-server-awg31-darwin-amd64
+awg-server-awg31-darwin-arm64
+awg-server-awg31-linux-amd64
+awg-server-awg31-linux-arm64
+awg-server-awg31-windows-amd64.exe
+awg-server-awg31-windows-arm64.exe
 SHA256SUMS
 SHA256SUMS.sig
 ```
@@ -101,7 +118,13 @@ The workflow ends after GitHub Release publication and verification. It does not
 
 ## Signed Self-Update Contract
 
-Official Linux and macOS release binaries embed the configured Ed25519 public key. `awg-server update` accepts only a strictly newer stable `vMAJOR.MINOR.PATCH` GitHub Release and requires exactly one host binary, `SHA256SUMS`, and `SHA256SUMS.sig` at their canonical, case-sensitive, version-bound repository URLs. Before replacing anything, it:
+Official Linux and macOS release binaries embed the configured Ed25519 public
+key. `awg-server update` accepts only a strictly newer stable
+`vMAJOR.MINOR.PATCH` GitHub Release whose asset list is exactly the six
+AWG31-prefixed binaries, `SHA256SUMS`, and `SHA256SUMS.sig`, each appearing once
+at its canonical, case-sensitive, version-bound repository URL. It selects the
+current host binary only after validating that complete eight-asset set. Before
+replacing anything, it:
 
 1. rejects unsupported platforms or a missing trust key before network access;
 2. limits the latest-release JSON response to 1 MiB, validates a stable version, then rejects an equal version or downgrade before downloading any release asset;
@@ -113,7 +136,14 @@ Official Linux and macOS release binaries embed the configured Ed25519 public ke
 8. executes only that signed temporary file with `version` and requires the exact expected version output;
 9. rechecks the on-disk version under the lock and replaces the current executable only after every check succeeds.
 
-Ordinary source builds omit the release trust key, so their `update` command fails closed. Windows also fails closed before network access because an active `.exe` cannot be replaced atomically; use a separately verified signed asset there. A binary produced before this signed-updater contract cannot gain retroactive authenticity from the new code. Bootstrap it with an exact release verified out of band, then use signed Linux/macOS self-updates for later versions.
+Ordinary source builds omit the release trust key, so their `update` command
+fails closed. Windows also fails closed before network access because an active
+`.exe` cannot be replaced atomically; use a separately verified signed asset
+there. Older updaters select only the legacy non-AWG31 asset names and therefore
+fail closed against an AWG 3.1 release. The installer is the supported bridge
+for a 2.0 host because it qualifies the package and loaded runtime before
+replacement. A v1.0.5 downgrade after issuing a 3.1 client is unsupported: it
+does not preserve the 3.1 private profile state on a later save.
 
 ## Release Signing Setup
 

@@ -14,8 +14,11 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 
 ## Multi-Interface Pool
 
-- AmneziaWG 2.0 CPS parameters are set at the **interface level**, not per-peer
-- The `Pool` manages multiple interfaces, one per unique CPS parameter set
+- Server-applied AmneziaWG 2.0 and 3.1 settings are set at the **interface
+  level**, not per-peer. Client-only settings remain per-client configuration.
+- The `Pool` manages multiple interfaces, one per immutable `ProfileKey`, not
+  one per `AWGParams.Key()` string. Protocol version and private 3.1
+  header-protection key keep otherwise similar 2.0/3.1 profiles separate.
 - Interface names: `awg0`, `awg1`, `awg2`, ... (sequential)
 - Ports: explicit `port` from `AWGParams`, or auto-assigned sequentially from `AWG_LISTEN_PORT` (first available). A newly added peer can share an existing profile when its requested port is zero or matches the actual port; a different explicit port is rejected before peer mutation. PATCH rejects any stored port change while that profile is shared, even when switching between zero and the actual port.
 - Interfaces created on demand via `ip link add awgN type amneziawg`
@@ -27,9 +30,14 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 
 ## Device Management
 
-- Each interface configured via `awg set` with private key through stdin
-- Server-side obfuscation params via `awg set`: Jc/Jmin/Jmax, S1-S4, H1-H4 — encapsulated in `AWGParams`
-- Client-side only: ClientListenPort, MTU, DNS, PersistentKeepalive, and I1-I5 (`ClientListenPort`, MTU, DNS, and PersistentKeepalive are rendered by the client manager; I1-I5 are included in `.conf` but not in `awg set`)
+- Each interface is configured with `awg setconf <interface> /dev/stdin`.
+  Pass one complete `Profile.ServerConfig` through stdin; never put server or
+  header-protection keys in argv or a temporary file.
+- Server-side profile settings include Jc/Jmin/Jmax, S1-S4, H1-H4, and all
+  3.1 range/toggle fields. `HeaderProtectionKey` is included only for 3.1.
+- Client-side only: ClientListenPort, MTU, DNS, PersistentKeepalive, and I1-I5
+  (`ClientListenPort`, MTU, DNS, and PersistentKeepalive are rendered by the
+  client manager; I1-I5 are included in `.conf` but not in server setconf).
 - Peer operations via `awg set ... peer`; optional per-peer PSKs are passed through stdin using `preshared-key /dev/stdin`; stats via `awg show ... dump` (used by usage collector)
 - Network configuration (IP, routing, NAT) via `exec.Command`
 - MASQUERADE rule added once for the subnet. `Pool.Close` removes it only after every working and quarantined interface was destroyed successfully; cleanup failures leave it in place and are logged for operator recovery.
@@ -40,17 +48,34 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 - Defined in `internal/awg/params.go`
 - `Port` — optional UDP listen port for the interface (not part of CPS, not in Key/CLIArgs/ConfigLines); zero selects automatic assignment, explicit values are validated in the range 1024-65535
 - `ClientListenPort` — optional local UDP listen port for the generated client `[Interface]`, range 1024-65535 (zero omits `ListenPort` for automatic client-side selection; not part of CPS, Key, CLIArgs, ConfigLines, server interface allocation, or peer migration)
-- `MTU` — optional client config override, range 1280-1420 (not part of CPS, not in Key/CLIArgs/ConfigLines); zero inherits `AWG_MTU`
+- `MTU` — optional client config override, range 1280-1420 (not part of
+  server profile identity); zero inherits `AWG_MTU` for 2.0 or `AWG31_MTU` for
+  3.1.
 - `DNS` — legacy optional client config override containing one IPv4 address (empty inherits `AWG_DNS`; cannot be combined with mode-based DNS; not part of CPS, Key, CLIArgs, or ConfigLines)
 - `DNSMode` / `DNSServers` — explicit client DNS selection: `default` inherits `AWG_DNS`, `custom` renders a normalized IPv4 list, and `system` omits the DNS line. Presence validation follows case-insensitive JSON field matching; all DNS fields stay outside CPS and interface grouping.
-- `PersistentKeepalive` — optional pointer-valued client `[Peer]` override, range 0-65535 (nil inherits 25, explicit zero disables; not part of CPS, not in Key/CLIArgs/ConfigLines)
-- `Key()` — deterministic string for interface grouping: **only H1-H4, S1-S4** (excludes Port, ClientListenPort, MTU, all DNS fields, PersistentKeepalive, Jc/Jmin/Jmax, I1-I5)
-- `CLIArgs()` — args for `awg set`: H1-H4, S1-S4, Jc/Jmin/Jmax (excludes I1-I5 — client-only)
+- `PersistentKeepalive` — optional pointer-valued client `[Peer]` override.
+  2.0 accepts a scalar 0-65535 (nil inherits 25); 3.1 accepts a strict
+  unsigned-16 scalar/range plus `off` as an input alias for `0`; it remains
+  outside server profile identity. Output and persistence use canonical
+  numeric `0` for `off` and numeric `N` for an equal range `N-N`.
+- `Key()` remains a legacy H/S helper and is **not** pool identity. Use the
+  immutable `Profile` / opaque `ProfileKey`, which includes protocol version,
+  all server-applied J/H/S/3.1 fields, and private 3.1 header key while
+  excluding client-only fields and requested port.
+- `CLIArgs()` is retained for legacy helper use. Server interfaces are
+  configured from `Profile.ServerConfig` via `awg setconf` rather than direct
+  `awg set` arguments.
 - `ConfigLines()` — CPS lines for the client `.conf` `[Interface]` section, including I1-I5; ClientListenPort, MTU, all DNS fields, and PersistentKeepalive are rendered separately by the client manager
-- `GenerateParams()` — generates H1-H4 (random non-overlapping ranges, format `min-max`) and S1, S2 (random 15-150, `S1+56 ≠ S2`)
-- `ValidateOverrides()` validates raw API values before inheritance so invalid negative or malformed values cannot disappear during the merge
-- `ValidateProfile()` validates the complete effective profile, including cross-field J/S relationships and H-range overlap
-- Per-client: stored as `*AWGParams` in `ClientData` (nil = use server defaults)
+- `GenerateParams()` is the legacy 2.0 generator: random non-overlapping H
+  ranges and S1/S2. `GenerateParamsV31()` uses fixed unique H values, S1/S2 in
+  the supported range, S3 15-63, and S4 12.
+- `ValidateOverridesForVersion()` validates raw API values after target-version
+  resolution. 2.0 rejects 3.1-only fields and ranged/`off` keepalive;
+  `ValidateProfileForVersion()` applies complete effective-profile constraints,
+  including 3.1 S1-S4 >= 12 and header-key requirements.
+- Per-client public overrides are stored as `*AWGParams` in `ClientData`
+  (nil = use target-version defaults). The version and private key reference
+  are separate state, not public `AWGParams` fields.
 - `ClientData` has `ID` (no separate `Name` field; POST body uses `id` directly)
 - `ClientData.PresharedKey` is a server-generated per-peer secret, not an `AWGParams` field and never part of interface grouping
 - `ClientData.LANGroupID` is persisted and controls only server-side inter-client firewall membership; missing legacy values become `peer:<id>`
@@ -58,12 +83,23 @@ The allowed dependency direction is defined in `AGENTS.md`. Keep lower-level pac
 **Protocol rules:**
 - **Must match** server↔client: H1-H4, S1-S4
 - **Can differ** server↔client: Jc, Jmin, Jmax, I1-I5
+- **3.1 must match**: the header-protection key and server-applied 3.1
+  range/toggle fields. PersistentKeepalive and I1-I5 remain client-side.
 - **I1-I5**: client-side CPS packets, server does not use them in `awg set`
 - **ClientListenPort**: client-side `[Interface]` behavior; server does not reserve the port, pass it to `awg set`, or use it in `Endpoint`
 - **DNS**: client-side `[Interface]` behavior; server does not configure it on AWG interfaces
 - **PersistentKeepalive**: client-side `[Peer]` behavior; server does not set it on the peer
+- **Unsigned-16 canonicalization**: 3.1 accepts `off` as an input alias for
+  `0`; `off` and `0`, and `N-N` and `N`, render, persist, and hash identically.
+  Lexical form is retained through validation so 2.0 still rejects ranged and
+  `off` persistent keepalive input.
 
-Create and update operations validate raw overrides and the effective profile before key generation, IP allocation, peer migration, or persistence. `main.go` validates the default profile before creating the interface pool. Persisted clients pass the same AWG and routing validation during fail-fast restoration; invalid records abort startup instead of being silently discarded.
+Create and update operations validate raw overrides and the effective profile
+before key generation, IP allocation, peer migration, or persistence.
+`main.go` validates both target-version defaults before creating the interface
+pool. Persisted clients pass the same AWG and routing validation during
+fail-fast restoration; invalid records abort startup instead of being silently
+discarded.
 
 ## Client Routing
 
@@ -74,31 +110,83 @@ Create and update operations validate raw overrides and the effective profile be
 
 ## Persistence
 
-- **Clients**: `{AWG_DATA_DIR}/clients.json` — server private key, generated AWG params, client data
+- **Clients**: `{AWG_DATA_DIR}/clients.json` — server private key, legacy 2.0
+  generated params, private `awg_31` state, and client data.
 - **Usage**: `{AWG_DATA_DIR}/usage.json` — accumulated rx/tx per peer (keyed by base64 public key)
 - Replace-style writes: write to `.tmp`, then `os.Rename`; this does not make a kernel/filesystem operation absolutely atomic or guarantee durability across every crash
 - Server private key generated once and persisted
-- Generated AWG params (H1-H4, S1, S2) generated once at first start and persisted as `generated_params` in clients.json
+- Legacy generated AWG params (H1-H4, S1, S2) are generated once at first
+  start and persisted as `generated_params`; they are never reinterpreted as
+  3.1 state.
+- `awg_31` holds 3.1 generated H1-H4/S1-S4, a default opaque header-key ID,
+  and private base64 header keys. `HeaderProtectionKey` is required and
+  non-zero for every 3.1 profile; it has no public DTO or normal JSON response.
+- Every client persists canonical `protocol_version` `2.0` or `3.1`. Missing
+  legacy disk versions resolve only to 2.0; API alias `2` is normalized at the
+  boundary and must never be written to disk.
 - Per-client `awg_params` persisted (omitted if nil/default)
 - Per-client `routing` persisted for bypass and split policies; nil/full is omitted for backward compatibility
 - New clients receive a unique 32-byte PSK persisted as `preshared_key`; legacy records may omit it
 - Every client has a persisted `lan_group_id`; create defaults it to `peer:<id>`, and startup saves the same unique default for legacy records
 - Create, delete, and LAN-group mutation install an empty DROP-only `AWG-LAN` while holding the manager lock, then save/commit membership and rebuild same-group allows. A later error leaves a LAN outage instead of restoring permissive rules.
 - Create stages device state, saves prospective JSON, then commits memory. Client-only update saves before committing memory; interface update/regeneration migrates before saving; delete removes device state before saving. Later failures trigger best-effort device rollback and a generic API `500`, but rollback can itself fail.
-- On startup: load JSON → load/generate params → validate each client keypair, PSK, AWG settings, and routing → group by effective params → recreate interfaces → re-add peers. Non-empty persisted clients require the existing top-level server private key and generated H/S defaults; missing values, invalid persisted state, or any peer restoration failure abort startup without silently generating replacement state or dropping that client. Already-created pool state is closed best-effort.
+- On startup: load JSON → prepare pending defaults only for a state with no
+  3.1 client → validate a complete restore plan (keys, versions, references,
+  profiles, routing, ports, limits) without client-owned device work → qualify
+  the AWG 3.1 runtime → create pool/firewall state and restore peers → save
+  one normalization only after successful restore. A persisted 3.1 client with
+  missing/invalid private state aborts startup without replacement generation
+  or fallback. Non-empty persisted clients require existing top-level server
+  private key and legacy generated defaults. On any restore/normalization
+  failure, close already-created pool state best-effort and do not start HTTP.
+- Mutations deep-copy private key maps. Mark-and-sweep removes only unreferenced
+  non-default 3.1 keys from prospective state before Save; successful Save
+  commits that map and an unsuccessful save leaves the original map
+  authoritative.
 
 ## Usage Collection
 
 - Periodic, manual, and required pre-migration collections serialize the complete interface-list, dump, and in-memory counter update sequence with one collector guard.
-- Every interface-level PATCH and per-client H/S regeneration acquires the manager write lock first, then the collector takes a complete final snapshot and holds its guard through migration, client persistence, and any reverse migration; the callback wiring from `api` preserves package dependency direction.
+- Every interface-level PATCH, protocol migration, and per-client regeneration
+  acquires the manager write lock first, then the collector takes a complete
+  final snapshot and holds its guard through migration, client persistence, and
+  any reverse migration; the callback wiring from `api` preserves package
+  dependency direction.
 - If any interface dump command fails, contains a malformed peer row, or returns no peers for an active interface during the required snapshot, the update aborts before pool mutation. Detailed dump errors stay in usage logs; the manager and HTTP boundary receive only a safe snapshot error and return generic `500`.
 - The required snapshot updates in-memory totals but does not immediately save `usage.json`; normal saves follow startup and each 60-second collection, with a final collect/save during graceful shutdown.
 
 ## Deployment
 
 - Static binary (`CGO_ENABLED=0`), deployed directly to VPN servers
-- Requires: `amneziawg` kernel module, `awg` CLI, `iptables`, `iproute2`
+- Requires the qualified AmneziaWG 3.1 package/module/`awg` runtime,
+  `iptables`, and `iproute2`. `awg.CheckRuntime` is the single functional
+  capability probe; normal startup and the staged installer binary both use it.
+  It configures a randomized temporary interface with a kernel-assigned UDP
+  port, brings the link up to exercise the socket bind, and validates the
+  assigned nonzero port plus the full 3.1 readback. Probe commands are bounded;
+  deletion of an interface created, or ambiguously created by a timed-out `ip`
+  command, uses a separate bounded cleanup context and is not an absolute
+  guarantee after an external hard kill or power loss.
 - Runs as root or with `NET_ADMIN` capability
 - `net.ipv4.ip_forward=1` sysctl required
 - Volume at `/data` for persistence
 - Firewall must allow the automatic UDP port range and every explicit per-client interface port
+- The installer is the supported 2.0-host migration because self-update cannot
+  update/reload DKMS. It installs/gates packages, stages a signed release, then
+  verifies automatic startup is disabled before stopping the service and
+  requires an exact stopped-state result. It then backs up environment plus
+  clients/usage JSON, refuses any remaining AWG interface, reloads, and runs a
+  bounded staged-binary qualification while stopped and disabled. It verifies
+  again that no AWG interface remains before replacement, starts the new unit
+  explicitly while disabled, verifies health plus an authenticated client-list
+  JSON array, and enables it only after those gates pass. A stop ambiguity must
+  trigger fresh bounded stop/state checks and disable verification. Every later
+  failure must preserve or truthfully report both the runtime-stop and
+  reboot-time disablement state; a post-replacement failure repeats the bounded
+  stop and disable checks. Do not add automatic rollback/restart after a failed
+  post-replacement gate.
+- `scripts/install_test.sh` uses command stubs to verify transaction ordering,
+  deadlines, recovery branches, permissions, and secret handling. It does not
+  execute real systemd jobs, reload the host DKMS module, bind an AmneziaWG
+  kernel socket, reboot the host, or prove a client handshake/traffic path; use
+  a disposable supported Ubuntu 22.04 host for that qualification.

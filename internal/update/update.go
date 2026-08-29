@@ -24,6 +24,7 @@ import (
 const (
 	repo               = "StealthSurf-VPN/awg-server"
 	binaryName         = "awg-server"
+	releaseBinaryName  = "awg-server-awg31"
 	latestReleaseURL   = "https://api.github.com/repos/" + repo + "/releases/latest"
 	checksumAssetName  = "SHA256SUMS"
 	signatureAssetName = "SHA256SUMS.sig"
@@ -34,12 +35,12 @@ const (
 var (
 	releasePublicKey  string
 	releaseAssetNames = []string{
-		"awg-server-darwin-amd64",
-		"awg-server-darwin-arm64",
-		"awg-server-linux-amd64",
-		"awg-server-linux-arm64",
-		"awg-server-windows-amd64.exe",
-		"awg-server-windows-arm64.exe",
+		"awg-server-awg31-darwin-amd64",
+		"awg-server-awg31-darwin-arm64",
+		"awg-server-awg31-linux-amd64",
+		"awg-server-awg31-linux-arm64",
+		"awg-server-awg31-windows-amd64.exe",
+		"awg-server-awg31-windows-arm64.exe",
 	}
 )
 
@@ -121,11 +122,8 @@ func (u *Updater) Check() (*CheckResult, error) {
 	}
 
 	assetName := releaseAssetName(runtime.GOOS, runtime.GOARCH)
-	urls, err := selectReleaseAssetURLs(rel.Assets, latest, []string{
-		assetName,
-		checksumAssetName,
-		signatureAssetName,
-	})
+	selectionNames := append(append([]string(nil), releaseAssetNames...), checksumAssetName, signatureAssetName)
+	urls, err := selectReleaseAssetURLs(rel.Assets, latest, selectionNames)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +150,7 @@ func validateUpdatePlatform(goos string) error {
 }
 
 func releaseAssetName(goos, goarch string) string {
-	name := fmt.Sprintf("%s-%s-%s", binaryName, goos, goarch)
+	name := fmt.Sprintf("%s-%s-%s", releaseBinaryName, goos, goarch)
 	if goos == "windows" {
 		name += ".exe"
 	}
@@ -167,6 +165,9 @@ func expectedAssetURL(version, assetName string) string {
 func selectReleaseAssetURLs(assets []asset, version string, names []string) (map[string]string, error) {
 	requested := make(map[string]struct{}, len(names))
 	for _, name := range names {
+		if _, ok := requested[name]; ok {
+			return nil, fmt.Errorf("requested release asset %s appears more than once", name)
+		}
 		requested[name] = struct{}{}
 	}
 
@@ -174,7 +175,7 @@ func selectReleaseAssetURLs(assets []asset, version string, names []string) (map
 	counts := make(map[string]int, len(names))
 	for _, releaseAsset := range assets {
 		if _, ok := requested[releaseAsset.Name]; !ok {
-			continue
+			return nil, fmt.Errorf("unexpected release asset %s", releaseAsset.Name)
 		}
 
 		counts[releaseAsset.Name]++

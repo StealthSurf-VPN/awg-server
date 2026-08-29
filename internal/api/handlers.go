@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 	"unicode/utf8"
 
@@ -37,40 +38,47 @@ func (f *optionalField[T]) UnmarshalJSON(data []byte) error {
 }
 
 type createClientRequest struct {
-	ID         string           `json:"id"`
-	LANGroupID string           `json:"lan_group_id,omitempty"`
-	AWGParams  *awg.AWGParams   `json:"awg_params,omitempty"`
-	Routing    *clients.Routing `json:"routing,omitempty"`
+	ID              string                `json:"id"`
+	ProtocolVersion optionalField[string] `json:"protocol_version"`
+	LANGroupID      string                `json:"lan_group_id,omitempty"`
+	AWGParams       *awg.AWGParams        `json:"awg_params,omitempty"`
+	Routing         *clients.Routing      `json:"routing,omitempty"`
 }
 
 type updateClientRequest struct {
-	AWGParams optionalField[awg.AWGParams]   `json:"awg_params"`
-	Routing   optionalField[clients.Routing] `json:"routing"`
+	ProtocolVersion optionalField[string]          `json:"protocol_version"`
+	AWGParams       optionalField[awg.AWGParams]   `json:"awg_params"`
+	Routing         optionalField[clients.Routing] `json:"routing"`
 }
 
 type clientResponse struct {
-	ID         string          `json:"id"`
-	Address    string          `json:"address"`
-	LANGroupID string          `json:"lan_group_id"`
-	CreatedAt  string          `json:"created_at"`
-	AWGParams  *awg.AWGParams  `json:"awg_params,omitempty"`
-	Routing    clients.Routing `json:"routing"`
+	ID              string              `json:"id"`
+	ProtocolVersion awg.ProtocolVersion `json:"protocol_version"`
+	Address         string              `json:"address"`
+	LANGroupID      string              `json:"lan_group_id"`
+	CreatedAt       string              `json:"created_at"`
+	AWGParams       *awg.AWGParams      `json:"awg_params,omitempty"`
+	Routing         clients.Routing     `json:"routing"`
 }
 
 func toResponse(c clients.ClientData) clientResponse {
 	return clientResponse{
-		ID:         c.ID,
-		Address:    c.Address,
-		LANGroupID: c.LANGroupID,
-		CreatedAt:  c.CreatedAt,
-		AWGParams:  c.AWGParams,
-		Routing:    clients.EffectiveRouting(c.Routing),
+		ID:              c.ID,
+		ProtocolVersion: c.ProtocolVersion,
+		Address:         c.Address,
+		LANGroupID:      c.LANGroupID,
+		CreatedAt:       c.CreatedAt,
+		AWGParams:       c.AWGParams,
+		Routing:         clients.EffectiveRouting(c.Routing),
 	}
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"lan_group_isolation": true})
+	json.NewEncoder(w).Encode(map[string]bool{
+		"awg_protocol_3_1":    true,
+		"lan_group_isolation": true,
+	})
 }
 
 func (s *Server) handleListClients(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +95,20 @@ func (s *Server) handleListClients(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGenerateAWGParams(w http.ResponseWriter, r *http.Request) {
-	params, err := awg.GenerateParams()
+	version, err := generateProtocolVersion(r, s.config.DefaultProtocolVersion)
+	if err != nil {
+		jsonError(w, "invalid protocol_version query", http.StatusBadRequest)
+		return
+	}
+
+	var params any
+
+	switch version {
+	case awg.ProtocolVersion2:
+		params, err = awg.GenerateParams()
+	case awg.ProtocolVersion31:
+		params, err = awg.GenerateParamsV31()
+	}
 	if err != nil {
 		log.Printf("generate awg params error: %v", err)
 		writeError(w, err, http.StatusInternalServerError)
@@ -123,21 +144,21 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	normalizedParams, err := awg.NormalizeOverrides(req.AWGParams)
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
-		return
+	var client *clients.ClientData
+
+	var err error
+
+	if req.ProtocolVersion.Set {
+		protocolVersion, parseErr := parseRequestProtocolVersion(req.ProtocolVersion)
+		if parseErr != nil {
+			jsonError(w, parseErr.Error(), http.StatusBadRequest)
+			return
+		}
+
+		client, err = s.manager.CreateClientWithVersion(req.ID, protocolVersion, req.AWGParams, req.Routing, req.LANGroupID)
+	} else {
+		client, err = s.manager.CreateClient(req.ID, req.AWGParams, req.Routing, req.LANGroupID)
 	}
-
-	req.AWGParams = normalizedParams
-
-	normalizedRouting, err := clients.NormalizeRouting(req.Routing)
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	client, err := s.manager.CreateClient(req.ID, req.AWGParams, normalizedRouting, req.LANGroupID)
 	if err != nil {
 		log.Printf("create client error: %v", err)
 
@@ -245,36 +266,30 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !req.AWGParams.Set && !req.Routing.Set {
+	if !req.ProtocolVersion.Set && !req.AWGParams.Set && !req.Routing.Set {
 		jsonError(w, clients.ErrEmptyClientUpdate.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if req.AWGParams.Set {
-		normalizedParams, err := awg.NormalizeOverrides(req.AWGParams.Value)
+	var protocolVersion awg.ProtocolVersion
+
+	if req.ProtocolVersion.Set {
+		parsedProtocolVersion, err := parseRequestProtocolVersion(req.ProtocolVersion)
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		req.AWGParams.Value = normalizedParams
-	}
-
-	if req.Routing.Set {
-		normalizedRouting, err := clients.NormalizeRouting(req.Routing.Value)
-		if err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		req.Routing.Value = normalizedRouting
+		protocolVersion = parsedProtocolVersion
 	}
 
 	client, err := s.manager.UpdateClient(id, clients.ClientUpdate{
-		AWGParams:    req.AWGParams.Value,
-		AWGParamsSet: req.AWGParams.Set,
-		Routing:      req.Routing.Value,
-		RoutingSet:   req.Routing.Set,
+		ProtocolVersion:    protocolVersion,
+		ProtocolVersionSet: req.ProtocolVersion.Set,
+		AWGParams:          req.AWGParams.Value,
+		AWGParamsSet:       req.AWGParams.Set,
+		Routing:            req.Routing.Value,
+		RoutingSet:         req.Routing.Set,
 	}, s.collector.WithRequiredSnapshot)
 	if err != nil {
 		log.Printf("update client error: %v", err)
@@ -284,6 +299,43 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(toResponse(*client))
+}
+
+func parseRequestProtocolVersion(field optionalField[string]) (awg.ProtocolVersion, error) {
+	if field.Value == nil {
+		return "", errors.New("protocol_version must be a non-null string")
+	}
+
+	version, err := awg.ParseProtocolVersion(*field.Value)
+	if err != nil {
+		return "", errors.New("protocol_version must be 2, 2.0, or 3.1")
+	}
+
+	return version, nil
+}
+
+func generateProtocolVersion(r *http.Request, defaultVersion string) (awg.ProtocolVersion, error) {
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return "", err
+	}
+
+	if len(query) == 0 {
+		return awg.ParseProtocolVersion(defaultVersion)
+	}
+	if len(query) != 1 {
+		return "", errors.New("protocol_version query is invalid")
+	}
+
+	values, present := query["protocol_version"]
+	if !present {
+		return "", errors.New("protocol_version query is invalid")
+	}
+	if len(values) != 1 {
+		return "", errors.New("protocol_version must appear once")
+	}
+
+	return awg.ParseProtocolVersion(values[0])
 }
 
 func (s *Server) handleRegenerateClientAWGParams(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,20 @@ set -Eeuo pipefail
 
 readonly RELEASE_PUBLIC_KEY_BASE64='LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUNvd0JRWURLMlZ3QXlFQWQrdGtVUzJlTElwMFlpU1FFdHMwYk9CcmNmcTEvZDBQT0pXd29Udyt1NzA9Ci0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLQo='
 readonly LATEST_MANIFEST_URL='https://github.com/StealthSurf-VPN/awg-server/releases/latest/download/SHA256SUMS'
+readonly MINIMUM_TOOLS_PACKAGE_VERSION='1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1'
+readonly MINIMUM_DKMS_PACKAGE_VERSION='1.0.0-0~202608271845+b72bb7a~ubuntu22.04.1'
+readonly RECOVERY_GUIDANCE='RECOVERY: awg-server remains stopped. Automatic startup is disabled; recover manually and do not restart an unqualified binary.'
+readonly UNCONFIRMED_STOP_RECOVERY_GUIDANCE='RECOVERY: awg-server stop could not be confirmed. Automatic startup is disabled; do not assume the service is stopped; intervene manually.'
+readonly UNCONFIRMED_AUTOSTART_RECOVERY_GUIDANCE='RECOVERY: awg-server remains stopped, but automatic-start disablement could not be confirmed. Do not reboot; intervene manually.'
+readonly UNCONFIRMED_RECOVERY_GUIDANCE='RECOVERY: awg-server stop could not be confirmed. Automatic-start disablement also could not be confirmed; do not assume the service is stopped or reboot; intervene manually.'
+readonly -a EXPECTED_RELEASE_ASSETS=(
+    awg-server-awg31-darwin-amd64
+    awg-server-awg31-darwin-arm64
+    awg-server-awg31-linux-amd64
+    awg-server-awg31-linux-arm64
+    awg-server-awg31-windows-amd64.exe
+    awg-server-awg31-windows-arm64.exe
+)
 readonly -a ENVIRONMENT_KEYS=(
     AWG_API_TOKEN
     AWG_ADDRESS
@@ -24,6 +38,17 @@ readonly -a ENVIRONMENT_KEYS=(
     AWG_I4
     AWG_I5
     AWG_MAX_INTERFACES
+    AWG_DEFAULT_PROTOCOL_VERSION
+    AWG31_MTU
+    AWG31_PERSISTENT_KEEPALIVE
+    AWG31_CONTENT_PADDING_ADDITION
+    AWG31_REKEY_AFTER_TIME
+    AWG31_REKEY_TIMEOUT
+    AWG31_REJECT_AFTER_TIME
+    AWG31_KEEPALIVE_TIMEOUT
+    AWG31_MAX_HANDSHAKE_ATTEMPTS
+    AWG31_RANDOM_TRAILERS
+    AWG31_DISABLE_COOKIES
 )
 readonly -a REQUIRED_KEYS=(
     AWG_API_TOKEN
@@ -34,7 +59,25 @@ readonly -a REQUIRED_KEYS=(
 AWG_SERVER_VERSION=''
 PROCESS_ENV_PRESENT=()
 PROCESS_ENV_VALUES=()
+LOADED_CONFIG_PRESENT=()
+LOADED_CONFIG_VALUES=()
 INSTALL_TEMP_PATHS=()
+INSTALLER_BINARY_PATH=/usr/local/bin/awg-server
+INSTALLER_ENV_PATH=/etc/awg-server.env
+INSTALLER_SYSCTL_PATH=/etc/sysctl.d/99-awg-server.conf
+INSTALLER_UNIT_PATH=/etc/systemd/system/awg-server.service
+INSTALLER_STAGE_ROOT=/var/lib/awg-server/installer-stage
+INSTALLER_STAGE_DIR=''
+INSTALLER_STAGED_BINARY=''
+INSTALLER_BACKUP_ROOT=/var/backups/awg-server
+INSTALLER_BACKUP_DIR=''
+INSTALLER_SERVICE_GATE_SECONDS=30
+INSTALLER_RUNTIME_GATE_SECONDS=30
+INSTALLER_AUTOSTART_DISABLE_ATTEMPTED=0
+INSTALLER_AUTOSTART_DISABLE_CONFIRMED=0
+INSTALLER_SERVICE_STOP_ATTEMPTED=0
+INSTALLER_SERVICE_STOP_CONFIRMED=0
+INSTALLER_REPLACEMENT_BEGUN=0
 
 die() {
     printf 'install failed: %s\n' "$1" >&2
@@ -66,27 +109,119 @@ capture_process_environment() {
     done
 }
 
+initialize_loaded_config() {
+    local index
+
+    LOADED_CONFIG_PRESENT=()
+    LOADED_CONFIG_VALUES=()
+    for ((index = 0; index < ${#ENVIRONMENT_KEYS[@]}; index++)); do
+        LOADED_CONFIG_PRESENT+=(0)
+        LOADED_CONFIG_VALUES+=('')
+    done
+}
+
+environment_key_index() {
+    local candidate=$1
+    local result_variable=$2
+    local candidate_index
+
+    for ((candidate_index = 0; candidate_index < ${#ENVIRONMENT_KEYS[@]}; candidate_index++)); do
+        if [[ ${ENVIRONMENT_KEYS[candidate_index]} == "$candidate" ]]; then
+            printf -v "$result_variable" '%s' "$candidate_index"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+decode_rendered_environment_value() {
+    local encoded=$1
+    local result_variable=$2
+    local decoded_value=''
+    local escaped
+    local index=0
+    local length=${#encoded}
+    local character
+
+    while ((index < length)); do
+        character=${encoded:index:1}
+        case $character in
+            \\)
+                ((index += 1))
+                ((index < length)) || return 1
+                escaped=${encoded:index:1}
+                case $escaped in
+                    \\ | '"' | '$' | '`') decoded_value+=$escaped ;;
+                    *) return 1 ;;
+                esac
+                ;;
+            '"' | '$' | '`') return 1 ;;
+            *) decoded_value+=$character ;;
+        esac
+        ((index += 1))
+    done
+
+    printf -v "$result_variable" '%s' "$decoded_value"
+}
+
 load_config_file() {
     local config_file=${1:-}
+    local assignment_pattern='^([A-Z][A-Z0-9_]*)="(.*)"$'
+    local decoded
+    local encoded
+    local index
+    local key
+    local line
     local mode
 
-    [[ -f $config_file ]] || die "$config_file must be a regular file"
-    [[ -O $config_file ]] || die "$config_file must be owned by the effective user"
+    [[ -f $config_file && -O $config_file ]] || return 1
 
     if mode=$(stat -c '%a' -- "$config_file" 2>/dev/null); then
         :
     elif mode=$(stat -f '%Lp' "$config_file" 2>/dev/null); then
         :
     else
-        die "cannot inspect permissions for $config_file"
+        return 1
     fi
 
-    [[ $mode =~ ^[0-7]+$ ]] || die "invalid permissions for $config_file"
+    [[ $mode =~ ^[0-7]+$ ]] || return 1
     (( (8#$mode & 0022) == 0 )) \
-        || die "$config_file must not be group or world writable"
+        || return 1
 
-    # shellcheck disable=SC1090
-    source "$config_file"
+    initialize_loaded_config
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line != *$'\r'* && $line =~ $assignment_pattern ]] || return 1
+        key=${BASH_REMATCH[1]}
+        encoded=${BASH_REMATCH[2]}
+        environment_key_index "$key" index || return 1
+        [[ ${LOADED_CONFIG_PRESENT[index]} == 0 ]] || return 1
+        decode_rendered_environment_value "$encoded" decoded || return 1
+        LOADED_CONFIG_PRESENT[index]=1
+        LOADED_CONFIG_VALUES[index]=$decoded
+    done < "$config_file"
+}
+
+apply_loaded_config_environment() {
+    local index
+    local key
+
+    for ((index = 0; index < ${#ENVIRONMENT_KEYS[@]}; index++)); do
+        [[ ${LOADED_CONFIG_PRESENT[index]:-0} == 1 ]] || continue
+        key=${ENVIRONMENT_KEYS[index]}
+        printf -v "$key" '%s' "${LOADED_CONFIG_VALUES[index]}"
+    done
+}
+
+clear_non_process_environment() {
+    local index
+    local key
+
+    for ((index = 0; index < ${#ENVIRONMENT_KEYS[@]}; index++)); do
+        [[ ${PROCESS_ENV_PRESENT[index]:-0} == 1 ]] && continue
+        key=${ENVIRONMENT_KEYS[index]}
+        unset "$key"
+    done
 }
 
 restore_process_environment() {
@@ -133,7 +268,8 @@ render_environment() {
         [[ ${!key+x} ]] || continue
         value=${!key}
         if [[ $value == *$'\r'* || $value == *$'\n'* ]]; then
-            die "$key must not contain carriage returns or newlines"
+            printf '%s\n' "$key must not contain carriage returns or newlines" >&2
+            return 1
         fi
     done
 
@@ -146,6 +282,46 @@ render_environment() {
         value=${value//\`/\\\`}
         printf '%s="%s"\n' "$key" "$value"
     done
+}
+
+set_default_setting() {
+    local key=$1
+    local value=$2
+
+    [[ ${!key+x} ]] || printf -v "$key" '%s' "$value"
+}
+
+apply_awg31_defaults() {
+    set_default_setting AWG_DEFAULT_PROTOCOL_VERSION 3.1
+    set_default_setting AWG31_MTU 1280
+    set_default_setting AWG31_PERSISTENT_KEEPALIVE 25-35
+    set_default_setting AWG31_CONTENT_PADDING_ADDITION 10-100
+    set_default_setting AWG31_REKEY_AFTER_TIME 100-120
+    set_default_setting AWG31_REKEY_TIMEOUT 3-7
+    set_default_setting AWG31_REJECT_AFTER_TIME 150-180
+    set_default_setting AWG31_KEEPALIVE_TIMEOUT 5-15
+    set_default_setting AWG31_MAX_HANDSHAKE_ATTEMPTS 15-20
+    set_default_setting AWG31_RANDOM_TRAILERS on
+    set_default_setting AWG31_DISABLE_COOKIES off
+}
+
+resolve_installer_settings() {
+    local key
+
+    capture_process_environment
+    clear_non_process_environment
+    if [[ -e $INSTALLER_ENV_PATH ]]; then
+        load_config_file "$INSTALLER_ENV_PATH" \
+            || die 'could not safely parse the existing awg-server environment'
+        apply_loaded_config_environment
+    fi
+    restore_process_environment
+    apply_awg31_defaults
+
+    for key in "${REQUIRED_KEYS[@]}"; do
+        require_setting "$key"
+    done
+    select_data_dir /data /var/lib/awg-server
 }
 
 select_data_dir() {
@@ -162,8 +338,8 @@ select_data_dir() {
 
 release_asset_name() {
     case ${1:-} in
-        x86_64) printf 'awg-server-linux-amd64\n' ;;
-        aarch64 | arm64) printf 'awg-server-linux-arm64\n' ;;
+        x86_64) printf 'awg-server-awg31-linux-amd64\n' ;;
+        aarch64 | arm64) printf 'awg-server-awg31-linux-arm64\n' ;;
         *)
             printf 'unsupported architecture: %s\n' "${1:-unknown}" >&2
             return 1
@@ -187,6 +363,60 @@ resolve_latest_version() {
 
 health_response_ok() {
     [[ ${1:-} == '{"status":"ok"}' ]]
+}
+
+clients_response_is_array() {
+    printf '%s' "${1:-}" \
+        | python3 -c 'import json, sys; value = json.load(sys.stdin); raise SystemExit(not isinstance(value, list))' \
+            >/dev/null 2>&1
+}
+
+create_curl_auth_config() {
+    local config_file
+    local token
+
+    [[ $AWG_API_TOKEN != *$'\r'* && $AWG_API_TOKEN != *$'\n'* ]] || return 1
+    [[ -n $INSTALLER_STAGE_DIR && -d $INSTALLER_STAGE_DIR ]] || return 1
+
+    config_file=$(mktemp "$INSTALLER_STAGE_DIR/curl-auth.XXXXXX") || return 1
+    chown root:root "$config_file" || {
+        rm -f -- "$config_file"
+        return 1
+    }
+    chmod 0600 "$config_file" || {
+        rm -f -- "$config_file"
+        return 1
+    }
+
+    token=${AWG_API_TOKEN//\\/\\\\}
+    token=${token//\"/\\\"}
+    if ! printf 'header = "Authorization: Bearer %s"\n' "$token" > "$config_file"; then
+        rm -f -- "$config_file"
+        return 1
+    fi
+
+    printf '%s\n' "$config_file"
+}
+
+authenticated_clients_before_deadline() {
+    local config_file
+    local deadline=$1
+    local health_port=$2
+    local response
+
+    if ! config_file=$(create_curl_auth_config); then
+        return 1
+    fi
+
+    if ! response=$(run_before_deadline "$deadline" curl --disable \
+        --config "$config_file" --noproxy '*' --max-time 1 \
+        -fsS "http://127.0.0.1:$health_port/api/clients" 2>/dev/null); then
+        rm -f -- "$config_file"
+        return 1
+    fi
+    rm -f -- "$config_file"
+
+    clients_response_is_array "$response"
 }
 
 invocation_changed() {
@@ -263,7 +493,7 @@ service_healthy_before_deadline() {
         return 1
     fi
     health_response_ok "$response" || return 1
-    remaining_milliseconds "$deadline" >/dev/null
+    authenticated_clients_before_deadline "$deadline" "$health_port" || return 1
 }
 
 require_supported_host() {
@@ -286,110 +516,154 @@ require_supported_host() {
 }
 
 install_amneziawg() {
-    local tool
-
-    apt-get update
+    apt-get update || return 1
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         build-essential ca-certificates curl dkms gnupg2 iproute2 iptables \
         libelf-dev openssl python3-launchpadlib software-properties-common \
-        "linux-headers-$(uname -r)"
+        "linux-headers-$(uname -r)" || return 1
 
     if [[ $(uname -r) == *xanmod* ]]; then
-        install -d -m 0755 /etc/apt/keyrings
+        install -d -m 0755 /etc/apt/keyrings || return 1
         curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
             | gpg --batch --yes --dearmor \
-                -o /etc/apt/keyrings/llvm-snapshot.gpg
+                -o /etc/apt/keyrings/llvm-snapshot.gpg || return 1
         printf '%s\n' \
             'deb [signed-by=/etc/apt/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main' \
-            > /etc/apt/sources.list.d/llvm-19.list
-        apt-get update
+            > /etc/apt/sources.list.d/llvm-19.list || return 1
+        apt-get update || return 1
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            clang-19 lld-19 llvm-19
+            clang-19 lld-19 llvm-19 || return 1
         for tool in \
             clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump \
             llvm-readelf llvm-strip; do
             update-alternatives --install \
-                "/usr/bin/$tool" "$tool" "/usr/bin/$tool-19" 190
-            update-alternatives --set "$tool" "/usr/bin/$tool-19"
+                "/usr/bin/$tool" "$tool" "/usr/bin/$tool-19" 190 || return 1
+            update-alternatives --set "$tool" "/usr/bin/$tool-19" || return 1
         done
         export PATH="/usr/lib/llvm-19/bin:$PATH"
     fi
 
-    add-apt-repository -y ppa:amnezia/ppa
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y amneziawg
-    modprobe amneziawg
-    modinfo amneziawg >/dev/null
-    awg --version
+    add-apt-repository -y ppa:amnezia/ppa || return 1
+    apt-get update || return 1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        amneziawg amneziawg-tools amneziawg-dkms || return 1
+    require_package_minimum amneziawg-tools "$MINIMUM_TOOLS_PACKAGE_VERSION" \
+        || return 1
+    require_package_minimum amneziawg-dkms "$MINIMUM_DKMS_PACKAGE_VERSION" \
+        || return 1
 }
 
-install_verified_release() {
+installed_package_version() {
+    local package_name=$1
+    local output
+    local status
+    local version
+    local extra
+
+    output=$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}\n' "$package_name") \
+        || return 1
+    IFS=$'\t' read -r status version extra <<< "$output"
+    [[ -z ${extra:-} && ${#status} -eq 3 && ${status:1:1} == i \
+        && ${status:2:1} == ' ' && -n $version ]] || return 1
+
+    printf '%s\n' "$version"
+}
+
+require_package_minimum() {
+    local package_name=$1
+    local minimum_version=$2
+    local installed_version
+
+    installed_version=$(installed_package_version "$package_name") || return 1
+    dpkg --compare-versions "$installed_version" ge "$minimum_version"
+}
+
+prepare_stage_directory() {
+    mkdir -p -- "$INSTALLER_STAGE_ROOT" || return 1
+    chown root:root "$INSTALLER_STAGE_ROOT" || return 1
+    chmod 0700 "$INSTALLER_STAGE_ROOT" || return 1
+
+    INSTALLER_STAGE_DIR=$(mktemp -d "$INSTALLER_STAGE_ROOT/stage.XXXXXX") \
+        || return 1
+    INSTALL_TEMP_PATHS+=("$INSTALLER_STAGE_DIR")
+    chown root:root "$INSTALLER_STAGE_DIR" || return 1
+    chmod 0700 "$INSTALLER_STAGE_DIR" || return 1
+}
+
+stage_verified_release() {
     local asset=$1
     local checksum_count=0
     local checksum_line=''
     local checksum_pattern='^([0-9a-f]{64})  (.+)$'
     local downloaded_version
+    local expected_asset
+    local index
     local key_description
     local key_type
     local line
-    local release_dir
     local release_url
     local verified_key
 
-    release_dir=$(mktemp -d)
-    INSTALL_TEMP_PATHS+=("$release_dir")
-    verified_key="$release_dir/release-signing-public.pem"
+    prepare_stage_directory || return 1
+    verified_key="$INSTALLER_STAGE_DIR/release-signing-public.pem"
     if ! printf '%s' "$RELEASE_PUBLIC_KEY_BASE64" \
         | openssl base64 -d -A > "$verified_key"; then
-        die 'could not decode the release public key'
+        return 1
     fi
-    chmod 0600 "$verified_key"
+    chown root:root "$verified_key" || return 1
+    chmod 0600 "$verified_key" || return 1
 
     if ! key_description=$(openssl pkey \
         -pubin -in "$verified_key" -text -noout); then
-        die 'could not read the release public key'
+        return 1
     fi
     key_type=${key_description%%$'\n'*}
     unset key_description
     [[ $key_type == 'ED25519 Public-Key:' ]] \
-        || die 'release public key must be Ed25519'
+        || return 1
 
     release_url="https://github.com/StealthSurf-VPN/awg-server/releases/download/v$AWG_SERVER_VERSION"
-    curl -fsSL "$release_url/SHA256SUMS" -o "$release_dir/SHA256SUMS"
+    curl -fsSL "$release_url/SHA256SUMS" -o "$INSTALLER_STAGE_DIR/SHA256SUMS" \
+        || return 1
     curl -fsSL "$release_url/SHA256SUMS.sig" \
-        -o "$release_dir/SHA256SUMS.sig"
+        -o "$INSTALLER_STAGE_DIR/SHA256SUMS.sig" || return 1
 
     openssl pkeyutl -verify -rawin -pubin \
         -inkey "$verified_key" \
-        -sigfile "$release_dir/SHA256SUMS.sig" \
-        -in "$release_dir/SHA256SUMS" \
-        || die 'release manifest signature verification failed'
+        -sigfile "$INSTALLER_STAGE_DIR/SHA256SUMS.sig" \
+        -in "$INSTALLER_STAGE_DIR/SHA256SUMS" || return 1
 
-    while IFS= read -r line || [[ -n $line ]]; do
-        if [[ $line =~ $checksum_pattern ]] \
-            && [[ ${BASH_REMATCH[2]} == "$asset" ]]; then
+    [[ $(tail -c 1 "$INSTALLER_STAGE_DIR/SHA256SUMS" | wc -l | tr -d '[:space:]') == 1 ]] \
+        || return 1
+    index=0
+    while IFS= read -r line; do
+        [[ $index -lt ${#EXPECTED_RELEASE_ASSETS[@]} ]] || return 1
+        expected_asset=${EXPECTED_RELEASE_ASSETS[index]}
+        [[ $line =~ $checksum_pattern ]] || return 1
+        [[ ${BASH_REMATCH[2]} == "$expected_asset" ]] || return 1
+        if [[ $expected_asset == "$asset" ]]; then
             checksum_count=$((checksum_count + 1))
             checksum_line=$line
         fi
-    done < "$release_dir/SHA256SUMS"
+        index=$((index + 1))
+    done < "$INSTALLER_STAGE_DIR/SHA256SUMS"
+    [[ $index -eq ${#EXPECTED_RELEASE_ASSETS[@]} ]] || return 1
     [[ $checksum_count -eq 1 ]] \
-        || die "release manifest must contain exactly one checksum for $asset"
+        || return 1
 
-    curl -fsSL "$release_url/$asset" -o "$release_dir/$asset"
-    (cd "$release_dir" \
+    curl -fsSL "$release_url/$asset" -o "$INSTALLER_STAGE_DIR/$asset" || return 1
+    (cd "$INSTALLER_STAGE_DIR" \
         && printf '%s\n' "$checksum_line" | sha256sum --check --strict -) \
-        || die 'release asset checksum verification failed'
-    chmod 0755 "$release_dir/$asset"
-    if ! downloaded_version=$("$release_dir/$asset" version); then
-        die 'downloaded release binary did not report its version'
+        || return 1
+    chown root:root "$INSTALLER_STAGE_DIR/$asset" || return 1
+    chmod 0755 "$INSTALLER_STAGE_DIR/$asset" || return 1
+    if ! downloaded_version=$("$INSTALLER_STAGE_DIR/$asset" version); then
+        return 1
     fi
     [[ $downloaded_version == "awg-server $AWG_SERVER_VERSION" ]] \
-        || die 'downloaded release binary version does not match AWG_SERVER_VERSION'
+        || return 1
 
-    install -o root -g root -m 0755 \
-        "$release_dir/$asset" /usr/local/bin/awg-server
-
-    rm -rf -- "$release_dir"
+    INSTALLER_STAGED_BINARY="$INSTALLER_STAGE_DIR/$asset"
 }
 
 write_host_configuration() {
@@ -397,26 +671,32 @@ write_host_configuration() {
     local sysctl_tmp
     local unit_tmp
 
-    mkdir -p -- "$AWG_DATA_DIR"
+    mkdir -p -- "$AWG_DATA_DIR" || return 1
+    mkdir -p -- "$(dirname "$INSTALLER_ENV_PATH")" \
+        "$(dirname "$INSTALLER_SYSCTL_PATH")" \
+        "$(dirname "$INSTALLER_UNIT_PATH")" || return 1
 
-    environment_tmp=$(mktemp /etc/awg-server.env.XXXXXX)
+    environment_tmp=$(mktemp "$INSTALLER_ENV_PATH.XXXXXX") || return 1
     INSTALL_TEMP_PATHS+=("$environment_tmp")
-    render_environment > "$environment_tmp"
-    chown root:root "$environment_tmp"
-    chmod 0600 "$environment_tmp"
-    mv -f -- "$environment_tmp" /etc/awg-server.env
+    if ! render_environment > "$environment_tmp"; then
+        rm -f -- "$environment_tmp"
+        return 1
+    fi
+    chown root:root "$environment_tmp" || return 1
+    chmod 0600 "$environment_tmp" || return 1
+    mv -f -- "$environment_tmp" "$INSTALLER_ENV_PATH" || return 1
 
-    sysctl_tmp=$(mktemp /etc/sysctl.d/99-awg-server.conf.XXXXXX)
+    sysctl_tmp=$(mktemp "$INSTALLER_SYSCTL_PATH.XXXXXX") || return 1
     INSTALL_TEMP_PATHS+=("$sysctl_tmp")
-    printf '%s\n' 'net.ipv4.ip_forward=1' > "$sysctl_tmp"
-    chown root:root "$sysctl_tmp"
-    chmod 0644 "$sysctl_tmp"
-    mv -f -- "$sysctl_tmp" /etc/sysctl.d/99-awg-server.conf
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    printf '%s\n' 'net.ipv4.ip_forward=1' > "$sysctl_tmp" || return 1
+    chown root:root "$sysctl_tmp" || return 1
+    chmod 0644 "$sysctl_tmp" || return 1
+    mv -f -- "$sysctl_tmp" "$INSTALLER_SYSCTL_PATH" || return 1
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null || return 1
 
-    unit_tmp=$(mktemp /etc/systemd/system/awg-server.service.XXXXXX)
+    unit_tmp=$(mktemp "$INSTALLER_UNIT_PATH.XXXXXX") || return 1
     INSTALL_TEMP_PATHS+=("$unit_tmp")
-    cat > "$unit_tmp" <<'UNIT'
+    cat > "$unit_tmp" <<'UNIT' || return 1
 [Unit]
 Description=AmneziaWG Server
 Wants=network-online.target
@@ -433,15 +713,9 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNIT
-    chown root:root "$unit_tmp"
-    chmod 0644 "$unit_tmp"
-    mv -f -- "$unit_tmp" /etc/systemd/system/awg-server.service
-}
-
-service_gate_failed() {
-    systemctl --no-pager --full status awg-server.service >&2 || true
-    journalctl --no-pager -u awg-server.service -n 50 >&2 || true
-    die "$1"
+    chown root:root "$unit_tmp" || return 1
+    chmod 0644 "$unit_tmp" || return 1
+    mv -f -- "$unit_tmp" "$INSTALLER_UNIT_PATH" || return 1
 }
 
 start_and_verify_service() {
@@ -450,45 +724,359 @@ start_and_verify_service() {
     local installed_version
     local previous_invocation
 
-    if ! installed_version=$(/usr/local/bin/awg-server version); then
-        service_gate_failed 'installed binary did not report its version'
-    fi
+    installed_version=$("$INSTALLER_BINARY_PATH" version 2>/dev/null) || return 1
     [[ $installed_version == "awg-server $AWG_SERVER_VERSION" ]] \
-        || service_gate_failed \
-            'installed binary version does not match AWG_SERVER_VERSION'
+        || return 1
 
-    deadline=$(deadline_after_seconds 30)
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
     run_before_deadline "$deadline" systemctl daemon-reload \
-        || service_gate_failed 'systemd daemon-reload failed'
-    run_before_deadline "$deadline" systemctl enable awg-server.service \
-        || service_gate_failed 'could not enable awg-server.service'
+        || return 1
+    service_autostart_disabled_before_deadline "$deadline" || return 1
     if ! previous_invocation=$(run_before_deadline "$deadline" systemctl show \
         --property=InvocationID --value awg-server.service); then
-        service_gate_failed 'could not read the current service invocation'
+        return 1
     fi
 
     run_before_deadline "$deadline" \
-        systemctl restart --no-block awg-server.service \
-        || service_gate_failed 'could not start awg-server.service'
-    run_before_deadline "$deadline" \
-        systemctl is-enabled --quiet awg-server.service \
-        || service_gate_failed 'awg-server.service is not enabled'
+        systemctl start --no-block awg-server.service || return 1
 
     while remaining_milliseconds "$deadline" >/dev/null; do
         if service_healthy_before_deadline \
             "$deadline" "$previous_invocation" "$health_port"; then
-            return
+            INSTALLER_AUTOSTART_DISABLE_CONFIRMED=0
+            run_before_deadline "$deadline" \
+                systemctl enable awg-server.service || return 1
+            run_before_deadline "$deadline" \
+                systemctl is-enabled --quiet awg-server.service || return 1
+            return 0
         fi
         run_before_deadline "$deadline" sleep 1 || break
     done
 
-    service_gate_failed \
-        'awg-server.service did not return the expected health response within 30 seconds'
+    return 1
+}
+
+copy_root_only_backup_file() {
+    local source_file=$1
+    local destination_file=$2
+
+    [[ -e $source_file ]] || return 0
+    [[ -f $source_file ]] || return 1
+    cp -- "$source_file" "$destination_file" || return 1
+    chown root:root "$destination_file" || return 1
+    chmod 0600 "$destination_file"
+}
+
+create_upgrade_backup() {
+    local pending_dir
+    local completed_dir
+
+    mkdir -p -- "$INSTALLER_BACKUP_ROOT" || return 1
+    chown root:root "$INSTALLER_BACKUP_ROOT" || return 1
+    chmod 0700 "$INSTALLER_BACKUP_ROOT" || return 1
+
+    pending_dir=$(mktemp -d "$INSTALLER_BACKUP_ROOT/.pending.XXXXXX") || return 1
+    chown root:root "$pending_dir" || {
+        rm -rf -- "$pending_dir"
+        return 1
+    }
+    chmod 0700 "$pending_dir" || {
+        rm -rf -- "$pending_dir"
+        return 1
+    }
+
+    if ! copy_root_only_backup_file "$INSTALLER_ENV_PATH" "$pending_dir/environment" \
+        || ! copy_root_only_backup_file "$AWG_DATA_DIR/clients.json" "$pending_dir/clients.json" \
+        || ! copy_root_only_backup_file "$AWG_DATA_DIR/usage.json" "$pending_dir/usage.json"; then
+        rm -rf -- "$pending_dir"
+        return 1
+    fi
+
+    completed_dir=${pending_dir/.pending./upgrade.}
+    mv -- "$pending_dir" "$completed_dir" || return 1
+    INSTALLER_BACKUP_DIR=$completed_dir
+}
+
+read_service_state_before_deadline() {
+    local deadline=$1
+    local load_result=$2
+    local active_result=$3
+    local parsed_active_state=''
+    local active_state_count=0
+    local line
+    local parsed_load_state=''
+    local load_state_count=0
+    local output
+
+    output=$(run_before_deadline "$deadline" systemctl show \
+        --property=LoadState --property=ActiveState \
+        awg-server.service 2>/dev/null) || return 2
+    while IFS= read -r line; do
+        case "$line" in
+            LoadState=*)
+                load_state_count=$((load_state_count + 1))
+                parsed_load_state=${line#LoadState=}
+                ;;
+            ActiveState=*)
+                active_state_count=$((active_state_count + 1))
+                parsed_active_state=${line#ActiveState=}
+                ;;
+            *) return 2 ;;
+        esac
+    done <<< "$output"
+
+    [[ $load_state_count -eq 1 && $active_state_count -eq 1 \
+        && $parsed_load_state =~ ^[a-z][a-z-]*$ \
+        && $parsed_active_state =~ ^[a-z][a-z-]*$ ]] || return 2
+    printf -v "$load_result" '%s' "$parsed_load_state"
+    printf -v "$active_result" '%s' "$parsed_active_state"
+}
+
+service_stopped_before_deadline() {
+    local deadline=$1
+    local active_state
+    local load_state
+
+    read_service_state_before_deadline \
+        "$deadline" load_state active_state || return 2
+    case "$active_state" in
+        inactive | failed) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+service_stopped_with_new_deadline() {
+    local deadline
+
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    service_stopped_before_deadline "$deadline"
+}
+
+request_service_stop() {
+    local deadline
+
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    run_before_deadline "$deadline" \
+        systemctl stop --no-block awg-server.service >/dev/null 2>&1
+}
+
+wait_for_service_stopped() {
+    local deadline
+    local status
+
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    while remaining_milliseconds "$deadline" >/dev/null; do
+        if service_stopped_before_deadline "$deadline"; then
+            return 0
+        else
+            status=$?
+        fi
+        [[ $status -eq 1 ]] || return 1
+        run_before_deadline "$deadline" sleep 1 >/dev/null 2>&1 || break
+    done
+
+    return 1
+}
+
+stop_existing_service() {
+    local status
+
+    if service_stopped_with_new_deadline; then
+        return 0
+    else
+        status=$?
+    fi
+    [[ $status -eq 1 ]] || return 1
+    request_service_stop || return 1
+    wait_for_service_stopped
+}
+
+assert_no_remaining_awg_interfaces() {
+    local deadline
+    local interfaces
+
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    interfaces=$(run_before_deadline "$deadline" \
+        ip -o link show type amneziawg 2>/dev/null) || return 1
+    [[ -z $interfaces ]]
+}
+
+reload_amneziawg_module() {
+    modprobe -r amneziawg >/dev/null 2>&1 || return 1
+    modprobe amneziawg >/dev/null 2>&1 || return 1
+    modinfo amneziawg >/dev/null 2>&1
+}
+
+qualify_staged_runtime() {
+    local deadline
+    local qualification_status=0
+
+    [[ -n $INSTALLER_STAGED_BINARY && -x $INSTALLER_STAGED_BINARY ]] || return 1
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    service_stopped_before_deadline "$deadline" || return 1
+    service_autostart_disabled_before_deadline "$deadline" 1 || return 1
+
+    deadline=$(deadline_after_seconds "$INSTALLER_RUNTIME_GATE_SECONDS") || return 1
+    run_before_deadline "$deadline" \
+        "$INSTALLER_STAGED_BINARY" check-runtime >/dev/null 2>&1 \
+        || qualification_status=$?
+    assert_no_remaining_awg_interfaces || return 1
+    [[ $qualification_status -eq 0 ]]
+}
+
+install_staged_binary() {
+    mkdir -p -- "$(dirname "$INSTALLER_BINARY_PATH")" || return 1
+    install -o root -g root -m 0755 -- \
+        "$INSTALLER_STAGED_BINARY" "$INSTALLER_BINARY_PATH"
+}
+
+stop_failed_service() {
+    if service_stopped_with_new_deadline; then
+        return 0
+    fi
+
+    request_service_stop || true
+    wait_for_service_stopped
+}
+
+service_autostart_disabled_before_deadline() {
+    local deadline=$1
+    local allow_not_found=${2:-0}
+    local load_state
+    local state
+    local status
+
+    if state=$(run_before_deadline "$deadline" \
+        systemctl is-enabled awg-server.service 2>/dev/null); then
+        status=0
+    else
+        status=$?
+    fi
+    [[ $status -ne 124 && $status -ne 137 ]] || return 1
+
+    case "$state" in
+        disabled | masked) return 0 ;;
+        not-found) [[ $allow_not_found == 1 ]] ;;
+        '')
+            [[ $allow_not_found == 1 && $status -ne 0 ]] || return 1
+            if ! load_state=$(run_before_deadline "$deadline" systemctl show \
+                --property=LoadState --value awg-server.service 2>/dev/null); then
+                return 1
+            fi
+            [[ $load_state == not-found ]]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+disable_service_autostart() {
+    local deadline
+
+    INSTALLER_AUTOSTART_DISABLE_ATTEMPTED=1
+    INSTALLER_AUTOSTART_DISABLE_CONFIRMED=0
+    deadline=$(deadline_after_seconds "$INSTALLER_SERVICE_GATE_SECONDS") || return 1
+    run_before_deadline "$deadline" \
+        systemctl disable --quiet awg-server.service || true
+    service_autostart_disabled_before_deadline "$deadline" 1 || return 1
+    INSTALLER_AUTOSTART_DISABLE_CONFIRMED=1
+}
+
+report_recovery() {
+    local service_stopped=${1:-0}
+    local autostart_disabled=${2:-0}
+
+    if [[ $service_stopped == 1 && $autostart_disabled == 1 ]]; then
+        printf '%s\n' "$RECOVERY_GUIDANCE" >&2
+    elif [[ $service_stopped == 1 ]]; then
+        printf '%s\n' "$UNCONFIRMED_AUTOSTART_RECOVERY_GUIDANCE" >&2
+    elif [[ $autostart_disabled == 1 ]]; then
+        printf '%s\n' "$UNCONFIRMED_STOP_RECOVERY_GUIDANCE" >&2
+    else
+        printf '%s\n' "$UNCONFIRMED_RECOVERY_GUIDANCE" >&2
+    fi
+    if [[ -n $INSTALLER_BACKUP_DIR ]]; then
+        printf 'Backup retained at: %s\n' "$INSTALLER_BACKUP_DIR" >&2
+    else
+        printf 'RECOVERY: no completed backup was created.\n' >&2
+    fi
+}
+
+fail_stopped_pre_replacement() {
+    local autostart_disabled=0
+
+    if disable_service_autostart; then
+        autostart_disabled=1
+    fi
+    report_recovery 1 "$autostart_disabled"
+    die "$1"
+}
+
+fail_ambiguous_service_stop() {
+    local autostart_disabled=0
+    local service_stopped=0
+
+    if disable_service_autostart; then
+        autostart_disabled=1
+    fi
+    if stop_failed_service; then
+        service_stopped=1
+    fi
+    report_recovery "$service_stopped" "$autostart_disabled"
+    die "$1"
+}
+
+fail_after_replacement() {
+    local autostart_disabled=0
+    local service_stopped=0
+
+    if stop_failed_service; then
+        service_stopped=1
+    fi
+    if disable_service_autostart; then
+        autostart_disabled=1
+    fi
+    report_recovery "$service_stopped" "$autostart_disabled"
+    die "$1"
+}
+
+install_release_transaction() {
+    local asset=$1
+
+    INSTALLER_BACKUP_DIR=''
+    INSTALLER_AUTOSTART_DISABLE_ATTEMPTED=0
+    INSTALLER_AUTOSTART_DISABLE_CONFIRMED=0
+    INSTALLER_SERVICE_STOP_ATTEMPTED=0
+    INSTALLER_SERVICE_STOP_CONFIRMED=0
+    INSTALLER_REPLACEMENT_BEGUN=0
+
+    install_amneziawg || die 'could not install current AmneziaWG packages'
+    stage_verified_release "$asset" || die 'could not stage a verified awg-server release'
+    disable_service_autostart \
+        || die 'could not disable awg-server automatic startup before stopping it'
+    INSTALLER_SERVICE_STOP_ATTEMPTED=1
+    stop_existing_service \
+        || fail_ambiguous_service_stop 'could not confirm awg-server.service stopped'
+    INSTALLER_SERVICE_STOP_CONFIRMED=1
+    create_upgrade_backup \
+        || fail_stopped_pre_replacement 'could not create a consistent upgrade backup'
+    assert_no_remaining_awg_interfaces \
+        || fail_stopped_pre_replacement \
+            'refusing to unload AmneziaWG while an unknown interface remains'
+    reload_amneziawg_module \
+        || fail_stopped_pre_replacement 'could not reload the AmneziaWG module'
+    qualify_staged_runtime \
+        || fail_stopped_pre_replacement 'staged awg-server did not qualify the AWG 3.1 runtime'
+    INSTALLER_REPLACEMENT_BEGUN=1
+    install_staged_binary \
+        || fail_after_replacement 'could not install the staged awg-server binary'
+    write_host_configuration \
+        || fail_after_replacement 'could not install awg-server configuration'
+    start_and_verify_service \
+        || fail_after_replacement 'new awg-server service did not pass qualification'
 }
 
 main() {
     local asset
-    local key
 
     (($# == 0)) || die 'arguments are not supported'
 
@@ -497,22 +1085,10 @@ main() {
         die 'supported architectures are x86_64 and aarch64/arm64'
     fi
 
-    capture_process_environment
-    if [[ -e /etc/awg-server.env ]]; then
-        load_config_file /etc/awg-server.env
-    fi
-    restore_process_environment
-
-    for key in "${REQUIRED_KEYS[@]}"; do
-        require_setting "$key"
-    done
-    select_data_dir /data /var/lib/awg-server
+    resolve_installer_settings
     AWG_SERVER_VERSION=$(resolve_latest_version)
 
-    install_amneziawg
-    install_verified_release "$asset"
-    write_host_configuration
-    start_and_verify_service
+    install_release_transaction "$asset"
 
     printf 'awg-server %s is installed and healthy\n' "$AWG_SERVER_VERSION"
     printf '%s\n' \
@@ -520,7 +1096,39 @@ main() {
         >&2
 }
 
+handle_interruption() {
+    local autostart_disabled=0
+    local service_stopped=0
+
+    trap '' HUP INT TERM
+
+    if [[ $INSTALLER_REPLACEMENT_BEGUN == 1 ]]; then
+        if stop_failed_service; then
+            service_stopped=1
+        fi
+    elif [[ $INSTALLER_SERVICE_STOP_CONFIRMED == 1 ]]; then
+        service_stopped=1
+    elif [[ $INSTALLER_SERVICE_STOP_ATTEMPTED == 1 ]]; then
+        if stop_failed_service; then
+            service_stopped=1
+        fi
+    elif [[ $INSTALLER_AUTOSTART_DISABLE_ATTEMPTED == 1 ]]; then
+        :
+    else
+        exit 1
+    fi
+    if [[ $INSTALLER_AUTOSTART_DISABLE_CONFIRMED == 1 ]]; then
+        autostart_disabled=1
+    elif disable_service_autostart; then
+        autostart_disabled=1
+    fi
+    report_recovery "$service_stopped" "$autostart_disabled"
+
+    exit 1
+}
+
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     trap cleanup_temp_paths EXIT
+    trap handle_interruption HUP INT TERM
     main "$@"
 fi

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +22,7 @@ const testAPIToken = "test-token"
 type apiSmokePool struct {
 	serverPublicKey [32]byte
 	peerPublicKey   [32]byte
-	profileKey      string
+	profileKey      awg.ProfileKey
 	peerPort        int
 	hasPeer         bool
 	migrations      int
@@ -36,20 +37,20 @@ type apiSmokePool struct {
 	activeLANPeers  []awg.LANPeer
 }
 
-func (p *apiSmokePool) AddPeer(params awg.AWGParams, publicKey [32]byte, _ *[32]byte, _ string) error {
+func (p *apiSmokePool) AddPeer(profile awg.Profile, requestedPort int, publicKey [32]byte, _ *[32]byte, _ string) error {
 	if p.addErr != nil {
 		return p.addErr
 	}
 
 	p.peerPublicKey = publicKey
-	p.profileKey = params.Key()
-	p.peerPort = params.Port
+	p.profileKey = profile.Key()
+	p.peerPort = requestedPort
 	p.hasPeer = true
 
 	return nil
 }
 
-func (p *apiSmokePool) RemovePeer(_ awg.AWGParams, _ [32]byte, _ string) error {
+func (p *apiSmokePool) RemovePeer(_ awg.Profile, _ [32]byte, _ string) error {
 	if p.removeErr != nil {
 		return p.removeErr
 	}
@@ -59,21 +60,21 @@ func (p *apiSmokePool) RemovePeer(_ awg.AWGParams, _ [32]byte, _ string) error {
 	return nil
 }
 
-func (p *apiSmokePool) MigratePeer(_, newParams awg.AWGParams, publicKey [32]byte, _ *[32]byte, _ string) error {
+func (p *apiSmokePool) MigratePeer(_, newProfile awg.Profile, requestedPort int, publicKey [32]byte, _ *[32]byte, _ string) error {
 	if p.migrateErr != nil {
 		return p.migrateErr
 	}
 
 	p.peerPublicKey = publicKey
-	p.profileKey = newParams.Key()
-	p.peerPort = newParams.Port
+	p.profileKey = newProfile.Key()
+	p.peerPort = requestedPort
 	p.hasPeer = true
 	p.migrations++
 
 	return nil
 }
 
-func (p *apiSmokePool) PortForParams(awg.AWGParams) (int, error) {
+func (p *apiSmokePool) PortForProfile(awg.Profile) (int, error) {
 	if p.portErr != nil {
 		return 0, p.portErr
 	}
@@ -162,9 +163,389 @@ func TestAPICapabilities(t *testing.T) {
 
 	var body map[string]bool
 	decodeAPIResponse(t, response, &body)
-	if len(body) != 1 || !body["lan_group_isolation"] {
+	if len(body) != 2 || !body["lan_group_isolation"] || !body["awg_protocol_3_1"] {
 		t.Fatalf("capabilities = %+v", body)
 	}
+}
+
+func TestAPICreateProtocolVersionBoundary(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantStatus  int
+		wantVersion string
+	}{
+		{name: "omitted uses configured default", body: `{"id":"client"}`, wantStatus: http.StatusCreated, wantVersion: "3.1"},
+		{name: "legacy alias", body: `{"id":"client","protocol_version":"2"}`, wantStatus: http.StatusCreated, wantVersion: "2.0"},
+		{name: "canonical legacy", body: `{"id":"client","protocol_version":"2.0"}`, wantStatus: http.StatusCreated, wantVersion: "2.0"},
+		{name: "canonical AWG 3.1", body: `{"id":"client","protocol_version":"3.1"}`, wantStatus: http.StatusCreated, wantVersion: "3.1"},
+		{name: "null", body: `{"id":"client","protocol_version":null}`, wantStatus: http.StatusBadRequest},
+		{name: "unknown", body: `{"id":"client","protocol_version":"3"}`, wantStatus: http.StatusBadRequest},
+		{name: "non string", body: `{"id":"client","protocol_version":3.1}`, wantStatus: http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, _, pool := newAuthorizedAPISmoke(t)
+
+			response := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", tt.body)
+			assertAPIStatus(t, response, tt.wantStatus)
+
+			if tt.wantStatus == http.StatusCreated {
+				assertPublicClientPayload(t, response.Body.Bytes(), tt.wantVersion)
+				return
+			}
+
+			if pool.hasPeer {
+				t.Fatal("invalid protocol version created a peer")
+			}
+
+			listed := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+			assertAPIStatus(t, listed, http.StatusOK)
+
+			var clients []json.RawMessage
+			decodeAPIResponse(t, listed, &clients)
+			if len(clients) != 0 {
+				t.Fatalf("invalid protocol version created clients: %s", listed.Body.String())
+			}
+		})
+	}
+}
+
+func TestAPIProtocolVersionErrorDoesNotReflectSecretLikeInput(t *testing.T) {
+	handler, _, pool := newAuthorizedAPISmoke(t)
+	secret := apiAWG31Storage().HeaderKeys["api-synthetic-default-id"].HeaderProtectionKey
+
+	response := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"client","protocol_version":"`+secret+`"}`)
+	assertAPIStatus(t, response, http.StatusBadRequest)
+	if strings.Contains(response.Body.String(), secret) {
+		t.Fatalf("protocol_version error reflects secret-like input: %s", response.Body.String())
+	}
+	if pool.hasPeer {
+		t.Fatal("invalid protocol version created a peer")
+	}
+}
+
+func TestAPIAWG31OverridesResolveAgainstTargetProtocol(t *testing.T) {
+	t.Run("POST and omitted-version PATCH accept AWG 3.1 ranges and toggles", func(t *testing.T) {
+		handler, _, _, storage := newAuthorizedAPISmokeWithStorage(t)
+
+		created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{
+			"id":"v31",
+			"protocol_version":"3.1",
+			"awg_params":{
+				"persistent_keepalive":"25-35",
+				"content_padding_addition":"10-100",
+				"rekey_after_time":"100-120",
+				"rekey_timeout":"3-7",
+				"reject_after_time":"150-180",
+				"keepalive_timeout":"5-15",
+				"max_handshake_attempts":"15-20",
+				"random_trailers":"off",
+				"disable_cookies":"on"
+			}
+		}`)
+		assertAPIStatus(t, created, http.StatusCreated)
+		assertPublicClientPayload(t, created.Body.Bytes(), "3.1")
+
+		updated := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/v31", `{
+			"awg_params":{
+				"persistent_keepalive":"off",
+				"content_padding_addition":"off",
+				"random_trailers":"on"
+			}
+		}`)
+		assertAPIStatus(t, updated, http.StatusOK)
+		assertPublicClientPayload(t, updated.Body.Bytes(), "3.1")
+
+		var response struct {
+			AWGParams map[string]json.RawMessage `json:"awg_params"`
+		}
+		decodeAPIResponse(t, updated, &response)
+		for _, field := range []string{"persistent_keepalive", "content_padding_addition"} {
+			if got := string(response.AWGParams[field]); got != "0" {
+				t.Fatalf("%s response = %s, want canonical 0", field, got)
+			}
+		}
+
+		persisted, err := storage.Load()
+		if err != nil {
+			t.Fatalf("Load() after canonical PATCH error = %v", err)
+		}
+		for field, value := range map[string]*config.Uint16Range{
+			"persistent_keepalive":     persisted.Clients[0].AWGParams.PersistentKeepalive,
+			"content_padding_addition": persisted.Clients[0].AWGParams.ContentPaddingAddition,
+		} {
+			scalar, ok := value.Scalar()
+			if !ok || scalar != 0 {
+				t.Fatalf("persisted %s = (%d, %t), want canonical (0, true)", field, scalar, ok)
+			}
+		}
+	})
+
+	t.Run("legacy rejects AWG 3.1-only values before mutation", func(t *testing.T) {
+		handler, _, pool := newAuthorizedAPISmoke(t)
+
+		response := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{
+			"id":"legacy",
+			"protocol_version":"2.0",
+			"awg_params":{"content_padding_addition":"10-100","persistent_keepalive":"off"}
+		}`)
+		assertAPIStatus(t, response, http.StatusBadRequest)
+		if pool.hasPeer {
+			t.Fatal("invalid legacy values created a peer")
+		}
+
+		listed := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+		assertAPIStatus(t, listed, http.StatusOK)
+
+		var clients []json.RawMessage
+		decodeAPIResponse(t, listed, &clients)
+		if len(clients) != 0 {
+			t.Fatalf("invalid legacy values created clients: %s", listed.Body.String())
+		}
+	})
+}
+
+func TestAPIOffAliasCanMigrateToLegacyWithoutRestart(t *testing.T) {
+	handler, _, pool := newAuthorizedAPISmoke(t)
+
+	created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{
+		"id":"canonical-migration",
+		"protocol_version":"3.1",
+		"awg_params":{"persistent_keepalive":"off"}
+	}`)
+	assertAPIStatus(t, created, http.StatusCreated)
+
+	updated := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/canonical-migration", `{"protocol_version":"2.0"}`)
+	assertAPIStatus(t, updated, http.StatusOK)
+	assertPublicClientPayload(t, updated.Body.Bytes(), "2.0")
+	if pool.migrations != 1 {
+		t.Fatalf("version migrations = %d, want 1", pool.migrations)
+	}
+
+	var response struct {
+		AWGParams map[string]json.RawMessage `json:"awg_params"`
+	}
+	decodeAPIResponse(t, updated, &response)
+	if got := string(response.AWGParams["persistent_keepalive"]); got != "0" {
+		t.Fatalf("persistent_keepalive response = %s, want canonical 0", got)
+	}
+}
+
+func TestAPIRejectsExplicitNestedAWGParamsNullBeforeMutation(t *testing.T) {
+	const secret = "secret-like-input-must-not-appear"
+
+	handler, _, pool, storage := newAuthorizedAPISmokeWithStorage(t)
+
+	created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"client","protocol_version":"3.1"}`)
+	assertAPIStatus(t, created, http.StatusCreated)
+
+	beforeClients := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+	assertAPIStatus(t, beforeClients, http.StatusOK)
+	beforeStorage, err := storage.Load()
+	if err != nil {
+		t.Fatalf("Load() before invalid PATCH error = %v", err)
+	}
+	beforeStorageJSON, err := json.Marshal(beforeStorage)
+	if err != nil {
+		t.Fatalf("Marshal() before invalid PATCH error = %v", err)
+	}
+	beforeProfile := pool.profileKey
+
+	response := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/client", `{"awg_params":{"CONTENT_PADDING_ADDITION":null,"unknown_field":"`+secret+`"}}`)
+	assertAPIStatus(t, response, http.StatusBadRequest)
+	if strings.Contains(response.Body.String(), secret) {
+		t.Fatalf("invalid null response reflects secret-like input: %s", response.Body.String())
+	}
+	if !pool.hasPeer || pool.migrations != 0 || pool.profileKey != beforeProfile {
+		t.Fatalf("invalid null PATCH mutated pool: hasPeer=%t migrations=%d profile=%v", pool.hasPeer, pool.migrations, pool.profileKey)
+	}
+
+	afterClients := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+	assertAPIStatus(t, afterClients, http.StatusOK)
+	if !bytes.Equal(beforeClients.Body.Bytes(), afterClients.Body.Bytes()) {
+		t.Fatalf("invalid null PATCH mutated manager state: before=%s after=%s", beforeClients.Body.String(), afterClients.Body.String())
+	}
+
+	afterStorage, err := storage.Load()
+	if err != nil {
+		t.Fatalf("Load() after invalid PATCH error = %v", err)
+	}
+	afterStorageJSON, err := json.Marshal(afterStorage)
+	if err != nil {
+		t.Fatalf("Marshal() after invalid PATCH error = %v", err)
+	}
+	if !bytes.Equal(beforeStorageJSON, afterStorageJSON) {
+		t.Fatalf("invalid null PATCH mutated storage: before=%s after=%s", beforeStorageJSON, afterStorageJSON)
+	}
+}
+
+func TestAPIProtocolVersionPatchUsesOneManagerTransaction(t *testing.T) {
+	handler, _, pool := newAuthorizedAPISmoke(t)
+
+	created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"migrate"}`)
+	assertAPIStatus(t, created, http.StatusCreated)
+	assertPublicClientPayload(t, created.Body.Bytes(), "3.1")
+
+	updated := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/migrate", `{
+		"protocol_version":"2",
+		"awg_params":{"persistent_keepalive":0},
+		"routing":{"mode":"split","allowed_ips":["10.1.2.3/8"]}
+	}`)
+	assertAPIStatus(t, updated, http.StatusOK)
+	assertPublicClientPayload(t, updated.Body.Bytes(), "2.0")
+	if pool.migrations != 1 {
+		t.Fatalf("version/params/routing migrations = %d, want 1", pool.migrations)
+	}
+}
+
+func TestAPIRejectsInvalidPatchProtocolVersionsBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "null", body: `{"protocol_version":null}`},
+		{name: "unknown", body: `{"protocol_version":"3"}`},
+		{name: "non string", body: `{"protocol_version":3.1}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, _, pool := newAuthorizedAPISmoke(t)
+
+			created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"client"}`)
+			assertAPIStatus(t, created, http.StatusCreated)
+			originalProfile := pool.profileKey
+
+			response := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/client", tt.body)
+			assertAPIStatus(t, response, http.StatusBadRequest)
+			if pool.migrations != 0 || pool.profileKey != originalProfile {
+				t.Fatalf("invalid protocol version mutated peer: migrations=%d profile=%v", pool.migrations, pool.profileKey)
+			}
+
+			listed := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+			assertAPIStatus(t, listed, http.StatusOK)
+
+			var clients []json.RawMessage
+			decodeAPIResponse(t, listed, &clients)
+			if len(clients) != 1 {
+				t.Fatalf("clients after invalid PATCH = %s", listed.Body.String())
+			}
+			assertPublicClientPayload(t, clients[0], "3.1")
+		})
+	}
+}
+
+func TestAPILegacyPatchRejectsAWG31ValuesBeforeMutation(t *testing.T) {
+	handler, _, pool := newAuthorizedAPISmoke(t)
+
+	created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"client"}`)
+	assertAPIStatus(t, created, http.StatusCreated)
+	originalProfile := pool.profileKey
+
+	response := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/client", `{
+		"protocol_version":"2.0",
+		"awg_params":{"content_padding_addition":"10-100","persistent_keepalive":"off"}
+	}`)
+	assertAPIStatus(t, response, http.StatusBadRequest)
+	if pool.migrations != 0 || pool.profileKey != originalProfile {
+		t.Fatalf("invalid legacy PATCH mutated peer: migrations=%d profile=%v", pool.migrations, pool.profileKey)
+	}
+
+	listed := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+	assertAPIStatus(t, listed, http.StatusOK)
+
+	var clients []json.RawMessage
+	decodeAPIResponse(t, listed, &clients)
+	if len(clients) != 1 {
+		t.Fatalf("clients after invalid legacy PATCH = %s", listed.Body.String())
+	}
+	assertPublicClientPayload(t, clients[0], "3.1")
+}
+
+func TestAPIGenerateAWGParamsSelectsConfiguredProtocol(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		version string
+	}{
+		{name: "configured default", path: "/api/awg-params/generate", version: "3.1"},
+		{name: "legacy alias", path: "/api/awg-params/generate?protocol_version=2", version: "2.0"},
+		{name: "canonical legacy", path: "/api/awg-params/generate?protocol_version=2.0", version: "2.0"},
+		{name: "canonical AWG 3.1", path: "/api/awg-params/generate?protocol_version=3.1", version: "3.1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, _, _ := newAuthorizedAPISmoke(t)
+
+			response := authorizedAPIRequest(t, handler, http.MethodPost, tt.path, "")
+			assertAPIStatus(t, response, http.StatusOK)
+			assertGeneratedParamsForProtocol(t, response.Body.Bytes(), tt.version)
+		})
+	}
+
+	for _, path := range []string{
+		"/api/awg-params/generate?protocol_version=3",
+		"/api/awg-params/generate?protocol_version=2&protocol_version=3.1",
+		"/api/awg-params/generate?protocol_versoin=2",
+		"/api/awg-params/generate?protocol_version=2&protocol_versoin=3.1",
+	} {
+		handler, _, _ := newAuthorizedAPISmoke(t)
+
+		response := authorizedAPIRequest(t, handler, http.MethodPost, path, "")
+		assertAPIStatus(t, response, http.StatusBadRequest)
+	}
+
+	handler, _, _ := newAuthorizedAPISmoke(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/awg-params/generate", nil)
+	request.URL.RawQuery = "protocol_version=%ZZ"
+	request.Header.Set("Authorization", "Bearer "+testAPIToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assertAPIStatus(t, response, http.StatusBadRequest)
+}
+
+func TestAPIClientResponsesIncludeProtocolVersionAndRedactSecrets(t *testing.T) {
+	handler, _, _ := newAuthorizedAPISmoke(t)
+
+	created := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients", `{"id":"public"}`)
+	assertAPIStatus(t, created, http.StatusCreated)
+	assertPublicClientPayload(t, created.Body.Bytes(), "3.1")
+
+	listed := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
+	assertAPIStatus(t, listed, http.StatusOK)
+
+	var listedClients []json.RawMessage
+	decodeAPIResponse(t, listed, &listedClients)
+	if len(listedClients) != 1 {
+		t.Fatalf("listed clients = %s", listed.Body.String())
+	}
+	assertPublicClientPayload(t, listedClients[0], "3.1")
+
+	updated := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/public", `{"routing":{"mode":"full"}}`)
+	assertAPIStatus(t, updated, http.StatusOK)
+	assertPublicClientPayload(t, updated.Body.Bytes(), "3.1")
+
+	regenerated := authorizedAPIRequest(t, handler, http.MethodPost, "/api/clients/public/regenerate-awg-params", "")
+	assertAPIStatus(t, regenerated, http.StatusOK)
+	assertPublicClientPayload(t, regenerated.Body.Bytes(), "3.1")
+
+	lanGroup := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/lan-group", `{
+		"client_ids":["public"],
+		"lan_group_id":"peer:public"
+	}`)
+	assertAPIStatus(t, lanGroup, http.StatusOK)
+
+	var lanGroupBody struct {
+		Clients []json.RawMessage `json:"clients"`
+	}
+	decodeAPIResponse(t, lanGroup, &lanGroupBody)
+	if len(lanGroupBody.Clients) != 1 {
+		t.Fatalf("LAN group clients = %s", lanGroup.Body.String())
+	}
+	assertPublicClientPayload(t, lanGroupBody.Clients[0], "3.1")
 }
 
 func TestAPILANGroupFlow(t *testing.T) {
@@ -473,7 +854,7 @@ func TestRegenerationRequiresUsageSnapshot(t *testing.T) {
 	assertAPIStatus(t, created, http.StatusCreated)
 
 	profileKey := pool.profileKey
-	if profileKey == "" {
+	if profileKey == (awg.ProfileKey{}) {
 		t.Fatal("profile key missing before regeneration")
 	}
 	pool.dumpErr = errors.New("sensitive dump details")
@@ -537,7 +918,7 @@ func TestAPIOperationFailures(t *testing.T) {
 		response := authorizedAPIRequest(t, handler, http.MethodPatch, "/api/clients/shared-client", `{"awg_params":{"port":51830}}`)
 		assertAPIStatus(t, response, http.StatusConflict)
 		if pool.migrations != 0 || pool.profileKey != profileKey || pool.peerPort != peerPort {
-			t.Fatalf("peer changed after failed PATCH: migrations=%d profile=%q port=%d", pool.migrations, pool.profileKey, pool.peerPort)
+			t.Fatalf("peer changed after failed PATCH: migrations=%d profile=%v port=%d", pool.migrations, pool.profileKey, pool.peerPort)
 		}
 
 		listed := authorizedAPIRequest(t, handler, http.MethodGet, "/api/clients", "")
@@ -736,18 +1117,25 @@ func TestAuthorizedAPIFlow(t *testing.T) {
 }
 
 func newAuthorizedAPISmoke(t *testing.T) (http.Handler, *usage.Collector, *apiSmokePool) {
+	handler, collector, pool, _ := newAuthorizedAPISmokeWithStorage(t)
+
+	return handler, collector, pool
+}
+
+func newAuthorizedAPISmokeWithStorage(t *testing.T) (http.Handler, *usage.Collector, *apiSmokePool, *clients.Storage) {
 	t.Helper()
 
 	dataDir := t.TempDir()
 	cfg := &config.Config{
-		APIToken:   testAPIToken,
-		Address:    "10.77.0.1/24",
-		Endpoint:   "vpn.example.test",
-		ListenPort: 51820,
-		HTTPPort:   7777,
-		MTU:        1420,
-		DNS:        "1.1.1.1",
-		DataDir:    dataDir,
+		APIToken:               testAPIToken,
+		Address:                "10.77.0.1/24",
+		Endpoint:               "vpn.example.test",
+		ListenPort:             51820,
+		HTTPPort:               7777,
+		MTU:                    1420,
+		DNS:                    "1.1.1.1",
+		DataDir:                dataDir,
+		DefaultProtocolVersion: "3.1",
 	}
 	defaultParams := awg.AWGParams{
 		MTU:  cfg.MTU,
@@ -763,15 +1151,28 @@ func newAuthorizedAPISmoke(t *testing.T) (http.Handler, *usage.Collector, *apiSm
 		H4:   "100000000-200000000",
 	}
 	pool := &apiSmokePool{serverPublicKey: [32]byte{1}}
-	manager, err := clients.NewManager(pool, clients.NewStorage(dataDir), cfg, defaultParams, &clients.StorageData{})
+	storage := clients.NewStorage(dataDir)
+	data := &clients.StorageData{AWG31: apiAWG31Storage()}
+	if err := storage.Save(data); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	plan, err := clients.PrepareRestorePlan(cfg, clients.ManagerDefaults{
+		LegacyParams:   defaultParams,
+		AWG31Params:    apiAWG31Defaults(t),
+		DefaultVersion: awg.ProtocolVersion31,
+	}, data)
 	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
+		t.Fatalf("PrepareRestorePlan() error = %v", err)
+	}
+	manager, err := clients.NewManagerFromRestorePlan(pool, storage, cfg, plan)
+	if err != nil {
+		t.Fatalf("NewManagerFromRestorePlan() error = %v", err)
 	}
 
 	collector := usage.NewCollector(dataDir, pool.interfaceNames, pool.showDump)
 	server := NewServer(manager, cfg, collector)
 
-	return server.httpServer.Handler, collector, pool
+	return server.httpServer.Handler, collector, pool, storage
 }
 
 func authorizedAPIRequest(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -802,5 +1203,143 @@ func decodeAPIResponse(t *testing.T, response *httptest.ResponseRecorder, target
 
 	if err := json.Unmarshal(response.Body.Bytes(), target); err != nil {
 		t.Fatalf("decode response %q: %v", response.Body.String(), err)
+	}
+}
+
+func assertPublicClientPayload(t *testing.T, payload []byte, wantVersion string) {
+	t.Helper()
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode client payload %q: %v", payload, err)
+	}
+
+	encodedVersion, exists := fields["protocol_version"]
+	if !exists {
+		t.Fatalf("client payload omits protocol_version: %s", payload)
+	}
+
+	var version string
+	if err := json.Unmarshal(encodedVersion, &version); err != nil {
+		t.Fatalf("decode protocol_version %q: %v", encodedVersion, err)
+	}
+	if version != wantVersion {
+		t.Fatalf("protocol_version = %q, want %q", version, wantVersion)
+	}
+
+	for _, field := range []string{
+		"header_key_id",
+		"header_protection_key",
+		"private_key",
+		"public_key",
+		"preshared_key",
+		"server_private_key",
+	} {
+		if _, exposed := fields[field]; exposed {
+			t.Fatalf("client payload exposes %s: %s", field, payload)
+		}
+	}
+
+	secret := apiAWG31Storage().HeaderKeys["api-synthetic-default-id"].HeaderProtectionKey
+	if bytes.Contains(payload, []byte(secret)) {
+		t.Fatalf("client payload exposes header protection key: %s", payload)
+	}
+}
+
+func assertGeneratedParamsForProtocol(t *testing.T, payload []byte, version string) {
+	t.Helper()
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode generated params %q: %v", payload, err)
+	}
+
+	for _, field := range []string{"h1", "h2", "h3", "h4", "s1", "s2"} {
+		if _, exists := fields[field]; !exists {
+			t.Fatalf("generated params omit %s: %s", field, payload)
+		}
+	}
+
+	var h1 string
+	if err := json.Unmarshal(fields["h1"], &h1); err != nil {
+		t.Fatalf("decode generated h1 %q: %v", fields["h1"], err)
+	}
+
+	switch version {
+	case "2.0":
+		if _, exists := fields["s3"]; exists {
+			t.Fatalf("legacy generated params expose s3: %s", payload)
+		}
+		if _, exists := fields["s4"]; exists {
+			t.Fatalf("legacy generated params expose s4: %s", payload)
+		}
+		if !strings.Contains(h1, "-") {
+			t.Fatalf("legacy generated h1 = %q, want range", h1)
+		}
+	case "3.1":
+		for _, field := range []string{"s3", "s4"} {
+			if _, exists := fields[field]; !exists {
+				t.Fatalf("AWG 3.1 generated params omit %s: %s", field, payload)
+			}
+		}
+		if strings.Contains(h1, "-") {
+			t.Fatalf("AWG 3.1 generated h1 = %q, want fixed value", h1)
+		}
+	default:
+		t.Fatalf("unsupported expected protocol version %q", version)
+	}
+
+	for _, field := range []string{
+		"header_key_id",
+		"header_protection_key",
+		"private_key",
+		"preshared_key",
+	} {
+		if _, exposed := fields[field]; exposed {
+			t.Fatalf("generated params expose %s: %s", field, payload)
+		}
+	}
+}
+
+func apiAWG31Storage() *clients.AWG31Storage {
+	return &clients.AWG31Storage{
+		DefaultHeaderKeyID: "api-synthetic-default-id",
+		GeneratedParams: &awg.GeneratedParamsV31{
+			H1: "100001", H2: "1000001", H3: "10000001", H4: "100000001",
+			S1: 15, S2: 72, S3: 15, S4: 12,
+		},
+		HeaderKeys: map[string]clients.HeaderKeyData{
+			"api-synthetic-default-id": {HeaderProtectionKey: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xa5}, 32))},
+		},
+	}
+}
+
+func apiAWG31Defaults(t *testing.T) awg.AWGParams {
+	t.Helper()
+
+	parseRange := func(value string) *config.Uint16Range {
+		parsed, err := config.ParseUint16Range(value)
+		if err != nil {
+			t.Fatalf("ParseUint16Range(%q) error = %v", value, err)
+		}
+
+		return &parsed
+	}
+
+	return awg.AWGParams{
+		MTU:                    1280,
+		DNS:                    "1.1.1.1",
+		Jc:                     5,
+		Jmin:                   50,
+		Jmax:                   1000,
+		PersistentKeepalive:    parseRange("25-35"),
+		ContentPaddingAddition: parseRange("10-100"),
+		RekeyAfterTime:         parseRange("100-120"),
+		RekeyTimeout:           parseRange("3-7"),
+		RejectAfterTime:        parseRange("150-180"),
+		KeepaliveTimeout:       parseRange("5-15"),
+		MaxHandshakeAttempts:   parseRange("15-20"),
+		RandomTrailers:         "on",
+		DisableCookies:         "off",
 	}
 }

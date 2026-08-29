@@ -24,13 +24,28 @@ Rules:
 - `CHANGELOG.md` must contain exactly one non-empty `## [X.Y.Z] - YYYY-MM-DD` section.
 - Release notes must contain that exact section followed by a clickable `Full Changelog` range from the previous stable release when one exists.
 
-Test marker behavior locally:
+Run the deterministic source, release, and installer gates locally:
 
 ```bash
+test -z "$(gofmt -l .)"
+go mod verify
 bash scripts/release-marker_test.sh
 bash scripts/release-notes_test.sh
 bash scripts/release-previous-tag_test.sh
+bash scripts/install_test.sh
+go test -race -count=1 ./...
+go vet ./...
+go build -trimpath -o /tmp/awg-server .
+git diff --check
+test -z "$(git status --porcelain --untracked-files=no)"
 ```
+
+The installer harness is a deterministic stubbed-host contract matrix. It uses
+orthogonal representative cases instead of an exhaustive cross-product of
+failure phases and initial states. Passing it does not qualify package
+installation, the loaded module, systemd, or a real client handshake on an
+Ubuntu host. CI also runs the pinned actionlint and ShellCheck containers in the
+workflow.
 
 ## Automated Gates
 
@@ -50,12 +65,12 @@ bash scripts/release-previous-tag_test.sh
 Expected release assets:
 
 ```text
-awg-server-darwin-amd64
-awg-server-darwin-arm64
-awg-server-linux-amd64
-awg-server-linux-arm64
-awg-server-windows-amd64.exe
-awg-server-windows-arm64.exe
+awg-server-awg31-darwin-amd64
+awg-server-awg31-darwin-arm64
+awg-server-awg31-linux-amd64
+awg-server-awg31-linux-arm64
+awg-server-awg31-windows-amd64.exe
+awg-server-awg31-windows-arm64.exe
 SHA256SUMS
 SHA256SUMS.sig
 ```
@@ -66,7 +81,21 @@ The `release-signing` Environment must be restricted to `main` and require a rev
 
 The workflow stops after GitHub Release publication and verification. It must not contain server SSH credentials, a production Environment, or a deployment job. Operators install releases separately or use the signed self-updater.
 
-Official Linux and macOS release binaries embed the same public key and use it for `awg-server update`. Self-update is strictly upgrade-only and validates the canonical version-bound asset URLs, interprocess update lock, actual on-disk version, Ed25519 signature, canonical six-asset manifest, checksum, 64 MiB limit, and downloaded binary version before replacement. Ordinary source builds and Windows self-update fail closed before network access. Key rotation requires the reviewed bridge process documented in `docs/ci-cd.md`; never replace only one key value.
+Official Linux and macOS release binaries embed the same public key and use it
+for `awg-server update`. Self-update is strictly upgrade-only and validates the
+exact eight-asset release set and canonical version-bound URLs, interprocess
+update lock, actual on-disk version, Ed25519 signature, canonical six-binary
+manifest, checksum, 64 MiB limit, and downloaded binary version before
+replacement. Ordinary source builds and Windows self-update fail closed before
+network access. Legacy updaters request the disjoint old asset names and must
+fail closed against this major release; the installer is the supported
+package/module migration bridge.
+Key rotation requires the reviewed bridge process documented in
+`docs/ci-cd.md`; never replace only one key value.
+
+Do not document or implement a v1.0.5 downgrade after issuing a 3.1 client:
+the older binary does not preserve the private 3.1 storage contract and can
+erase it on a later save.
 
 ## Manual Release Fallback
 
@@ -107,19 +136,19 @@ AWG_EXPECTED_RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" go test -count=1 \
   -run '^TestEmbeddedReleasePublicKey$' \
   -ldflags="-X github.com/stealthsurf-vpn/awg-server/internal/update.releasePublicKey=$RELEASE_PUBLIC_KEY" \
   ./internal/update
-test "$(find dist -maxdepth 1 -type f -name 'awg-server-*' | wc -l | tr -d '[:space:]')" -eq 6
+test "$(find dist -maxdepth 1 -type f -name 'awg-server-awg31-*' | wc -l | tr -d '[:space:]')" -eq 6
 HOST_OS=$(go env GOOS)
 HOST_ARCH=$(go env GOARCH)
 HOST_EXT=
 [ "$HOST_OS" != windows ] || HOST_EXT=.exe
-test "$("dist/awg-server-$HOST_OS-$HOST_ARCH$HOST_EXT" version)" = "awg-server $VERSION"
+test "$("dist/awg-server-awg31-$HOST_OS-$HOST_ARCH$HOST_EXT" version)" = "awg-server $VERSION"
 ASSETS=(
-  awg-server-darwin-amd64
-  awg-server-darwin-arm64
-  awg-server-linux-amd64
-  awg-server-linux-arm64
-  awg-server-windows-amd64.exe
-  awg-server-windows-arm64.exe
+  awg-server-awg31-darwin-amd64
+  awg-server-awg31-darwin-arm64
+  awg-server-awg31-linux-amd64
+  awg-server-awg31-linux-arm64
+  awg-server-awg31-windows-amd64.exe
+  awg-server-awg31-windows-arm64.exe
 )
 for ASSET in "${ASSETS[@]}"; do
   grep -aFq -- "$RELEASE_PUBLIC_KEY" "dist/$ASSET"

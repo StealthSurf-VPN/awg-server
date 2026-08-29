@@ -1,156 +1,210 @@
 # Configuration Reference
 
-All configuration is done via environment variables.
+All configuration is supplied through environment variables. New 3.1 settings
+are parsed strictly: malformed values make startup fail instead of silently
+falling back. The older integer settings retain their existing fallback parsing
+behavior.
 
-## Required
+## Required settings
 
-| Variable | Description | Example |
-| -------- | ----------- | ------- |
-| `AWG_API_TOKEN` | Bearer token for API auth | `my-secret-token-123` |
-| `AWG_ADDRESS` | Server VPN address (CIDR) | `10.0.0.1/24` |
-| `AWG_ENDPOINT` | Public IP/hostname for clients | `vpn.example.com` |
+| Variable | Description |
+| --- | --- |
+| `AWG_API_TOKEN` | Bearer token for protected API routes. |
+| `AWG_ADDRESS` | Server IPv4 CIDR, such as `10.0.0.1/24`. |
+| `AWG_ENDPOINT` | Public address written to generated client configurations. |
 
-## Optional
-
-| Variable | Default | Description |
-| -------- | ------- | ----------- |
-| `AWG_LISTEN_PORT` | `51820` | Base WireGuard UDP listen port. Auto-assigned interfaces use the first free port from this value upward. Per-client `port` can request an explicit 1024-65535 port. |
-| `AWG_HTTP_PORT` | `7777` | HTTP API listen port |
-| `AWG_MTU` | `1420` | Default MTU for client configs. Can be overridden per-client with `mtu` in `awg_params`. |
-| `AWG_DNS` | `1.1.1.1` | Default DNS server for client configs. Inherited when DNS fields are omitted or `awg_params.dns_mode` is `default`; `system` mode omits the client `DNS` line. |
-| `AWG_DATA_DIR` | `/data` | Directory for clients.json persistence |
-| `AWG_INTERFACE` | auto-detect | Override outbound network interface for MASQUERADE (default: auto-detected from default route) |
-| `AWG_MAX_INTERFACES` | `0` | Maximum number of AWG interfaces. 0 = unlimited. Returns 503 when exceeded. |
-
-## Auto-Generated Parameters
-
-On first start, the server generates and persists unique obfuscation values in `{AWG_DATA_DIR}/clients.json`:
-
-- **H1-H4** — random non-overlapping ranges, format `min-max` (header masking)
-- **S1, S2** — random 15-150, with constraint `S1 + 56 ≠ S2` (handshake padding)
-
-These server-wide defaults are reused across restarts. They are distinct from H1-H4/S1-S2 stored in an individual client's `awg_params`: per-client generation or regeneration never changes `generated_params`. No env vars are needed.
-
-## Per-Client Preshared Keys
-
-Every newly created client receives an independent 32-byte WireGuard preshared key generated with `crypto/rand`. The key is stored as `preshared_key` in `{AWG_DATA_DIR}/clients.json`, installed on the corresponding AWG peer, and included in the generated client configuration. It is not configurable through an environment variable or accepted from the API.
-
-Existing client records without `preshared_key` remain valid and continue without PSK. The server does not generate keys for them automatically because their already-issued configurations would no longer connect.
-
-## Default AmneziaWG Obfuscation Parameters
-
-These env vars set **default** CPS parameters for clients that don't specify custom `awg_params` via the API.
+## General and 2.0 defaults
 
 | Variable | Default | Description |
-| -------- | ------- | ----------- |
-| `AWG_JC` | `5` | Junk packet count |
-| `AWG_JMIN` | `50` | Junk packet minimum size |
-| `AWG_JMAX` | `1000` | Junk packet maximum size |
-| `AWG_S3` | `0` | Underload packet padding |
-| `AWG_S4` | `0` | Transport packet padding |
-| `AWG_I1`-`AWG_I5` | empty | CPS signature packets (client config only) |
+| --- | --- | --- |
+| `AWG_LISTEN_PORT` | `51820` | Base for auto-assigned interface UDP ports. |
+| `AWG_HTTP_PORT` | `7777` | HTTP listen port. |
+| `AWG_MTU` | `1420` | Default 2.0 client MTU. |
+| `AWG_DNS` | `1.1.1.1` | Default generated-client DNS. |
+| `AWG_DATA_DIR` | `/data` | Directory for `clients.json` and `usage.json`. |
+| `AWG_INTERFACE` | auto-detect | Outbound NAT interface override. |
+| `AWG_JC` | `5` | Legacy/default junk packet count. |
+| `AWG_JMIN` | `50` | Legacy/default junk minimum. |
+| `AWG_JMAX` | `1000` | Legacy/default junk maximum. |
+| `AWG_S3` | `0` | Legacy/default underload padding. |
+| `AWG_S4` | `0` | Legacy/default transport padding. |
+| `AWG_I1`–`AWG_I5` | empty | Client-only CPS signature packets. |
+| `AWG_MAX_INTERFACES` | `0` | Maximum interfaces; zero is unlimited. |
 
-Parameters with value `0` are omitted from client configs and `awg set` commands. **Exception:** `S3`/`S4` are always emitted (even when 0).
+`/data` is the direct binary default for `AWG_DATA_DIR`. On a fresh host, the
+installer writes `/var/lib/awg-server` explicitly; it preserves `/data` when it
+finds an existing `/data/clients.json`, and an explicit operator setting takes
+precedence over both choices.
 
-Clients can override defaults by providing `awg_params` in the create/update API request. Per-client params are merged over defaults (non-zero values override unless documented otherwise). The optional `port` field accepts 1024-65535 and uses automatic server interface assignment when omitted or zero. The optional `client_listen_port` field accepts 1024-65535 and adds `ListenPort` to the generated client `[Interface]`; omission or zero leaves port selection automatic. It has no global environment default and does not affect the server-side interface port. The optional `mtu` field accepts 1280-1420 and inherits `AWG_MTU` when omitted or zero. Legacy `dns` accepts one IPv4 address and inherits `AWG_DNS` when omitted or empty. Mode-based DNS inherits `AWG_DNS` when `dns_mode` is `default`, joins `dns_servers` for `custom`, and omits the complete `DNS` line for `system`. The optional `persistent_keepalive` field accepts 0-65535, inherits 25 when omitted, and is disabled by an explicit zero. See the [`awg_params` API contract](api.md#dns-settings) for DNS combinations and validation.
+The existing top-level `generated_params` stores 2.0 H1-H4 and S1/S2 defaults.
+It remains a 2.0 value and is not reinterpreted as 3.1 state.
 
-The complete default profile, including persisted generated H/S values and CPS environment values, is validated before the interface pool starts. Invalid defaults prevent startup and produce a field-specific log error. The accepted J/S/H/I constraints are the same as the [`awg_params` API contract](api.md#awg-params-object).
+## AmneziaWG 3.1 defaults
 
-## Multi-Interface Behavior
+| Variable | Default | Strict accepted form |
+| --- | --- | --- |
+| `AWG_DEFAULT_PROTOCOL_VERSION` | `3.1` | `2`, `2.0`, or `3.1`; `2` normalizes to `2.0`. |
+| `AWG31_MTU` | `1280` | Decimal integer 1280–1420. |
+| `AWG31_PERSISTENT_KEEPALIVE` | `25-35` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_CONTENT_PADDING_ADDITION` | `10-100` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_REKEY_AFTER_TIME` | `100-120` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_REKEY_TIMEOUT` | `3-7` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_REJECT_AFTER_TIME` | `150-180` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_KEEPALIVE_TIMEOUT` | `5-15` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_MAX_HANDSHAKE_ATTEMPTS` | `15-20` | Unsigned 16-bit scalar or range; `off` is an input alias for `0`. |
+| `AWG31_RANDOM_TRAILERS` | `on` | Exactly `on` or `off`. |
+| `AWG31_DISABLE_COOKIES` | `off` | Exactly `on` or `off`. |
 
-When clients have different CPS parameters, the server creates separate AWG interfaces:
+The unsigned-range grammar is ASCII decimal `N` or `N-M`; the compatibility
+input alias `off` means `0`. It rejects whitespace, signed values, floats,
+exponent notation, empty values, reversed ranges, and overflow. API JSON
+accepts a scalar as a number or string, while a range or `off` is a string.
+Canonical API and persisted output uses numeric `0` for `off`, numeric `N` for
+an equal range `N-N`, and a string for every other range. The six
+server-applied 3.1 ranges are passed to AWG tools and participate in interface
+profile identity. `persistent_keepalive` is rendered only in the client
+`[Peer]` section and remains outside profile identity.
 
-- Interface grouping key: H1-H4, S1-S4 only. All DNS fields (`dns`, `dns_mode`, and `dns_servers`) and all routing fields (`mode`, `allowed_ips`, and `excluded_ips`) stay outside interface grouping, as do client listen port, MTU, PersistentKeepalive, Jc/Jmin/Jmax, and I1-I5.
-- Each unique parameter set gets its own `awgN` interface (awg0, awg1, ...)
-- Each interface listens on the explicit `port` from `awg_params`, or auto-assigned sequentially from `AWG_LISTEN_PORT`
-- When a grouping profile already exists, a newly added peer can join it with port 0 or the interface's actual port; another explicit port returns `409` before peer mutation. PATCH rejects any stored port change while that profile has multiple peers.
-- Interfaces are created on demand and destroyed when empty
-- `AWG_MAX_INTERFACES` limits the total number of interfaces
+`AWG_DEFAULT_PROTOCOL_VERSION` affects only new `POST /api/clients` requests
+and an omitted `protocol_version` generator query. It never changes an existing
+client. Setting it to `2.0` is an operator-controlled phased-rollout fallback;
+it does not bypass the mandatory AWG 3.1 runtime qualifier.
 
-Ensure your firewall allows the automatic range and every explicit per-client UDP port that will be used. An explicit port is not constrained to a small range above `AWG_LISTEN_PORT`.
+3.1 defaults combine the environment values with persisted generated H1-H4 and
+S1-S4. Fresh 3.1 generation uses four fixed unique H values, S1/S2 in 15–150,
+S3 in 15–63, and S4 equal to 12. Every effective 3.1 S value must be at least
+12. Fixed generated H values avoid the current target-runtime ranged-header
+throughput/MAC1 risk; a caller may still submit a valid explicit H range.
+`DisableCookies=off` intentionally retains cookie replies for denial-of-service
+resistance.
 
-## Persistence
+## Version-aware client overrides
 
-Client data is stored in `{AWG_DATA_DIR}/clients.json`. The top-level `generated_params` object is the server-wide H/S default generated on first startup:
+`awg_params` is validated after its target version is resolved and before any
+key, address, interface, or persistence mutation.
+
+- For 2.0, `persistent_keepalive` is only a scalar integer from 0 through
+  65535. All 3.1-only fields are rejected.
+- For 3.1, `persistent_keepalive` and the six timing/padding fields use the
+  unsigned-range grammar above. `random_trailers` and `disable_cookies` are
+  `on` or `off`.
+- The 3.1-only fields are `content_padding_addition`, `rekey_after_time`,
+  `rekey_timeout`, `reject_after_time`, `keepalive_timeout`,
+  `max_handshake_attempts`, `random_trailers`, and `disable_cookies`.
+- Inside an `awg_params` object, `persistent_keepalive`, all six 3.1 range
+  fields, and both toggles reject explicit JSON `null`; omission inherits the
+  target default. Top-level `awg_params:null` on PATCH resets the whole object.
+- `port` is kept separate for interface allocation. Client listen port, MTU,
+  DNS, persistent keepalive, I1-I5, routing, and peer PSKs are client-side or
+  per-peer state and do not participate in interface identity.
+
+`PATCH` replaces the supplied `awg_params` object rather than merging its
+stored fields. JSON `null` resets it to the target version's defaults. A
+version-only migration preserves common overrides but rejects an incompatible
+one rather than discarding it; send `awg_params:null` or a corrected object to
+make that change explicit.
+
+## Persistence and secret boundaries
+
+`{AWG_DATA_DIR}/clients.json` is atomically replaced through a mode-`0600`
+temporary file and rename. It does not call file or directory `fsync`, so a
+successful Save is the logical commit boundary, not an absolute durability
+guarantee across a host crash.
+
+The 3.1 state is a private top-level section. This is a shape-only example;
+the placeholders are not usable key material:
 
 ```json
 {
-  "server_private_key": "<base64>",
-  "generated_params": {
-    "h1": "234567-678901",
-    "h2": "2345678-6789012",
-    "h3": "23456789-67890123",
-    "h4": "234567890-678901234",
-    "s1": 42,
-    "s2": 87
+  "awg_31": {
+    "default_header_key_id": "<opaque-id>",
+    "generated_params": {
+      "h1": "<fixed-decimal>",
+      "h2": "<fixed-decimal>",
+      "h3": "<fixed-decimal>",
+      "h4": "<fixed-decimal>",
+      "s1": 15,
+      "s2": 16,
+      "s3": 15,
+      "s4": 12
+    },
+    "header_keys": {
+      "<opaque-id>": {
+        "header_protection_key": "<base64-encoded-32-byte-value>"
+      }
+    }
   },
   "clients": [
     {
-      "id": "uuid",
-      "private_key": "<base64>",
-      "public_key": "<base64>",
-      "preshared_key": "<base64>",
-      "address": "10.0.0.2",
-      "lan_group_id": "peer:uuid",
-      "created_at": "2026-01-01T00:00:00Z"
+      "id": "client-example",
+      "protocol_version": "3.1",
+      "header_key_id": "<opaque-id>"
     }
   ]
 }
 ```
 
-The pure `POST /api/awg-params/generate` endpoint does not persist its result. Per-client H/S regeneration writes overrides under that client's `awg_params` and leaves the top-level `generated_params` unchanged. A client with custom DNS, regenerated H/S values, and bypass routing can contain this fragment:
+The example is not a complete valid file. A non-empty `clients` list still
+requires the existing top-level `server_private_key` and legacy
+`generated_params` state, even when all listed clients are 3.1. Missing those
+values fails startup; the service does not generate replacement state for an
+existing client set.
 
-```json
-{
-  "awg_params": {
-    "dns_mode": "custom",
-    "dns_servers": ["1.1.1.1", "1.0.0.1"],
-    "h1": "234567-678901",
-    "h2": "2345678-6789012",
-    "h3": "23456789-67890123",
-    "h4": "234567890-678901234",
-    "s1": 42,
-    "s2": 87
-  },
-  "routing": {
-    "mode": "bypass",
-    "excluded_ips": ["10.0.0.0/8", "192.168.0.0/16"]
-  }
-}
-```
+`header_key_id` and the header-protection key never appear in list/create/update
+responses, logs, profile identifiers, or command-line arguments. The key is
+made available only to the authenticated generated configuration that requires
+it. It is a 32-byte non-zero value; key IDs are random opaque references and
+are not derived from a key.
 
-Combined split routing persists the normalized included and excluded intent, not the expanded computed CIDRs:
+On startup, the server decodes all state first. If there is no 3.1 state and no
+3.1 client, it creates a pending default generated profile/key in memory and
+saves it only after the entire restore succeeds. If a persisted 3.1 client is
+missing or has an invalid key reference, key, generated parameters, or profile,
+startup fails closed; it never invents replacement state or falls back to 2.0.
 
-```json
-{
-  "routing": {
-    "mode": "split",
-    "allowed_ips": ["10.0.0.0/8", "172.16.0.0/12"],
-    "excluded_ips": ["10.20.0.0/16"]
-  }
-}
-```
+The restore plan validates all clients, profiles, ports, and interface limits
+before it changes a client-owned device. After a successful restore it writes
+one normalization save for pending state, explicit legacy versions, and other
+canonical values, including persisted `off` and equal-range aliases. A failed
+normalization save aborts API startup and closes the pool best-effort. A
+mutation stages garbage collection of unreferenced
+non-default 3.1 header keys in prospective state before Save; the new key map
+becomes authoritative only after a successful Save. Default and still-referenced
+keys remain.
 
-Legacy DNS records retain their original shape, for example `{"awg_params":{"dns":"9.9.9.9"}}`. A standalone empty legacy override (`{"dns":""}`) is canonically equivalent to no AWG override and is omitted when that client is next created or updated. Explicit `default` and `system` modes are stored as `dns_mode`, while custom mode also stores its normalized, stably deduplicated `dns_servers`. Existing legacy records are not rewritten solely because the server is upgraded.
+Persisted protocol values are stricter than API input: the field name must be
+exact lower-case `protocol_version` and the value must be canonical `"2.0"` or
+`"3.1"`. A missing persisted field is legacy 2.0; the API-only alias `"2"`, a
+case-variant field, `null`, a number, or an unknown value fails restore.
 
-Clients without custom parameters have `awg_params` omitted and use automatic client listen-port selection plus server defaults, including `AWG_DNS` and `PersistentKeepalive = 25`. Omitted `routing` means full tunnel for backward compatibility; an explicit `{"mode":"full"}` is canonically persisted by omitting `routing`. Bypass and split lists are persisted after network masking and stable exact-deduplication. Clients created before PSK support can also omit `preshared_key`. A legacy client without `lan_group_id` is assigned and persisted as `peer:<id>` on startup, keeping every legacy peer isolated from every other peer. On startup, all clients are restored and interfaces are recreated as needed, using the persisted PSK when present.
+## Interface identity
 
-### Client transaction and startup behavior
+An immutable internal profile selects a pooled interface. Its identity includes
+the protocol version, H1-H4, S1-S4, Jc/Jmin/Jmax, 3.1 server-applied ranges and
+toggles, and (for 3.1) the private header-protection key. It excludes requested
+port, client listen port, MTU, DNS, persistent keepalive, I1-I5, routing, and
+peer PSK. Clients can share an interface only when this exact effective
+server-side profile matches.
 
-`clients.json` is written to `clients.json.tmp` with mode `0600` and then renamed into place. API operations coordinate that write with device state:
+The pool uses an explicit `port` only to allocate/listen. A new peer may share
+an existing profile with requested port zero or that interface's actual port;
+a different explicit port is a conflict. Interfaces are created on demand and
+removed when empty, subject to `AWG_MAX_INTERFACES`.
 
-- create first installs a DROP-only LAN chain, stages the interface, peer, and route, saves the prospective JSON, commits the in-memory client, then rebuilds same-group allows;
-- a client-only update saves first and then replaces the in-memory record;
-- an interface-level update or regeneration migrates the peer, saves, then commits memory; a save failure attempts a reverse migration;
-- delete first installs a DROP-only LAN chain, removes the peer, route, and now-empty interface, saves, removes the in-memory client, then rebuilds same-group allows; a save failure attempts to add the peer back;
-- LAN-group PATCH validates every ID under the manager mutex, installs the DROP-only chain, saves all requested membership changes in one replacement write, commits all records, then rebuilds same-group allows.
+## Usage and transaction boundary
 
-Device, persistence, and firewall failures return a generic `500 Internal Server Error`. Once the DROP-only gate is installed, no error path restores permissive LAN rules. A final firewall failure can therefore occur after the complete prospective state was persisted and committed; the new membership remains authoritative while all inter-client traffic stays blocked until a successful rebuild or restart. These sequences are not an absolute transaction across the filesystem and kernel. A rollback can fail, and temporary-file rename is not a promise of durability across every host crash. Inspect logs and live interfaces after any device, persistence, firewall, or rollback error.
+Interface migrations and regeneration take a complete usage snapshot before
+mutation. A dump failure, malformed row, or empty active-interface dump aborts
+before moving a peer. API mutations coordinate prospective storage and
+best-effort device rollback, but kernel, filesystem, firewall, and process
+failure cannot be globally atomic. Inspect live state after a generic `500`.
 
-Startup restoration is fail-fast. If `clients` is non-empty, missing top-level `server_private_key` or `generated_params` aborts before generating or rewriting either value. An invalid persisted private, public, or preshared key, a private/public key mismatch, invalid AWG/routing settings, or any client that cannot be re-added to its interface aborts manager construction, prevents the HTTP server from starting, and triggers best-effort pool cleanup. The server no longer silently drops an unrestorable client from the loaded set. A failure to bind the configured HTTP port also terminates the process with a non-zero status after cleanup instead of leaving a process running without an API listener.
+## Runtime qualification
 
-### Usage persistence
-
-Accumulated counters are stored separately in `{AWG_DATA_DIR}/usage.json`, also through a mode-`0600` temporary file and rename. The collector polls every active AWG interface once on startup and every 60 seconds, saving after each collection; graceful shutdown performs one final collect and save. The file must be a JSON object with non-null peer entries and non-negative counters. Invalid usage data is logged and ignored in favor of a fresh empty in-memory map, without preventing the client API from starting. `GET /api/clients/{id}/stats` reads the latest in-memory totals and does not force a new poll, so normal responses can lag kernel counters by up to one interval.
-
-Every interface-level PATCH and per-client H/S regeneration takes a required complete snapshot of every active interface before migration. A failed dump command, malformed peer row, or active interface returning no peers makes the snapshot incomplete and aborts the update before mutation. A valid snapshot updates memory immediately and prevents removal of the old peer before its current counters are accumulated, but it does not itself save `usage.json`. The data reaches disk on the next scheduled or graceful-shutdown save; a crash can lose the latest unsaved interval.
+Normal startup performs its AWG 3.1 runtime qualifier only after the pure
+storage/restore plan validates and before it creates a pool, firewall state, or
+HTTP server. It requires installed Ubuntu 22.04 package versions, strict
+`awg --version` output, and a collision-safe temporary 3.1 interface
+create/setconf/readback/delete probe. Use `awg-server check-runtime` to run the
+same implementation explicitly; it is not a substitute for production
+handshake or throughput qualification.

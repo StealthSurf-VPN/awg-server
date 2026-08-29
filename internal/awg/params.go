@@ -4,6 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"strconv"
+
+	"github.com/stealthsurf-vpn/awg-server/internal/config"
 )
 
 const MinPort = 1024
@@ -28,23 +31,31 @@ type AWGParams struct {
 	dnsModeSet    bool
 	dnsServersSet bool
 
-	PersistentKeepalive *int   `json:"persistent_keepalive,omitempty"`
-	Jc                  int    `json:"jc,omitempty"`
-	Jmin                int    `json:"jmin,omitempty"`
-	Jmax                int    `json:"jmax,omitempty"`
-	S1                  int    `json:"s1,omitempty"`
-	S2                  int    `json:"s2,omitempty"`
-	S3                  int    `json:"s3,omitempty"`
-	S4                  int    `json:"s4,omitempty"`
-	H1                  string `json:"h1,omitempty"`
-	H2                  string `json:"h2,omitempty"`
-	H3                  string `json:"h3,omitempty"`
-	H4                  string `json:"h4,omitempty"`
-	I1                  string `json:"i1,omitempty"`
-	I2                  string `json:"i2,omitempty"`
-	I3                  string `json:"i3,omitempty"`
-	I4                  string `json:"i4,omitempty"`
-	I5                  string `json:"i5,omitempty"`
+	PersistentKeepalive    *config.Uint16Range `json:"persistent_keepalive,omitempty"`
+	ContentPaddingAddition *config.Uint16Range `json:"content_padding_addition,omitempty"`
+	RekeyAfterTime         *config.Uint16Range `json:"rekey_after_time,omitempty"`
+	RekeyTimeout           *config.Uint16Range `json:"rekey_timeout,omitempty"`
+	RejectAfterTime        *config.Uint16Range `json:"reject_after_time,omitempty"`
+	KeepaliveTimeout       *config.Uint16Range `json:"keepalive_timeout,omitempty"`
+	MaxHandshakeAttempts   *config.Uint16Range `json:"max_handshake_attempts,omitempty"`
+	RandomTrailers         string              `json:"random_trailers,omitempty"`
+	DisableCookies         string              `json:"disable_cookies,omitempty"`
+	Jc                     int                 `json:"jc,omitempty"`
+	Jmin                   int                 `json:"jmin,omitempty"`
+	Jmax                   int                 `json:"jmax,omitempty"`
+	S1                     int                 `json:"s1,omitempty"`
+	S2                     int                 `json:"s2,omitempty"`
+	S3                     int                 `json:"s3,omitempty"`
+	S4                     int                 `json:"s4,omitempty"`
+	H1                     string              `json:"h1,omitempty"`
+	H2                     string              `json:"h2,omitempty"`
+	H3                     string              `json:"h3,omitempty"`
+	H4                     string              `json:"h4,omitempty"`
+	I1                     string              `json:"i1,omitempty"`
+	I2                     string              `json:"i2,omitempty"`
+	I3                     string              `json:"i3,omitempty"`
+	I4                     string              `json:"i4,omitempty"`
+	I5                     string              `json:"i5,omitempty"`
 }
 
 func ValidatePort(port int) error {
@@ -71,13 +82,9 @@ func ValidateMTU(mtu int) error {
 	return nil
 }
 
-func ValidatePersistentKeepalive(value *int) error {
+func ValidatePersistentKeepalive(value *config.Uint16Range) error {
 	if value == nil {
 		return nil
-	}
-
-	if *value < 0 || *value > MaxPersistentKeepalive {
-		return ErrInvalidPersistentKeepalive
 	}
 
 	return nil
@@ -88,7 +95,24 @@ func (p AWGParams) PersistentKeepaliveValue() int {
 		return DefaultPersistentKeepalive
 	}
 
-	return *p.PersistentKeepalive
+	value, ok := p.PersistentKeepalive.Scalar()
+	if !ok {
+		return DefaultPersistentKeepalive
+	}
+
+	return int(value)
+}
+
+func (p AWGParams) PersistentKeepaliveConfigValue(version ProtocolVersion) string {
+	if p.PersistentKeepalive != nil {
+		return p.PersistentKeepalive.String()
+	}
+
+	if version == ProtocolVersion2 {
+		return strconv.Itoa(DefaultPersistentKeepalive)
+	}
+
+	return ""
 }
 
 func (p AWGParams) Key() string {
@@ -141,10 +165,51 @@ func (p AWGParams) CLIArgs() []string {
 		args = append(args, "h4", p.H4)
 	}
 
+	args = appendRangeCLIArgs(args, "content-padding-addition", p.ContentPaddingAddition)
+	args = appendRangeCLIArgs(args, "rekey-after-time", p.RekeyAfterTime)
+	args = appendRangeCLIArgs(args, "rekey-timeout", p.RekeyTimeout)
+	args = appendRangeCLIArgs(args, "reject-after-time", p.RejectAfterTime)
+	args = appendRangeCLIArgs(args, "keepalive-timeout", p.KeepaliveTimeout)
+	args = appendRangeCLIArgs(args, "max-handshake-attempts", p.MaxHandshakeAttempts)
+
+	if p.RandomTrailers != "" {
+		args = append(args, "random-trailers", p.RandomTrailers)
+	}
+
+	if p.DisableCookies != "" {
+		args = append(args, "disable-cookies", p.DisableCookies)
+	}
+
 	return args
 }
 
 func (p AWGParams) ConfigLines() string {
+	lines := p.serverConfigLines()
+
+	if p.I1 != "" {
+		lines += fmt.Sprintf("\nI1 = %s", p.I1)
+	}
+
+	if p.I2 != "" {
+		lines += fmt.Sprintf("\nI2 = %s", p.I2)
+	}
+
+	if p.I3 != "" {
+		lines += fmt.Sprintf("\nI3 = %s", p.I3)
+	}
+
+	if p.I4 != "" {
+		lines += fmt.Sprintf("\nI4 = %s", p.I4)
+	}
+
+	if p.I5 != "" {
+		lines += fmt.Sprintf("\nI5 = %s", p.I5)
+	}
+
+	return lines
+}
+
+func (p AWGParams) serverConfigLines() string {
 	var lines string
 
 	if p.Jc > 0 {
@@ -186,24 +251,19 @@ func (p AWGParams) ConfigLines() string {
 		lines += fmt.Sprintf("\nH4 = %s", p.H4)
 	}
 
-	if p.I1 != "" {
-		lines += fmt.Sprintf("\nI1 = %s", p.I1)
+	lines = appendRangeConfigLine(lines, "ContentPaddingAddition", p.ContentPaddingAddition)
+	lines = appendRangeConfigLine(lines, "RekeyAfterTime", p.RekeyAfterTime)
+	lines = appendRangeConfigLine(lines, "RekeyTimeout", p.RekeyTimeout)
+	lines = appendRangeConfigLine(lines, "RejectAfterTime", p.RejectAfterTime)
+	lines = appendRangeConfigLine(lines, "KeepaliveTimeout", p.KeepaliveTimeout)
+	lines = appendRangeConfigLine(lines, "MaxHandshakeAttempts", p.MaxHandshakeAttempts)
+
+	if p.RandomTrailers != "" {
+		lines += fmt.Sprintf("\nRandomTrailers = %s", p.RandomTrailers)
 	}
 
-	if p.I2 != "" {
-		lines += fmt.Sprintf("\nI2 = %s", p.I2)
-	}
-
-	if p.I3 != "" {
-		lines += fmt.Sprintf("\nI3 = %s", p.I3)
-	}
-
-	if p.I4 != "" {
-		lines += fmt.Sprintf("\nI4 = %s", p.I4)
-	}
-
-	if p.I5 != "" {
-		lines += fmt.Sprintf("\nI5 = %s", p.I5)
+	if p.DisableCookies != "" {
+		lines += fmt.Sprintf("\nDisableCookies = %s", p.DisableCookies)
 	}
 
 	return lines
@@ -216,6 +276,17 @@ type GeneratedParams struct {
 	H4 string `json:"h4"`
 	S1 int    `json:"s1"`
 	S2 int    `json:"s2"`
+}
+
+type GeneratedParamsV31 struct {
+	H1 string `json:"h1"`
+	H2 string `json:"h2"`
+	H3 string `json:"h3"`
+	H4 string `json:"h4"`
+	S1 int    `json:"s1"`
+	S2 int    `json:"s2"`
+	S3 int    `json:"s3"`
+	S4 int    `json:"s4"`
 }
 
 func GenerateParams() (*GeneratedParams, error) {
@@ -279,6 +350,74 @@ func ApplyGeneratedParams(params *AWGParams, generated GeneratedParams) *AWGPara
 	return result
 }
 
+func GenerateParamsV31() (*GeneratedParamsV31, error) {
+	h1, err := generateHValue(100_000, 800_000)
+	if err != nil {
+		return nil, fmt.Errorf("generate h1: %w", err)
+	}
+
+	h2, err := generateHValue(1_000_000, 8_000_000)
+	if err != nil {
+		return nil, fmt.Errorf("generate h2: %w", err)
+	}
+
+	h3, err := generateHValue(10_000_000, 80_000_000)
+	if err != nil {
+		return nil, fmt.Errorf("generate h3: %w", err)
+	}
+
+	h4, err := generateHValue(100_000_000, 800_000_000)
+	if err != nil {
+		return nil, fmt.Errorf("generate h4: %w", err)
+	}
+
+	s1, err := randIntRange(15, 151)
+	if err != nil {
+		return nil, fmt.Errorf("generate s1: %w", err)
+	}
+
+	var s2 int
+
+	for {
+		s2, err = randIntRange(15, 151)
+		if err != nil {
+			return nil, fmt.Errorf("generate s2: %w", err)
+		}
+
+		if s1+56 != s2 {
+			break
+		}
+	}
+
+	s3, err := randIntRange(15, 64)
+	if err != nil {
+		return nil, fmt.Errorf("generate s3: %w", err)
+	}
+
+	return &GeneratedParamsV31{
+		H1: h1, H2: h2, H3: h3, H4: h4,
+		S1: s1, S2: s2, S3: s3, S4: 12,
+	}, nil
+}
+
+func ApplyGeneratedParamsV31(params *AWGParams, generated GeneratedParamsV31) *AWGParams {
+	result := cloneAWGParams(params)
+	if result == nil {
+		result = &AWGParams{}
+	}
+
+	result.H1 = generated.H1
+	result.H2 = generated.H2
+	result.H3 = generated.H3
+	result.H4 = generated.H4
+	result.S1 = generated.S1
+	result.S2 = generated.S2
+	result.S3 = generated.S3
+	result.S4 = generated.S4
+
+	return result
+}
+
 func generateHRange(tierMin, tierMax uint32) (string, error) {
 	mid := tierMin + (tierMax-tierMin)/2
 
@@ -293,6 +432,15 @@ func generateHRange(tierMin, tierMax uint32) (string, error) {
 	}
 
 	return fmt.Sprintf("%d-%d", lo, hi), nil
+}
+
+func generateHValue(tierMin, tierMax uint32) (string, error) {
+	value, err := randUint32Range(tierMin, tierMax)
+	if err != nil {
+		return "", err
+	}
+
+	return strconv.FormatUint(uint64(value), 10), nil
 }
 
 func randUint32Range(min, max uint32) (uint32, error) {
@@ -317,4 +465,20 @@ func randIntRange(min, max int) (int, error) {
 	n := binary.LittleEndian.Uint32(buf[:])
 
 	return min + int(n)%(max-min), nil
+}
+
+func appendRangeCLIArgs(args []string, name string, value *config.Uint16Range) []string {
+	if value == nil {
+		return args
+	}
+
+	return append(args, name, value.String())
+}
+
+func appendRangeConfigLine(lines, name string, value *config.Uint16Range) string {
+	if value == nil {
+		return lines
+	}
+
+	return fmt.Sprintf("%s\n%s = %s", lines, name, value.String())
 }

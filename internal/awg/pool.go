@@ -36,26 +36,103 @@ func rollbackFailure(operationErr, rollbackErr error) error {
 	}
 }
 
+type poolOperations interface {
+	createInterface(string) error
+	destroyInterface(string) error
+	configureDevice(string, int, Profile, [32]byte) error
+	configureInterfaceNetwork(string, string) error
+	addPeerToInterface(string, [32]byte, *[32]byte, string) error
+	removePeerFromInterface(string, [32]byte, *[32]byte, string) error
+	removePeerOnlyFromInterface(string, [32]byte) error
+	cleanupPeerAfterFailedAdd(string, [32]byte, string) (bool, error)
+	restorePeerAndRoute(string, [32]byte, *[32]byte, string) error
+	replacePeerRoute(string, string) error
+	addMasquerade(string, string) error
+	removeMasquerade(string, string) error
+}
+
+type hostPoolOperations struct{}
+
+func (hostPoolOperations) createInterface(ifName string) error {
+	return createInterface(ifName)
+}
+
+func (hostPoolOperations) destroyInterface(ifName string) error {
+	return destroyInterface(ifName)
+}
+
+func (hostPoolOperations) configureDevice(ifName string, port int, profile Profile, privateKey [32]byte) error {
+	return configureDevice(ifName, port, profile, privateKey)
+}
+
+func (hostPoolOperations) configureInterfaceNetwork(ifName, address string) error {
+	return configureInterfaceNetwork(ifName, address)
+}
+
+func (hostPoolOperations) addPeerToInterface(ifName string, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
+	return addPeerToInterface(ifName, publicKey, presharedKey, allowedIP)
+}
+
+func (hostPoolOperations) removePeerFromInterface(ifName string, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
+	return removePeerFromInterface(ifName, publicKey, presharedKey, allowedIP)
+}
+
+func (hostPoolOperations) removePeerOnlyFromInterface(ifName string, publicKey [32]byte) error {
+	return removePeerOnlyFromInterface(ifName, publicKey)
+}
+
+func (hostPoolOperations) cleanupPeerAfterFailedAdd(ifName string, publicKey [32]byte, allowedIP string) (bool, error) {
+	return cleanupPeerAfterFailedAdd(ifName, publicKey, allowedIP)
+}
+
+func (hostPoolOperations) restorePeerAndRoute(ifName string, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
+	return restorePeerAndRoute(ifName, publicKey, presharedKey, allowedIP)
+}
+
+func (hostPoolOperations) replacePeerRoute(ifName, allowedIP string) error {
+	return replacePeerRoute(ifName, allowedIP)
+}
+
+func (hostPoolOperations) addMasquerade(network, outIface string) error {
+	output, err := exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
+		"-s", network, "-o", outIface, "-j", "MASQUERADE").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("add masquerade rule: %s: %w", string(output), err)
+	}
+
+	return nil
+}
+
+func (hostPoolOperations) removeMasquerade(network, outIface string) error {
+	if err := exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING",
+		"-s", network, "-o", outIface, "-j", "MASQUERADE").Run(); err != nil {
+		return fmt.Errorf("remove masquerade rule: %w", err)
+	}
+
+	return nil
+}
+
 type iface struct {
 	ifName    string
 	port      int
-	params    AWGParams
+	profile   Profile
 	peerCount int
 	peerPSKs  map[[32]byte]*[32]byte
 }
 
 type Pool struct {
-	mu        sync.Mutex
-	cfg       *config.Config
-	privKey   [32]byte
-	pubKey    [32]byte
-	outIface  string
-	ifaces    map[string]*iface
-	orphans   map[string]int
-	usedPorts map[int]bool
-	nextIndex int
-	maxIfaces int
-	masqAdded bool
+	mu         sync.Mutex
+	cfg        *config.Config
+	privKey    [32]byte
+	pubKey     [32]byte
+	outIface   string
+	ifaces     map[ProfileKey]*iface
+	orphans    map[string]int
+	usedPorts  map[int]bool
+	nextIndex  int
+	maxIfaces  int
+	masqAdded  bool
+	operations poolOperations
 }
 
 func NewPool(cfg *config.Config, privateKey [32]byte, maxIfaces int) (*Pool, error) {
@@ -71,14 +148,15 @@ func NewPool(cfg *config.Config, privateKey [32]byte, maxIfaces int) (*Pool, err
 	log.Printf("using outbound interface: %s", outIface)
 
 	pool := &Pool{
-		cfg:       cfg,
-		privKey:   privateKey,
-		pubKey:    PublicKeyFromPrivate(privateKey),
-		outIface:  outIface,
-		ifaces:    make(map[string]*iface),
-		orphans:   make(map[string]int),
-		usedPorts: make(map[int]bool),
-		maxIfaces: maxIfaces,
+		cfg:        cfg,
+		privKey:    privateKey,
+		pubKey:     PublicKeyFromPrivate(privateKey),
+		outIface:   outIface,
+		ifaces:     make(map[ProfileKey]*iface),
+		orphans:    make(map[string]int),
+		usedPorts:  make(map[int]bool),
+		maxIfaces:  maxIfaces,
+		operations: hostPoolOperations{},
 	}
 
 	if err := pool.ApplyLANIsolation(nil); err != nil {
@@ -88,13 +166,17 @@ func NewPool(cfg *config.Config, privateKey [32]byte, maxIfaces int) (*Pool, err
 	return pool, nil
 }
 
-func (p *Pool) AddPeer(params AWGParams, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
+func (p *Pool) AddPeer(profile Profile, requestedPort int, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	key := params.Key()
+	if !profile.valid() {
+		return errors.New("invalid profile")
+	}
 
-	ifc, err := p.getOrCreateInterface(params)
+	key := profile.Key()
+
+	ifc, err := p.getOrCreateInterface(profile, requestedPort)
 	if err != nil {
 		return fmt.Errorf("get or create interface: %w", err)
 	}
@@ -106,10 +188,10 @@ func (p *Pool) AddPeer(params AWGParams, publicKey [32]byte, presharedKey *[32]b
 	return nil
 }
 
-func (p *Pool) addPeerLocked(key string, ifc *iface, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
-	if err := addPeerToInterface(ifc.ifName, publicKey, presharedKey, allowedIP); err != nil {
+func (p *Pool) addPeerLocked(key ProfileKey, ifc *iface, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
+	if err := p.operations.addPeerToInterface(ifc.ifName, publicKey, presharedKey, allowedIP); err != nil {
 		wasEmpty := ifc.peerCount == 0
-		peerRemoved, cleanupErr := cleanupPeerAfterFailedAdd(ifc.ifName, publicKey, allowedIP)
+		peerRemoved, cleanupErr := p.operations.cleanupPeerAfterFailedAdd(ifc.ifName, publicKey, allowedIP)
 
 		if wasEmpty {
 			destroyErr := p.destroyTrackedInterfaceLocked(key, ifc)
@@ -173,8 +255,8 @@ func untrackPeerLocked(ifc *iface, publicKey [32]byte) bool {
 	return true
 }
 
-func (p *Pool) destroyTrackedInterfaceLocked(key string, ifc *iface) error {
-	if err := destroyInterface(ifc.ifName); err != nil {
+func (p *Pool) destroyTrackedInterfaceLocked(key ProfileKey, ifc *iface) error {
+	if err := p.operations.destroyInterface(ifc.ifName); err != nil {
 		return err
 	}
 
@@ -189,15 +271,19 @@ func (p *Pool) trackOrphanInterfaceLocked(ifName string, port int) {
 	p.usedPorts[port] = true
 }
 
-func (p *Pool) RemovePeer(params AWGParams, publicKey [32]byte, allowedIP string) error {
+func (p *Pool) RemovePeer(profile Profile, publicKey [32]byte, allowedIP string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	key := params.Key()
+	if !profile.valid() {
+		return errors.New("invalid profile")
+	}
+
+	key := profile.Key()
 
 	ifc, ok := p.ifaces[key]
 	if !ok {
-		return fmt.Errorf("no interface for params key %s", key)
+		return errors.New("no interface for profile")
 	}
 	if ifc.peerCount <= 0 {
 		return errors.New("invalid peer accounting for existing profile")
@@ -208,7 +294,7 @@ func (p *Pool) RemovePeer(params AWGParams, publicKey [32]byte, allowedIP string
 		return errors.New("peer is not tracked on existing profile")
 	}
 
-	if err := removePeerFromInterface(ifc.ifName, publicKey, presharedKey, allowedIP); err != nil {
+	if err := p.operations.removePeerFromInterface(ifc.ifName, publicKey, presharedKey, allowedIP); err != nil {
 		return fmt.Errorf("remove peer from interface: %w", err)
 	}
 
@@ -218,7 +304,7 @@ func (p *Pool) RemovePeer(params AWGParams, publicKey [32]byte, allowedIP string
 		log.Printf("destroying interface %s (no peers left)", ifc.ifName)
 		if err := p.destroyTrackedInterfaceLocked(key, ifc); err != nil {
 			destroyErr := fmt.Errorf("destroy empty interface: %w", err)
-			restoreErr := restorePeerAndRoute(ifc.ifName, publicKey, presharedKey, allowedIP)
+			restoreErr := p.operations.restorePeerAndRoute(ifc.ifName, publicKey, presharedKey, allowedIP)
 			trackPeerLocked(ifc, publicKey, presharedKey)
 
 			if restoreErr != nil {
@@ -232,12 +318,16 @@ func (p *Pool) RemovePeer(params AWGParams, publicKey [32]byte, allowedIP string
 	return nil
 }
 
-func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
+func (p *Pool) MigratePeer(oldProfile, newProfile Profile, newRequestedPort int, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	oldKey := oldParams.Key()
-	newKey := newParams.Key()
+	if !oldProfile.valid() || !newProfile.valid() {
+		return errors.New("invalid profile")
+	}
+
+	oldKey := oldProfile.Key()
+	newKey := newProfile.Key()
 
 	oldIfc, ok := p.ifaces[oldKey]
 	if !ok {
@@ -252,25 +342,23 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, p
 		return errors.New("peer is not tracked on existing profile")
 	}
 
-	restoreParams := oldParams
-	restoreParams.Port = oldIfc.port
-
 	if oldKey == newKey {
-		if oldParams.Port == newParams.Port {
+		if oldProfile.Params().Port == newRequestedPort {
 			return nil
 		}
 		if oldIfc.peerCount > 1 {
 			return ErrPortShared
 		}
 	} else if newIfc, exists := p.ifaces[newKey]; exists {
-		if err := validateExistingInterfacePort(newIfc, newParams.Port); err != nil {
+		if err := validateExistingInterfacePort(newIfc, newRequestedPort); err != nil {
 			return err
 		}
 	}
 
-	// Last peer on old interface: remove first to free the port
 	if oldIfc.peerCount == 1 {
-		if err := removePeerFromInterface(oldIfc.ifName, publicKey, oldPresharedKey, allowedIP); err != nil {
+		oldPort := oldIfc.port
+
+		if err := p.operations.removePeerFromInterface(oldIfc.ifName, publicKey, oldPresharedKey, allowedIP); err != nil {
 			return fmt.Errorf("remove peer from old interface: %w", err)
 		}
 
@@ -279,7 +367,7 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, p
 		log.Printf("destroying interface %s (no peers left)", oldIfc.ifName)
 		if err := p.destroyTrackedInterfaceLocked(oldKey, oldIfc); err != nil {
 			destroyErr := fmt.Errorf("destroy old interface: %w", err)
-			restoreErr := restorePeerAndRoute(oldIfc.ifName, publicKey, oldPresharedKey, allowedIP)
+			restoreErr := p.operations.restorePeerAndRoute(oldIfc.ifName, publicKey, oldPresharedKey, allowedIP)
 			trackPeerLocked(oldIfc, publicKey, oldPresharedKey)
 
 			if restoreErr != nil {
@@ -289,10 +377,10 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, p
 			return destroyErr
 		}
 
-		newIfc, err := p.getOrCreateInterface(newParams)
+		newIfc, err := p.getOrCreateInterface(newProfile, newRequestedPort)
 		if err != nil {
 			operationErr := fmt.Errorf("get or create interface: %w", err)
-			if rollbackErr := p.rollbackPeer(restoreParams, publicKey, oldPresharedKey, allowedIP); rollbackErr != nil {
+			if rollbackErr := p.rollbackPeer(oldProfile, oldPort, publicKey, oldPresharedKey, allowedIP); rollbackErr != nil {
 				return rollbackFailure(operationErr, fmt.Errorf("restore old peer: %w", rollbackErr))
 			}
 
@@ -301,7 +389,7 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, p
 
 		if err := p.addPeerLocked(newKey, newIfc, publicKey, presharedKey, allowedIP); err != nil {
 			operationErr := fmt.Errorf("add peer to new interface: %w", err)
-			if rollbackErr := p.rollbackPeer(restoreParams, publicKey, oldPresharedKey, allowedIP); rollbackErr != nil {
+			if rollbackErr := p.rollbackPeer(oldProfile, oldPort, publicKey, oldPresharedKey, allowedIP); rollbackErr != nil {
 				return rollbackFailure(operationErr, fmt.Errorf("restore old peer: %w", rollbackErr))
 			}
 
@@ -311,20 +399,19 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, p
 		return nil
 	}
 
-	// Multiple peers on old interface: add to new first, then remove from old
-	newIfc, err := p.getOrCreateInterface(newParams)
+	newIfc, err := p.getOrCreateInterface(newProfile, newRequestedPort)
 	if err != nil {
 		return fmt.Errorf("get or create interface: %w", err)
 	}
 
 	if err := p.addPeerLocked(newKey, newIfc, publicKey, presharedKey, allowedIP); err != nil {
-		if routeErr := replacePeerRoute(oldIfc.ifName, allowedIP); routeErr != nil {
+		if routeErr := p.operations.replacePeerRoute(oldIfc.ifName, allowedIP); routeErr != nil {
 			return rollbackFailure(err, fmt.Errorf("restore old route after failed peer add: %w", routeErr))
 		}
 		return err
 	}
 
-	if err := removePeerOnlyFromInterface(oldIfc.ifName, publicKey); err != nil {
+	if err := p.operations.removePeerOnlyFromInterface(oldIfc.ifName, publicKey); err != nil {
 		operationErr := fmt.Errorf("remove peer from old interface: %w", err)
 		if rollbackErr := p.rollbackSharedMigration(oldIfc, newIfc, newKey, publicKey, oldPresharedKey, allowedIP); rollbackErr != nil {
 			return rollbackFailure(operationErr, fmt.Errorf("rollback shared peer migration: %w", rollbackErr))
@@ -340,7 +427,7 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, p
 		if err := p.destroyTrackedInterfaceLocked(oldKey, oldIfc); err != nil {
 			destroyErr := fmt.Errorf("destroy old interface: %w", err)
 			rollbackNewErr := p.rollbackNewPeerLocked(newIfc, newKey, publicKey, allowedIP)
-			restoreOldErr := restorePeerAndRoute(oldIfc.ifName, publicKey, oldPresharedKey, allowedIP)
+			restoreOldErr := p.operations.restorePeerAndRoute(oldIfc.ifName, publicKey, oldPresharedKey, allowedIP)
 			trackPeerLocked(oldIfc, publicKey, oldPresharedKey)
 
 			var rollbackErrs []error
@@ -361,27 +448,27 @@ func (p *Pool) MigratePeer(oldParams, newParams AWGParams, publicKey [32]byte, p
 	return nil
 }
 
-func (p *Pool) rollbackSharedMigration(oldIfc, newIfc *iface, newKey string, publicKey [32]byte, oldPresharedKey *[32]byte, allowedIP string) error {
+func (p *Pool) rollbackSharedMigration(oldIfc, newIfc *iface, newKey ProfileKey, publicKey [32]byte, oldPresharedKey *[32]byte, allowedIP string) error {
 	var errs []error
 
 	if err := p.rollbackNewPeerLocked(newIfc, newKey, publicKey, allowedIP); err != nil {
 		errs = append(errs, fmt.Errorf("remove new peer: %w", err))
 	}
 
-	if err := restorePeerAndRoute(oldIfc.ifName, publicKey, oldPresharedKey, allowedIP); err != nil {
+	if err := p.operations.restorePeerAndRoute(oldIfc.ifName, publicKey, oldPresharedKey, allowedIP); err != nil {
 		errs = append(errs, fmt.Errorf("restore old peer: %w", err))
 	}
 
 	return errors.Join(errs...)
 }
 
-func (p *Pool) rollbackNewPeerLocked(newIfc *iface, newKey string, publicKey [32]byte, allowedIP string) error {
+func (p *Pool) rollbackNewPeerLocked(newIfc *iface, newKey ProfileKey, publicKey [32]byte, allowedIP string) error {
 	presharedKey, ok := newIfc.peerPSKs[publicKey]
 	if !ok {
 		return errors.New("new peer is not tracked during rollback")
 	}
 
-	if err := removePeerFromInterface(newIfc.ifName, publicKey, presharedKey, allowedIP); err != nil {
+	if err := p.operations.removePeerFromInterface(newIfc.ifName, publicKey, presharedKey, allowedIP); err != nil {
 		return err
 	}
 
@@ -396,10 +483,10 @@ func (p *Pool) rollbackNewPeerLocked(newIfc *iface, newKey string, publicKey [32
 	return nil
 }
 
-func (p *Pool) rollbackPeer(params AWGParams, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
-	key := params.Key()
+func (p *Pool) rollbackPeer(profile Profile, requestedPort int, publicKey [32]byte, presharedKey *[32]byte, allowedIP string) error {
+	key := profile.Key()
 
-	ifc, err := p.getOrCreateInterface(params)
+	ifc, err := p.getOrCreateInterface(profile, requestedPort)
 	if err != nil {
 		return fmt.Errorf("recreate interface: %w", err)
 	}
@@ -411,15 +498,17 @@ func (p *Pool) rollbackPeer(params AWGParams, publicKey [32]byte, presharedKey *
 	return nil
 }
 
-func (p *Pool) PortForParams(params AWGParams) (int, error) {
+func (p *Pool) PortForProfile(profile Profile) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	key := params.Key()
+	if !profile.valid() {
+		return 0, errors.New("invalid profile")
+	}
 
-	ifc, ok := p.ifaces[key]
+	ifc, ok := p.ifaces[profile.Key()]
 	if !ok {
-		return 0, fmt.Errorf("no interface for params key %s", key)
+		return 0, errors.New("no interface for profile")
 	}
 
 	return ifc.port, nil
@@ -440,7 +529,7 @@ func (p *Pool) Close() {
 	}
 
 	for ifName, port := range p.orphans {
-		if err := destroyInterface(ifName); err != nil {
+		if err := p.operations.destroyInterface(ifName); err != nil {
 			log.Printf("warning: failed to destroy orphan interface during pool close: interface=%s", ifName)
 			continue
 		}
@@ -450,8 +539,7 @@ func (p *Pool) Close() {
 	}
 
 	if p.masqAdded && len(p.ifaces) == 0 && len(p.orphans) == 0 {
-		if err := exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING",
-			"-s", p.cfg.Network().String(), "-o", p.outIface, "-j", "MASQUERADE").Run(); err != nil {
+		if err := p.operations.removeMasquerade(p.cfg.Network().String(), p.outIface); err != nil {
 			log.Printf("warning: failed to remove MASQUERADE rule: %v", err)
 		} else {
 			p.masqAdded = false
@@ -472,18 +560,22 @@ func (p *Pool) InterfaceNames() []string {
 	return names
 }
 
-func (p *Pool) getOrCreateInterface(params AWGParams) (*iface, error) {
-	key := params.Key()
+func (p *Pool) getOrCreateInterface(profile Profile, requestedPort int) (*iface, error) {
+	if !profile.valid() {
+		return nil, errors.New("invalid profile")
+	}
+
+	key := profile.Key()
 
 	if ifc, ok := p.ifaces[key]; ok {
-		if err := validateExistingInterfacePort(ifc, params.Port); err != nil {
+		if err := validateExistingInterfacePort(ifc, requestedPort); err != nil {
 			return nil, err
 		}
 
 		return ifc, nil
 	}
 
-	port := params.Port
+	port := requestedPort
 	if port != 0 {
 		resolvedPort, err := p.resolvePort(port)
 		if err != nil {
@@ -510,13 +602,13 @@ func (p *Pool) getOrCreateInterface(params AWGParams) (*iface, error) {
 
 	p.nextIndex++
 
-	if err := createInterface(ifName); err != nil {
+	if err := p.operations.createInterface(ifName); err != nil {
 		return nil, fmt.Errorf("create interface %s: %w", ifName, err)
 	}
 
-	if err := configureDevice(ifName, port, params, p.privKey); err != nil {
+	if err := p.operations.configureDevice(ifName, port, profile, p.privKey); err != nil {
 		operationErr := fmt.Errorf("configure device %s: %w", ifName, err)
-		if cleanupErr := destroyInterface(ifName); cleanupErr != nil {
+		if cleanupErr := p.operations.destroyInterface(ifName); cleanupErr != nil {
 			p.trackOrphanInterfaceLocked(ifName, port)
 			return nil, rollbackFailure(operationErr, fmt.Errorf("destroy incomplete interface: %w", cleanupErr))
 		}
@@ -524,9 +616,9 @@ func (p *Pool) getOrCreateInterface(params AWGParams) (*iface, error) {
 		return nil, operationErr
 	}
 
-	if err := configureInterfaceNetwork(ifName, p.cfg.Address); err != nil {
+	if err := p.operations.configureInterfaceNetwork(ifName, p.cfg.Address); err != nil {
 		operationErr := fmt.Errorf("configure network %s: %w", ifName, err)
-		if cleanupErr := destroyInterface(ifName); cleanupErr != nil {
+		if cleanupErr := p.operations.destroyInterface(ifName); cleanupErr != nil {
 			p.trackOrphanInterfaceLocked(ifName, port)
 			return nil, rollbackFailure(operationErr, fmt.Errorf("destroy incomplete interface: %w", cleanupErr))
 		}
@@ -535,11 +627,9 @@ func (p *Pool) getOrCreateInterface(params AWGParams) (*iface, error) {
 	}
 
 	if !p.masqAdded {
-		output, err := exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
-			"-s", p.cfg.Network().String(), "-o", p.outIface, "-j", "MASQUERADE").CombinedOutput()
-		if err != nil {
-			operationErr := fmt.Errorf("add masquerade rule: %s: %w", string(output), err)
-			if cleanupErr := destroyInterface(ifName); cleanupErr != nil {
+		if err := p.operations.addMasquerade(p.cfg.Network().String(), p.outIface); err != nil {
+			operationErr := fmt.Errorf("add masquerade rule: %w", err)
+			if cleanupErr := p.operations.destroyInterface(ifName); cleanupErr != nil {
 				p.trackOrphanInterfaceLocked(ifName, port)
 				return nil, rollbackFailure(operationErr, fmt.Errorf("destroy incomplete interface: %w", cleanupErr))
 			}
@@ -556,7 +646,7 @@ func (p *Pool) getOrCreateInterface(params AWGParams) (*iface, error) {
 	ifc := &iface{
 		ifName:   ifName,
 		port:     port,
-		params:   params,
+		profile:  profile,
 		peerPSKs: make(map[[32]byte]*[32]byte),
 	}
 
