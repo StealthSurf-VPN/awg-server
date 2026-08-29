@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-08-29
+
 - Added mixed AmneziaWG 2.0/3.1 client management with explicit per-client
   protocol migration, canonical protocol metadata, and 3.1-by-default creates.
 - Added private persisted 3.1 header-protection-key state, version-aware
